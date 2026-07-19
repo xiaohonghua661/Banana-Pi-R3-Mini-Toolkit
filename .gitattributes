@@ -1,0 +1,10 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+fan-dashboard/router/etc/init.d/* text eol=lf
+fan-dashboard/router/usr/sbin/* text eol=lf
+docs/官方资料/** -text
+*.png binary
+*.jpg binary
+*.pdf binary

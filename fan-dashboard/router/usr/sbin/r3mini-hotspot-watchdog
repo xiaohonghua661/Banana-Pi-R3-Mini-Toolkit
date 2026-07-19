@@ -1,0 +1,83 @@
+#!/bin/sh
+
+TAG='r3mini-hotspot'
+CONFIG='r3mini_hotspot.main'
+
+cfg() { uci -q get "$CONFIG.$1"; }
+
+is_uint() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+
+enabled() { [ "$(cfg enabled)" = 1 ]; }
+
+scan_channel() {
+	local target="$1" raw keys item found channel
+	. /usr/share/libubox/jshn.sh
+	raw="$(ubus call iwinfo scan '{"device":"phy1-ap0"}' 2>/dev/null)" || return 1
+	json_init
+	json_load "$raw" || return 1
+	json_select results || return 1
+	json_get_keys keys
+	for item in $keys; do
+		json_select "$item"
+		json_get_var found ssid
+		json_get_var channel channel
+		json_select ..
+		if [ "$found" = "$target" ]; then
+			case "$channel" in ''|*[!0-9]*) return 1 ;; esac
+			printf '%s' "$channel"
+			return 0
+		fi
+	done
+	return 1
+}
+
+wwan_up() {
+	[ "$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = true ]
+}
+
+interval="$(cfg check_interval)"; is_uint "$interval" || interval=20
+limit="$(cfg failure_limit)"; is_uint "$limit" || limit=3
+cooldown="$(cfg cooldown)"; is_uint "$cooldown" || cooldown=180
+radio="$(cfg radio)"; [ -n "$radio" ] || radio=radio1
+
+failures=0
+reconnect_rounds=0
+last_reconf=0
+while :; do
+	if ! enabled; then
+		failures=0
+		sleep "$interval"
+		continue
+	fi
+
+	if wwan_up; then
+		failures=0
+		reconnect_rounds=0
+	else
+		failures=$((failures + 1))
+		if [ "$failures" -ge "$limit" ]; then
+			logger -t "$TAG" "wwan unavailable; requesting reconnect"
+			ifup wwan >/dev/null 2>&1 || true
+			failures=0
+			reconnect_rounds=$((reconnect_rounds + 1))
+			now="$(date +%s)"
+			if [ "$reconnect_rounds" -ge 3 ] && [ $((now - last_reconf)) -ge "$cooldown" ]; then
+				ssid="$(uci -q get wireless.r3mini_phone_sta.ssid)"
+				channel="$(scan_channel "$ssid" || true)"
+				if [ -n "$channel" ] && [ "$channel" != "$(uci -q get wireless.$radio.channel)" ]; then
+					logger -t "$TAG" "hotspot moved to channel $channel; aligning $radio"
+					uci set "wireless.$radio.channel=$channel"
+					uci set "$CONFIG.target_channel=$channel"
+					uci commit wireless
+					uci commit r3mini_hotspot
+				else
+					logger -t "$TAG" "wwan reconnect did not recover; reconfiguring $radio"
+				fi
+				/sbin/wifi reconf "$radio" >/dev/null 2>&1 || logger -t "$TAG" "wireless reconfiguration failed"
+				last_reconf="$now"
+				reconnect_rounds=0
+			fi
+		fi
+	fi
+	sleep "$interval"
+done

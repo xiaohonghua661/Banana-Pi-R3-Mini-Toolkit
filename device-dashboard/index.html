@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>R3 Mini · 设备指挥台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --night: #0c1420;
+      --night-2: #101d2c;
+      --ink: #e9f0f4;
+      --muted: #8ca0ae;
+      --line: rgba(189, 216, 225, .13);
+      --card: rgba(18, 34, 49, .86);
+      --cyan: #5be1d1;
+      --blue: #67a9ff;
+      --amber: #ffc35c;
+      --coral: #ff8067;
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-width: 320px;
+      margin: 0;
+      color: var(--ink);
+      font-family: Bahnschrift, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at 5% 0%, rgba(91,225,209,.14), transparent 26%),
+        radial-gradient(circle at 96% 16%, rgba(103,169,255,.13), transparent 25%),
+        linear-gradient(115deg, rgba(255,255,255,.025) 1px, transparent 1px),
+        var(--night);
+      background-size: auto, auto, 31px 31px, auto;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .shell { width: min(1540px, calc(100% - 32px)); margin: auto; padding: 24px 0 46px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 13px; }
+    .mark { width: 34px; height: 34px; border: 2px solid var(--cyan); border-radius: 10px 10px 10px 2px; display: grid; place-items: center; color: var(--cyan); font: 800 15px Georgia, serif; box-shadow: 0 0 24px rgba(91,225,209,.25); }
+    .brand strong { display: block; font-size: 17px; letter-spacing: .02em; }
+    .brand small, .eyebrow { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .17em; text-transform: uppercase; }
+    .live { display: inline-flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 99px; color: #cfe7e8; font-size: 12px; }
+    .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 14px var(--cyan); }
+    .hero { display: grid; grid-template-columns: 1.22fr .78fr; gap: 16px; }
+    .panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); box-shadow: 0 22px 58px rgba(0,0,0,.2); backdrop-filter: blur(12px); }
+    .hero-main { min-height: 252px; padding: 29px; position: relative; overflow: hidden; }
+    .hero-main::after { content: ""; position: absolute; right: -40px; bottom: -116px; width: 305px; aspect-ratio: 1; border: 1px solid rgba(91,225,209,.2); border-radius: 50%; box-shadow: 0 0 0 35px rgba(91,225,209,.035), 0 0 0 70px rgba(91,225,209,.018); }
+    h1 { max-width: 630px; margin: 8px 0 10px; font: 400 clamp(30px, 4vw, 50px)/1.04 Georgia, "Noto Serif SC", serif; letter-spacing: -.04em; }
+    .sub { max-width: 535px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .signal-row { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 9px; margin-top: 27px; }
+    .signal { min-width: 124px; padding: 10px 12px; border-left: 2px solid var(--cyan); background: rgba(91,225,209,.06); }
+    .signal b { display: block; font-size: 18px; }
+    .signal span { color: var(--muted); font-size: 11px; }
+    .system-grid { display: grid; grid-template-columns: repeat(2, 1fr); overflow: hidden; }
+    .system-grid article { min-height: 126px; padding: 20px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .system-grid article:nth-child(2n) { border-right: 0; }
+    .system-grid article:nth-child(n+3) { border-bottom: 0; }
+    .value { display: block; margin: 11px 0 5px; font: 400 31px/1 Georgia, serif; }
+    .meter { height: 4px; overflow: hidden; background: rgba(255,255,255,.08); border-radius: 99px; }
+    .meter i { display: block; height: 100%; width: var(--meter); border-radius: inherit; background: var(--tone, var(--cyan)); }
+    .tabs { display: flex; gap: 4px; margin: 21px 0 14px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; width: fit-content; }
+    .tabs button { border: 0; border-radius: 8px; background: transparent; padding: 9px 13px; color: var(--muted); cursor: pointer; font-size: 12px; }
+    .tabs button.active { background: rgba(91,225,209,.16); color: var(--cyan); }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.22fr) minmax(320px, .78fr); gap: 16px; }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 21px 22px 16px; border-bottom: 1px solid var(--line); }
+    h2 { margin: 4px 0 0; font-size: 20px; letter-spacing: -.02em; }
+    .tools { display: flex; align-items: center; gap: 8px; }
+    .search { width: 174px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; outline: 0; background: rgba(0,0,0,.16); color: var(--ink); font-size: 12px; }
+    .search:focus { border-color: var(--cyan); }
+    .icon-btn { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; background: transparent; cursor: pointer; font-size: 12px; }
+    .icon-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    .device-list { padding: 8px 13px 14px; }
+    .device { display: grid; grid-template-columns: 38px minmax(130px, 1fr) 108px 110px 94px 74px; align-items: center; gap: 12px; min-height: 70px; padding: 10px 9px; border-bottom: 1px solid var(--line); transition: background .18s ease; }
+    .device:last-child { border: 0; }
+    .device:hover, .device.selected { background: rgba(103,169,255,.075); }
+    .avatar { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; color: var(--cyan); background: rgba(91,225,209,.12); font: 700 13px Georgia, serif; }
+    .name { font-size: 13px; font-weight: 800; }
+    .meta { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .tag { width: fit-content; padding: 5px 7px; border-radius: 99px; background: rgba(103,169,255,.1); color: #b9d4ff; font-size: 10px; }
+    .tag.offline { color: #ffcfc5; background: rgba(255,128,103,.12); }
+    .rate { font: 400 19px Georgia, serif; white-space: nowrap; }
+    .rate small { color: var(--muted); font: 10px Bahnschrift, sans-serif; }
+    .toggle { justify-self: end; width: 42px; height: 23px; padding: 2px; border: 0; border-radius: 99px; background: rgba(255,255,255,.13); cursor: pointer; }
+    .toggle i { display: block; width: 19px; height: 19px; border-radius: 50%; background: #c7d0d4; transition: transform .18s ease, background .18s ease; }
+    .toggle.on { background: rgba(91,225,209,.32); }
+    .toggle.on i { transform: translateX(19px); background: var(--cyan); }
+    .traffic-body { padding: 19px 22px 22px; }
+    .focus-device { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-bottom: 18px; }
+    .focus-device strong { font-size: 16px; }
+    .focus-device span { color: var(--muted); font-size: 11px; }
+    .chart { width: 100%; height: 183px; display: block; }
+    .chart text { font-family: Bahnschrift, "Noto Sans SC", sans-serif; }
+    .legend { display: flex; gap: 15px; margin-top: 9px; color: var(--muted); font-size: 11px; }
+    .legend i { display: inline-block; width: 16px; height: 3px; margin-right: 6px; vertical-align: middle; background: var(--cyan); }
+    .legend i.up { background: var(--amber); }
+    .health { padding: 4px 22px 18px; }
+    .health-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 15px 0; border-bottom: 1px solid var(--line); }
+    .health-row:last-child { border: 0; }
+    .health-row b { display: block; font-size: 13px; }
+    .health-row small { color: var(--muted); font-size: 11px; }
+    .health-row span { align-self: center; color: var(--cyan); font: 400 20px Georgia, serif; }
+    .empty { display: none; padding: 34px 15px; text-align: center; color: var(--muted); font-size: 13px; }
+    .footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 15px; color: #68808c; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    @media (max-width: 1040px) { .hero, .workspace { grid-template-columns: 1fr; } .system-grid article { min-height: 102px; } }
+    @media (max-width: 720px) { .shell { width: min(100% - 18px, 1540px); padding-top: 14px; } .topbar { align-items: flex-start; } .live { display: none; } .hero-main { min-height: auto; padding: 23px; } .system-grid { grid-template-columns: repeat(4, 1fr); } .system-grid article { min-height: 104px; padding: 14px; } .system-grid .value { font-size: 24px; } .panel-head { align-items: flex-start; flex-direction: column; } .tools { width: 100%; } .search { width: 100%; } .device { grid-template-columns: 36px minmax(0,1fr) auto; gap: 9px; } .device .tag, .device .rate { display: none; } .toggle { grid-column: 3; grid-row: 1 / span 2; } .footer { flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="mark">R3</span><div><strong>设备指挥台</strong><small>BPI-R3 Mini / LAN OBSERVATORY</small></div></div>
+      <span class="live"><i></i>演示数据 · 5 秒刷新</span>
+    </header>
+
+    <section class="hero">
+      <article class="panel hero-main">
+        <div class="eyebrow">Network overview</div>
+        <h1>把每一台设备，<br>放进看得见的网络里。</h1>
+        <p class="sub">集中查看在线终端、实时吞吐与路由器健康度。当前为前端演示模式，暂停开关仅改变本页状态，尚未执行任何路由器操作。</p>
+        <div class="signal-row">
+          <div class="signal"><b id="onlineCount">6</b><span>当前在线设备</span></div>
+          <div class="signal"><b id="totalTraffic">18.4 Mbps</b><span>LAN 总吞吐</span></div>
+          <div class="signal"><b>31 天</b><span>路由器运行时间</span></div>
+        </div>
+      </article>
+      <aside class="panel system-grid" aria-label="路由器状态">
+        <article><div class="eyebrow">CPU load</div><span class="value">14.8%</span><div class="meter"><i style="--meter:14.8%"></i></div></article>
+        <article><div class="eyebrow">内存</div><span class="value">18.0%</span><div class="meter"><i style="--meter:18%;--tone:var(--blue)"></i></div></article>
+        <article><div class="eyebrow">CPU 温度</div><span class="value">38.4°C</span><div class="meter"><i style="--meter:42%;--tone:var(--amber)"></i></div></article>
+        <article><div class="eyebrow">WAN 延迟</div><span class="value">22 ms</span><div class="meter"><i style="--meter:22%;--tone:var(--cyan)"></i></div></article>
+      </aside>
+    </section>
+
+    <nav class="tabs" aria-label="仪表盘内容"><button class="active" data-tab="devices">设备管理</button><button data-tab="traffic">流量视图</button><button data-tab="health">路由器监控</button></nav>
+
+    <section class="workspace">
+      <article class="panel">
+        <header class="panel-head"><div><div class="eyebrow">Client inventory</div><h2>局域网设备</h2></div><div class="tools"><input class="search" id="search" type="search" placeholder="搜索名称、IP 或 MAC"><button class="icon-btn" id="sortTraffic" type="button">按流量排序</button></div></header>
+        <div class="device-list" id="deviceList"></div><div class="empty" id="empty">没有匹配的设备</div>
+      </article>
+      <aside class="panel">
+        <header class="panel-head"><div><div class="eyebrow">Selected client</div><h2>单设备流量</h2></div><span class="tag" id="selectedType">家庭终端</span></header>
+        <div class="traffic-body">
+          <div class="focus-device"><div><strong id="selectedName">客厅电视</strong><span id="selectedMeta">192.168.101.88 · Wi‑Fi 5 GHz</span></div><div class="rate" id="selectedRate">8.6 <small>Mbps</small></div></div>
+          <svg class="chart" id="chart" viewBox="0 0 420 185" role="img" aria-label="选中设备的下载和上传流量曲线"></svg>
+          <div class="legend"><span><i></i>下载</span><span><i class="up"></i>上传</span></div>
+        </div>
+        <header class="panel-head"><div><div class="eyebrow">Router health</div><h2>中文运行监控</h2></div></header>
+        <div class="health">
+          <div class="health-row"><div><b>网络出口</b><small>WAN 已连通 / IPv4 与 IPv6</small></div><span>正常</span></div>
+          <div class="health-row"><div><b>无线终端</b><small>2.4 GHz 与 5 GHz</small></div><span id="wirelessCount">6 台</span></div>
+          <div class="health-row"><div><b>存储空间</b><small>overlay 使用率</small></div><span>23%</span></div>
+        </div>
+      </aside>
+    </section>
+    <footer class="footer"><span>DEMO · 尚未连接 LuCI / nlbwmon 数据源</span><span id="updated">最后刷新：--</span></footer>
+  </main>
+  <script>
+    const devices = [
+      { id: 1, name: '客厅电视', ip: '192.168.101.88', mac: '68:AB:BC:19:41:0A', type: '影音设备', link: 'Wi‑Fi 5 GHz', rate: 8.6, online: true, enabled: true, tone: '视' },
+      { id: 2, name: 'Newland 的笔记本', ip: '192.168.101.35', mac: '5C:3A:45:92:14:7D', type: '工作设备', link: 'Wi‑Fi 5 GHz', rate: 3.1, online: true, enabled: true, tone: '笔' },
+      { id: 3, name: '书房台式机', ip: '192.168.101.50', mac: 'A0:36:BC:78:22:61', type: '有线设备', link: 'LAN 1 · 1 Gbps', rate: 2.7, online: true, enabled: true, tone: '台' },
+      { id: 4, name: '米家空气净化器', ip: '192.168.101.115', mac: '1C:90:FF:10:72:E8', type: '智能家居', link: 'Wi‑Fi 2.4 GHz', rate: .03, online: true, enabled: true, tone: '米' },
+      { id: 5, name: '卧室平板', ip: '192.168.101.102', mac: 'D8:7B:BC:CC:11:22', type: '移动设备', link: 'Wi‑Fi 5 GHz', rate: .8, online: true, enabled: true, tone: '平' },
+      { id: 6, name: '门口摄像头', ip: '192.168.101.121', mac: '34:CE:94:9B:17:35', type: '智能家居', link: 'Wi‑Fi 2.4 GHz', rate: 3.2, online: true, enabled: true, tone: '摄' },
+      { id: 7, name: '旧手机', ip: '192.168.101.67', mac: 'AC:67:84:E2:33:09', type: '移动设备', link: '上次在线 2 小时前', rate: 0, online: false, enabled: false, tone: '旧' }
+    ];
+    let selected = 1;
+    let sorting = false;
+    const $ = selector => document.querySelector(selector);
+    const rate = value => value >= 1 ? value.toFixed(1) + ' Mbps' : Math.round(value * 1000) + ' Kbps';
+    function activeDevices() { return devices.filter(device => device.online && device.enabled); }
+    function renderDevices() {
+      const query = $('#search').value.trim().toLowerCase();
+      const items = [...devices].sort((a, b) => sorting ? b.rate - a.rate : a.id - b.id).filter(d => `${d.name} ${d.ip} ${d.mac}`.toLowerCase().includes(query));
+      $('#deviceList').innerHTML = items.map(d => `<article class="device ${d.id === selected ? 'selected' : ''}" data-device="${d.id}">
+        <span class="avatar">${d.tone}</span><div><div class="name">${d.name}</div><div class="meta">${d.ip} · ${d.mac}</div></div>
+        <span class="tag ${d.online ? '' : 'offline'}">${d.online ? d.type : '离线'}</span><div><div class="rate">${rate(d.rate)}</div><div class="meta">${d.link}</div></div>
+        <button class="toggle ${d.enabled ? 'on' : ''}" data-toggle="${d.id}" aria-label="${d.name} 的网络开关"><i></i></button></article>`).join('');
+      $('#empty').style.display = items.length ? 'none' : 'block';
+      $('#onlineCount').textContent = activeDevices().length;
+      $('#wirelessCount').textContent = activeDevices().length + ' 台';
+      $('#totalTraffic').textContent = rate(activeDevices().reduce((sum, d) => sum + d.rate, 0));
+    }
+    function renderDetail() {
+      const d = devices.find(item => item.id === selected) || devices[0];
+      $('#selectedName').textContent = d.name;
+      $('#selectedMeta').textContent = `${d.ip} · ${d.link}`;
+      $('#selectedType').textContent = d.type;
+      $('#selectedRate').innerHTML = `${d.rate.toFixed(1)} <small>Mbps</small>`;
+      const download = [22, 18, 31, 25, 38, 45, 33, 52, 44, 65, 58, 73];
+      const upload = [5, 6, 8, 7, 13, 11, 16, 14, 19, 17, 21, 20];
+      const x = i => 16 + i * 34;
+      const y = v => 152 - v * 1.8;
+      const line = values => values.map((v, i) => `${x(i)},${y(v)}`).join(' ');
+      const grid = [0, 30, 60].map(v => `<line x1="16" y1="${y(v)}" x2="392" y2="${y(v)}" stroke="rgba(189,216,225,.12)"/><text x="0" y="${y(v)+4}" fill="#8ca0ae" font-size="9">${v}</text>`).join('');
+      $('#chart').innerHTML = `${grid}<polyline points="${line(download)}" fill="none" stroke="#5be1d1" stroke-width="3" stroke-linejoin="round"/><polyline points="${line(upload)}" fill="none" stroke="#ffc35c" stroke-width="2" stroke-linejoin="round" stroke-dasharray="5 5"/><text x="16" y="176" fill="#8ca0ae" font-size="9">-60m</text><text x="364" y="176" fill="#8ca0ae" font-size="9">现在</text>`;
+    }
+    function refresh() { $('#updated').textContent = '最后刷新：' + new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+    $('#search').addEventListener('input', renderDevices);
+    $('#sortTraffic').addEventListener('click', () => { sorting = !sorting; $('#sortTraffic').textContent = sorting ? '恢复默认顺序' : '按流量排序'; renderDevices(); });
+    $('#deviceList').addEventListener('click', event => {
+      const toggle = event.target.closest('[data-toggle]');
+      if (toggle) { const d = devices.find(item => item.id === Number(toggle.dataset.toggle)); d.enabled = !d.enabled; renderDevices(); renderDetail(); refresh(); return; }
+      const card = event.target.closest('[data-device]');
+      if (card) { selected = Number(card.dataset.device); renderDevices(); renderDetail(); }
+    });
+    document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('[data-tab]').forEach(item => item.classList.toggle('active', item === button)); }));
+    renderDevices(); renderDetail(); refresh();
+  </script>
+</body>
+</html>

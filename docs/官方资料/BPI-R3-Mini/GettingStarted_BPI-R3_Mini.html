@@ -1,0 +1,863 @@
+<!DOCTYPE html><html lang="en"><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8"><meta name="viewport" content="user-scalable=yes, width=device-width, initial-scale=1, maximum-scale=5"><meta name="theme-color" content="#1976d2"><meta name="msapplication-TileColor" content="#1976d2"><meta name="msapplication-TileImage" content="/_assets/favicons/mstile-150x150.png"><title>Getting Started BPI-R3 Mini | BananaPi Docs</title><meta name="description" content="Getting Started for BPI-R3 Mini"><meta property="og:title" content="Getting Started BPI-R3 Mini"><meta property="og:type" content="website"><meta property="og:description" content="Getting Started for BPI-R3 Mini"><meta property="og:image"><meta property="og:url" content="https://docs.banana-pi.org/en/BPI-R3_Mini/GettingStarted_BPI-R3_Mini"><meta property="og:site_name" content="BananaPi Docs"><link rel="apple-touch-icon" sizes="180x180" href="/_assets/favicons/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="192x192" href="/_assets/favicons/android-chrome-192x192.png"><link rel="icon" type="image/png" sizes="32x32" href="/_assets/favicons/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/_assets/favicons/favicon-16x16.png"><link rel="mask-icon" href="/_assets/favicons/safari-pinned-tab.svg" color="#1976d2"><link rel="manifest" href="/_assets/manifest.json"><script>var siteConfig = {"title":"BananaPi Docs","theme":"default","darkMode":false,"tocPosition":"right","lang":"en","rtl":false,"company":"BananaPi","contentLicense":"ccbysa","footerOverride":"","logoUrl":"/docs_logo_34.png"}
+var siteLangs = [{"code":"en","name":"English"},{"code":"zh","name":"中文 (Zhōngwén)"}]
+</script><link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css"><link type="text/css" rel="stylesheet" href="/_assets/css/app.8b3419043b6a2ea86e38.css"><script type="text/javascript" src="/_assets/js/runtime.js?1691709097"></script><script type="text/javascript" src="/_assets/js/app.js?1691709097"></script><!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-MC1WHM66NP"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-MC1WHM66NP');
+</script>
+</head><body><div id="root"><page locale="en" path="BPI-R3_Mini/GettingStarted_BPI-R3_Mini" title="Getting Started BPI-R3 Mini" description="Getting Started for BPI-R3 Mini" :tags="[]" created-at="2023-11-06T01:34:20.297Z" updated-at="2025-12-18T01:27:18.501Z" author-name="hyf" :author-id="10" editor="asciidoc" :is-published="true" toc="W3sidGl0bGUiOiJJbnRyb2R1Y3Rpb24iLCJhbmNob3IiOiIjaW50cm9kdWN0aW9uIiwiY2hpbGRyZW4iOlt7InRpdGxlIjoiU3BlY2lmaWNhdGlvbnMiLCJhbmNob3IiOiIjX3NwZWNpZmljYXRpb25zIiwiY2hpbGRyZW4iOltdfV19LHsidGl0bGUiOiJEZXZlbG9wbWVudCIsImFuY2hvciI6IiNfZGV2ZWxvcG1lbnQiLCJjaGlsZHJlbiI6W3sidGl0bGUiOiJQcmVwYXJlIiwiYW5jaG9yIjoiI19wcmVwYXJlIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiV2Fybm5pbmciLCJhbmNob3IiOiIjX3dhcm5uaW5nIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiTGludXgiLCJhbmNob3IiOiIjX2xpbnV4IiwiY2hpbGRyZW4iOlt7InRpdGxlIjoiSW5zdGFsbCBJbWFnZSB0byBvbmJvYXJkIGVNTUMiLCJhbmNob3IiOiIjX2luc3RhbGxfaW1hZ2VfdG9fb25ib2FyZF9lbW1jIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiSW5zdGFsbCBJbWFnZSB0byBvbmJvYXJkIE5hbmQiLCJhbmNob3IiOiIjX2luc3RhbGxfaW1hZ2VfdG9fb25ib2FyZF9uYW5kIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiamZmczIgZXJyb3Igc29sdXRpb24iLCJhbmNob3IiOiIjX2pmZnMyX2Vycm9yX3NvbHV0aW9uIiwiY2hpbGRyZW4iOltdfV19LHsidGl0bGUiOiJOZXR3b3JrLUNvbmZpZ3VyYXRpb24iLCJhbmNob3IiOiIjX25ldHdvcmtfY29uZmlndXJhdGlvbiIsImNoaWxkcmVuIjpbeyJ0aXRsZSI6ImlwZXJmMyB0ZXN0IiwiYW5jaG9yIjoiI19pcGVyZjNfdGVzdCIsImNoaWxkcmVuIjpbXX0seyJ0aXRsZSI6IldpRmkgc2V0dGluZ3MiLCJhbmNob3IiOiIjX3dpZmlfc2V0dGluZ3MiLCJjaGlsZHJlbiI6W119XX0seyJ0aXRsZSI6IkFkdmFuY2VkIERldmVsb3BtZW50IiwiYW5jaG9yIjoiI19hZHZhbmNlZF9kZXZlbG9wbWVudCIsImNoaWxkcmVuIjpbeyJ0aXRsZSI6IkdQSU8gQ29udHJvbCIsImFuY2hvciI6IiNfZ3Bpb19jb250cm9sIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiRkFOIiwiYW5jaG9yIjoiI19mYW4iLCJjaGlsZHJlbiI6W119LHsidGl0bGUiOiJQV00gRkFOIENvbnRyb2wiLCJhbmNob3IiOiIjX3B3bV9mYW5fY29udHJvbCIsImNoaWxkcmVuIjpbXX0seyJ0aXRsZSI6Ik0uMiBLRVkgQiBzbG90IiwiYW5jaG9yIjoiI19tXzJfa2V5X2Jfc2xvdCIsImNoaWxkcmVuIjpbXX0seyJ0aXRsZSI6IjRHLzVHIE1vZHVsZSIsImFuY2hvciI6IiNfNGc1Z19tb2R1bGUiLCJjaGlsZHJlbiI6W119LHsidGl0bGUiOiJXaS1GaSBBcCBtb2RlIG9uIEJQSS1SM21pbmkiLCJhbmNob3IiOiIjX3dpX2ZpX2FwX21vZGVfb25fYnBpX3IzbWluaSIsImNoaWxkcmVuIjpbXX0seyJ0aXRsZSI6IlNlcmlhbCBjYWJsZSIsImFuY2hvciI6IiNfc2VyaWFsX2NhYmxlIiwiY2hpbGRyZW4iOltdfV19XX0seyJ0aXRsZSI6IkZBUSIsImFuY2hvciI6IiNfZmFxIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiUmVmZXJlbmNlIExpbmsiLCJhbmNob3IiOiIjX3JlZmVyZW5jZV9saW5rIiwiY2hpbGRyZW4iOltdfV0=" :page-id="79" sidebar="W3siaSI6InNkaS0xIiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfSx7ImkiOiJzZGktMiIsImsiOiJsaW5rIiwibCI6Ik1haW4gUGFnZSIsImMiOiJtZGktaG9tZSIsInkiOiJleHRlcm5hbCIsInQiOiJodHRwczovL2RvY3MuYmFuYW5hLXBpLm9yZy9lbi9ob21lIn0seyJpIjoic2RpLTMiLCJrIjoibGluayIsImwiOiJQcm9kdWN0cyIsImMiOiJtZGktZGV2ZWxvcGVyLWJvYXJkIiwieSI6ImV4dGVybmFsIiwidCI6Imh0dHBzOi8vZG9jcy5iYW5hbmEtcGkub3JnL2VuL2hvbWUjX2JhbmFuYV9waV9wcm9kdWN0cyJ9LHsiaSI6InNkaS00IiwiayI6ImxpbmsiLCJsIjoiU29mdHdhcmUgJiBEZXZlbG9wbWVudCBUb29scyIsImMiOiJtZGktZmlsZS1jb2RlIiwieSI6ImV4dGVybmFsIiwidCI6Imh0dHBzOi8vZG9jcy5iYW5hbmEtcGkub3JnL2VuL2hvbWUjX3NvZnR3YXJlX2RldmVsb3BtZW50X3Rvb2xzIn0seyJpIjoic2RpLTUiLCJrIjoiZGl2aWRlciIsImwiOm51bGwsImMiOm51bGwsInkiOm51bGwsInQiOm51bGx9LHsiaSI6InNkaS02IiwiayI6ImxpbmsiLCJsIjoiQmFuYW5hIFBpIE9mZmljYWwgV2Vic2l0ZSIsImMiOiJtZGktd2ViIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cHM6Ly9iYW5hbmEtcGkub3JnLyJ9LHsiaSI6InNkaS03IiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfSx7ImkiOiJzZGktOCIsImsiOiJsaW5rIiwibCI6IkJhbmFuYSBQaSBFbmdsaXNoIEZvcnVtIiwiYyI6Im1kaS1mb3J1bS1vdXRsaW5lIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cDovL2ZvcnVtLmJhbmFuYS1waS5vcmcvIn0seyJpIjoic2RpLTkiLCJrIjoibGluayIsImwiOiJCYW5hbmEgUGkgQ2hpbmVzZSBGb3J1bSIsImMiOiJtZGktZm9ydW0iLCJ5IjoiZXh0ZXJuYWxibGFuayIsInQiOiJodHRwczovL2ZvcnVtLmJhbmFuYS1waS5vcmcuY24vIn0seyJpIjoic2RpLTEwIiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfSx7ImkiOiJzZGktMTEiLCJrIjoiaGVhZGVyIiwibCI6IkZvbGxvdyB1cyIsImMiOm51bGwsInkiOm51bGwsInQiOm51bGx9LHsiaSI6InNkaS0xMiIsImsiOiJsaW5rIiwibCI6IllvdXR1YmUiLCJjIjoibWRpLXlvdXR1YmUiLCJ5IjoiZXh0ZXJuYWxibGFuayIsInQiOiJodHRwczovL3d3dy55b3V0dWJlLmNvbS9AbGlvbndhbmdzaW5vdm9pcCJ9LHsiaSI6InNkaS0xMyIsImsiOiJsaW5rIiwibCI6IkZhY2Vib29rIFBhZ2UiLCJjIjoibWRpLWZhY2Vib29rIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cHM6Ly93d3cuZmFjZWJvb2suY29tL3Npbm92b2lwYnBpIn0seyJpIjoic2RpLTE0IiwiayI6ImxpbmsiLCJsIjoiRmFjZWJvb2sgR3JvdXAiLCJjIjoibWRpLWZhY2Vib29rIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cHM6Ly93d3cuZmFjZWJvb2suY29tL2dyb3Vwcy9CYW5hbmEuUGkuQ29tbXVuaXR5LyJ9LHsiaSI6InNkaS0xNSIsImsiOiJsaW5rIiwibCI6IlR3aXR0ZXIiLCJjIjoiZmEgZmEtdHdpdHRlciIsInkiOiJleHRlcm5hbGJsYW5rIiwidCI6Imh0dHBzOi8vdHdpdHRlci5jb20vc2lub3ZvaXAifSx7ImkiOiJzZGktMTYiLCJrIjoibGluayIsImwiOiJSZWRkaXQiLCJjIjoibWRpLXJlZGRpdCIsInkiOiJleHRlcm5hbGJsYW5rIiwidCI6Imh0dHBzOi8vd3d3LnJlZGRpdC5jb20vci9CYW5hbmFQaV9CUEkvIn0seyJpIjoic2RpLTE3IiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfV0=" nav-mode="STATIC" effective-permissions="eyJjb21tZW50cyI6eyJyZWFkIjpmYWxzZSwid3JpdGUiOmZhbHNlLCJtYW5hZ2UiOmZhbHNlfSwiaGlzdG9yeSI6eyJyZWFkIjpmYWxzZX0sInNvdXJjZSI6eyJyZWFkIjpmYWxzZX0sInBhZ2VzIjp7InJlYWQiOnRydWUsIndyaXRlIjpmYWxzZSwibWFuYWdlIjpmYWxzZSwiZGVsZXRlIjpmYWxzZSwic2NyaXB0IjpmYWxzZSwic3R5bGUiOmZhbHNlfSwic3lzdGVtIjp7Im1hbmFnZSI6ZmFsc2V9fQ==" edit-shortcuts="eyJlZGl0RmFiIjp0cnVlLCJlZGl0TWVudUJhciI6ZmFsc2UsImVkaXRNZW51QnRuIjp0cnVlLCJlZGl0TWVudUV4dGVybmFsQnRuIjp0cnVlLCJlZGl0TWVudUV4dGVybmFsTmFtZSI6IkdpdEh1YiIsImVkaXRNZW51RXh0ZXJuYWxJY29uIjoibWRpLWdpdGh1YiIsImVkaXRNZW51RXh0ZXJuYWxVcmwiOiJodHRwczovL2dpdGh1Yi5jb20vb3JnL3JlcG8vYmxvYi9tYWluL3tmaWxlbmFtZX0ifQ==" filename="en/BPI-R3_Mini/GettingStarted_BPI-R3_Mini.html"><template slot="contents"><div><h1 class="toc-header" id="introduction"><a href="#introduction" class="toc-anchor">¶</a> Introduction</h1>
+<div id="preamble">
+<div class="sectionbody">
+<div class="paragraph">
+<p>Banana Pi BPI-R3 Mini Router board with MediaTek MT7986A(Filogic 830) quad core ARM A53 chip design ,2G DDR RAM ,8G eMMC flash onboard,It is a very high performance open source router development board,support Wi-Fi6 2.4G/5G with MT7976C, support 2x 2.5GbE ethernet port.</p>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+More Infomation: <a class="is-internal-link is-valid-page" href="/en/BPI-R3_Mini/BananaPi_BPI-R3_Mini">Banana Pi BPI-R3_Mini</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_mediatek_mt7986filogic_830"><a href="#_mediatek_mt7986filogic_830" class="toc-anchor">¶</a> MediaTek MT7986(Filogic 830)</h3>
+<div class="paragraph">
+<p>The MT7986(Filogic 830) integrates four Arm Cortex-A53 cores up to 2GHz with up to 18,000 DMIPs of processing power and 6Gbps of dual 4x4 Wi-Fi6 connectivity. It has two 2.5g Ethernet interfaces and serial peripheral interfaces (SPI). Filogic 830‘s built-in hardware acceleration engine enables fast and reliable Wi-Fi offloading and wireless network connection. In addition, the chip supports Mediatek FastPath™ technology, which is suitable for games, AR/VR and other low-latency applications.</p>
+</div>
+<div class="paragraph">
+<p>Wi-fi 6 has many advantages over its predecessors, including lower latency, larger bandwidth capacity and faster transmission rates. Wireless network devices supporting the 6GHz band mainly use 160MHz wide channel and 6GHz uncongested bandwidth to provide multigigabit transmission and low-latency wi-fi connection, providing reliable wireless network for streaming media, games, AR/VR and other applications.</p>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_specifications"><a href="#_specifications" class="toc-anchor">¶</a> Specifications</h2>
+<div class="sectionbody">
+<div class="ulist">
+<ul>
+<li>
+<p>MediaTek MT7986A(Filogic 830) Quad core ARM Cortex A53</p>
+</li>
+<li>
+<p>Wifi 6 2.4G/5G（MT7976C）</p>
+</li>
+<li>
+<p>2G DDR RAM</p>
+</li>
+<li>
+<p>8G eMMC flash</p>
+</li>
+<li>
+<p>128MB Nand flash</p>
+</li>
+<li>
+<p>2x 2.5GbE Ethernet port</p>
+</li>
+<li>
+<p>1x M.2 Key B USB inerface</p>
+</li>
+<li>
+<p>1x M.2 KEY M PCIe inerface</p>
+</li>
+<li>
+<p>1x USB2.0 interface</p>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<h1 class="sect0 toc-header" id="_development"><a href="#_development" class="toc-anchor">¶</a> Development</h1>
+<div class="sect1">
+<h2 class="toc-header" id="_prepare"><a href="#_prepare" class="toc-anchor">¶</a> Prepare</h2>
+<div class="sectionbody">
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>Prepare USB-Serial interface</p>
+</li>
+<li>
+<p>Using your USB-Serial Connect debug console on BPI-R3 MINI</p>
+<div class="ulist">
+<ul>
+<li>
+<p><strong>Debug Uart 3.3v TTL,Baud: 115200.</strong></p>
+</li>
+<li>
+<p>Default IP address for LAN port: <strong>192.168.1.1</strong></p>
+</li>
+<li>
+<p>User name/password: <strong>pi/bananapi ,root/bananapi</strong>.<br>
+Or the user is <strong>root without a password</strong>.</p>
+</li>
+<li>
+<p>WIFI: <strong>Operwrt</strong></p>
+</li>
+</ul>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3-mini-back.png" src="/picture/bpi-r3-mini-back.png">
+</div>
+</div>
+</li>
+<li>
+<p>R3mini boot switch Jumper Setting</p>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: EMMC Boot or Nand boot Support.
+</td>
+</tr>
+</tbody></table>
+</div>
+</li>
+</ol>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_warnning"><a href="#_warnning" class="toc-anchor">¶</a> Warnning</h2>
+<div class="sectionbody">
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: Because BPI-R3 MINI can’t support that it boot from SD, So the factory will flash one default image into Nand and EMMC Device.
+ Anytime please confirm that one EMMC or Nand device include one bootable image, it’s very important!!
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>If you want to update EMMC device, please boot from Nand</p>
+</li>
+</ul>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini_nandboot2.png" src="/picture/r3mini_nandboot2.png">
+</div>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>Otherwise you update Nand device when it boot from EMMC.</p>
+</li>
+</ul>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini_emmcboot.png" src="/picture/r3mini_emmcboot.png">
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_linux"><a href="#_linux" class="toc-anchor">¶</a> Linux</h2>
+<div class="sectionbody">
+<div class="sect2">
+<h3 class="toc-header" id="_install_image_to_onboard_emmc"><a href="#_install_image_to_onboard_emmc" class="toc-anchor">¶</a> Install Image to onboard eMMC</h3>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: when you want to Update EMMC device, Firstly Change boot switch to boot from Nand device, then after boot up,you need flash one emmc image into EMMC device. Finally you change bootstrap to boot from EMMC.
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Before burning image to eMMC, please prepare a USB disk. Let’s take OpenWrt image (mtk-bpi-r3mini-EMMC-20230719.img, bl2_emmc-r3mini.img) for example, the steps are below:</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>Copy EMMC boot OpenWrt image(mtk-bpi-r3mini-EMMC-20230719.img, bl2_emmc.img) to USB disk.</p>
+</li>
+<li>
+<p>Change boot switch Jumper, the board boot from Nand device, then power up the board.</p>
+</li>
+<li>
+<p>Plug in USB disk to the board, and mount the USB to /mnt or other directory as follows: (you can skip mounting if it is mounted automatically)</p>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">mount -t vfat /dev/sda1 /mnt</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>change your directory to the mounting point, here is :</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">cd /mnt</code></pre>
+</div>
+</div>
+</li>
+<li>
+<p>Execute following command to enable and copy image to EMMC device:</p>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">echo 0 &gt; /sys/block/mmcblk0boot0/force_ro
+dd if=bl2_emmc-r3mini.img of=/dev/mmcblk0boot0
+dd if=mtk-bpi-r3mini-EMMC-20230719.img of=/dev/mmcblk0
+mmc bootpart enable 1 1 /dev/mmcblk0</code></pre>
+</div>
+</div>
+</li>
+<li>
+<p>Power off R3MINI board, unplug the USB drive, and change the boot program to boot from the emmc device.</p>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: Enable EMMC device, boot strap is from EMMC.
+</td>
+</tr>
+</tbody></table>
+</div>
+</li>
+</ol>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_install_image_to_onboard_nand"><a href="#_install_image_to_onboard_nand" class="toc-anchor">¶</a> Install Image to onboard Nand</h3>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: when you want to Update Nand device, Firstly Change boot switch to boot from EMMC device, then after boot up,you need flash one nand image into nand device. Finally you change bootstrap to boot from Nand device.
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Before burning image into Nand, please prepare a USB disk. Let’s take OpenWrt image (mtk-bpi-r3mini-NAND-20230719-single-image.bin) for example, the steps are below:</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>Copy Nand boot OpenWrt image(mtk-bpi-r3mini-NAND-20230719-single-image.bin) to USB disk.</p>
+</li>
+<li>
+<p>Change boot switch Jumper, the board boot from EMMC device, then power up the board.</p>
+</li>
+<li>
+<p>Plug in USB disk to the board, and mount the USB to /mnt or other directory as follows: (you can skip mounting if it is mounted automatically)</p>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">mount -t vfat /dev/sda1 /mnt</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>change your directory to the mounting point, here is :</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">cd /mnt</code></pre>
+</div>
+</div>
+</li>
+<li>
+<p>Execute following command to erase the whole Nand flash and copy image to nand device:</p>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">mtd erase /dev/mtd0
+dd if=mtk-bpi-r3mini-NAND-20230719-single-image.bin of=/dev/mtdblock0</code></pre>
+</div>
+</div>
+</li>
+<li>
+<p>Power off BPI-R3 MINI board, remove u-disk driver, change bootstrap to boot from Nand device.</p>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: Enable Nand device, boot strap is from Nand.
+</td>
+</tr>
+</tbody></table>
+</div>
+</li>
+</ol>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_jffs2_error_solution"><a href="#_jffs2_error_solution" class="toc-anchor">¶</a> jffs2 error solution</h3>
+<div class="paragraph">
+<p>After you finish burning emmc, switch to emmc boot, but the serial port keeps outputting jffs2 errors. You can use the following method to solve it.</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>First, switch back to NAND boot. Execute the following command to write zero to emmc.</p>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">dd if=/dev/zero of=/dev/mmcblk0</code></pre>
+</div>
+</div>
+</li>
+<li>
+<p>Then re-burn the emmc according to the <a class="is-internal-link is-valid-page" href="/en/BPI-R3_Mini/GettingStarted_BPI-R3_Mini#_install_image_to_onboard_emmc">document</a>.</p>
+</li>
+</ol>
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_network_configuration"><a href="#_network_configuration" class="toc-anchor">¶</a> Network-Configuration</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Network-Configuration refer to: <a class="bare is-external-link" href="http://www.fw-web.de/dokuwiki/doku.php?id=en:bpi-r2:network:start">http://www.fw-web.de/dokuwiki/doku.php?id=en:bpi-r2:network:start</a></p>
+</div>
+<div class="paragraph">
+<p>Network Interface: eth1 is for WAN; eth0, rax0, ra0 is for LAN, ra0 is for 2.4G wireless, rax0 is for 5G wireless.</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_interface.jpg" src="/picture/bpi-r3_mini_interface.jpg">
+</div>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">root@OpenWrt:/# ifconfig
+br-lan Link encap:Ethernet HWaddr EE:A1:57:81:CA:19
+         inet addr:192.168.1.1  Bcast:192.168.1.255  Mask:255.255.255.0
+         inet6 addr: fe80::eca1:57ff:fe81:ca19/64 Scope:Link
+         inet6 addr: fd63:8bea:d5ce::1/60 Scope:Global
+         UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+         RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+         TX packets:15 errors:0 dropped:0 overruns:0 carrier:0
+         collisions:0 txqueuelen:1000
+         RX bytes:0 (0.0 B)  TX bytes:2418 (2.3 KiB)
+
+br-wan Link encap:Ethernet HWaddr EE:A1:57:81:CA:19
+         inet6 addr: fe80::eca1:57ff:fe81:ca19/64 Scope:Link
+         UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+         RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+         TX packets:34 errors:0 dropped:0 overruns:0 carrier:0
+         collisions:0 txqueuelen:1000
+         RX bytes:0 (0.0 B)  TX bytes:8538 (8.3 KiB)
+
+eth0 Link encap:Ethernet HWaddr EE:A1:57:81:CA:19
+         inet6 addr: fe80::eca1:57ff:fe81:ca19/64 Scope:Link
+         UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+         RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+         TX packets:32 errors:0 dropped:0 overruns:0 carrier:0
+         collisions:0 txqueuelen:1000
+         RX bytes:0 (0.0 B)  TX bytes:4408 (4.3 KiB)
+         Interrupt:124
+
+eth1 Link encap:Ethernet HWaddr 4A:BB:84:B4:5D:3F
+         UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+         RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+         TX packets:34 errors:0 dropped:0 overruns:0 carrier:0
+         collisions:0 txqueuelen:1000
+         RX bytes:0 (0.0 B)  TX bytes:8674 (8.4 KiB)
+         Interrupt:124
+
+lo Link encap:Local Loopback
+         inet addr:127.0.0.1  Mask:255.0.0.0
+         inet6 addr: ::1/128 Scope:Host
+         UP LOOPBACK RUNNING  MTU:65536  Metric:1
+         RX packets:56 errors:0 dropped:0 overruns:0 frame:0
+         TX packets:56 errors:0 dropped:0 overruns:0 carrier:0
+         collisions:0 txqueuelen:1000
+         RX bytes:4368 (4.2 KiB)  TX bytes:4368 (4.2 KiB)
+
+ra0 Link encap:Ethernet HWaddr 00:0C:43:26:60:38
+         UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+         RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+         TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+         collisions:0 txqueuelen:1000
+         RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+         Interrupt:6
+
+rax0 Link encap:Ethernet HWaddr 02:0C:43:36:60:38
+         UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+         RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+         TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+         collisions:0 txqueuelen:1000
+         RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)</code></pre>
+</div>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">root@OpenWrt:/# brctl show br-wan
+bridge name bridge id STP enabled interfaces br-wan 7fff.eea15781ca19 no eth1
+root@OpenWrt:/# brctl show br-lan
+bridge name bridge id STP enabled interfaces br-lan 7fff.eea15781ca19 no eth0, rax0, ra0, apclix0, apcli0</code></pre>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_iperf3_test"><a href="#_iperf3_test" class="toc-anchor">¶</a> iperf3 test</h3>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini-case-wanlana.png" src="/picture/r3mini-case-wanlana.png">
+</div>
+</div>
+<div class="paragraph">
+<p><strong>2.5G Ethernet:</strong></p>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 33.3333%;">
+<col style="width: 33.3333%;">
+<col style="width: 33.3334%;">
+</colgroup>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">R3miniA(WAN)---</p></td>
+<td class="tableblock halign-left valign-top"></td>
+<td class="tableblock halign-left valign-top"></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">2.5G wwitch</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">---Ethernet</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">R3miniB(WAN)---</p></td>
+<td class="tableblock halign-left valign-top"></td>
+<td class="tableblock halign-left valign-top"></td>
+</tr>
+<tr>
+<td colspan="3" class="tableblock halign-left valign-top"><p class="tableblock">R3miniA ←------iperf3-----→ R3miniB</p></td>
+</tr>
+</tbody>
+</table>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini-iperf3-wan.png" src="/picture/r3mini-iperf3-wan.png">
+</div>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 50%;">
+<col style="width: 25%;">
+<col style="width: 25%;">
+</colgroup>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">R3miniA(WAN)---</p></td>
+<td class="tableblock halign-left valign-top"></td>
+<td class="tableblock halign-left valign-top"></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">2.5G wwitch</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">---Ethernet</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">R3miniC(WAN)---(LAN)R3miniB(WAN)---</p></td>
+<td class="tableblock halign-left valign-top"></td>
+<td class="tableblock halign-left valign-top"></td>
+</tr>
+<tr>
+<td colspan="3" class="tableblock halign-left valign-top"><p class="tableblock">R3miniC ←------iperf3-----→ R3miniA</p></td>
+</tr>
+</tbody>
+</table>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini-iperf3-switch.png" src="/picture/r3mini-iperf3-switch.png">
+</div>
+</div>
+<div class="paragraph">
+<p><strong>5GWi-Fi:</strong></p>
+</div>
+<div class="paragraph">
+<p>iPhone 5Gwifi ←------iperf3-----→ (Wi-Fi) BPI-R3mini</p>
+</div>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: The distance between iPhone and R3mini is about one meter.
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini-wifitesta.png" src="/picture/r3mini-wifitesta.png">
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_wifi_settings"><a href="#_wifi_settings" class="toc-anchor">¶</a> WiFi settings</h3>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>You can change its configuration in the system’s /etc/config/wireless directory.</p>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">config wifi-device 'radio0'
+        option type 'mac80211'
+        option path 'platform/18000000.wbsys'
+        option channel '1'
+        option band '2g'
+        option htmode 'HE20'
+        option cell_density '0'
+
+config wifi-iface 'default_radio0'
+        option device 'radio0'
+        option network 'lan'
+        option mode 'ap'
+        option encryption 'none'
+        option ssid 'OpenWrt-2.4G'
+
+config wifi-device 'radio1'
+        option type 'mac80211'
+        option path 'platform/18000000.wbsys+1'
+        option channel '36'
+        option band '5g'
+        option htmode 'HE80'
+        option cell_density '0'
+
+config wifi-iface 'default_radio1'
+        option device 'radio1'
+        option network 'lan'
+        option mode 'ap'
+        option encryption 'none'
+        option ssid 'OpenWrt-5G'</code></pre>
+</div>
+</div>
+</li>
+<li>
+<p>You can set it up via the web.the WiFi setup interfaces differ between the two official websites.</p>
+</li>
+</ol>
+</div>
+<div class="admonitionblock note">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Note" class="fa icon-note"></i>
+</td>
+<td class="content">
+If MTK is listed in the section, then the WiFi settings interface will be the one within MTK.
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="olist loweralpha">
+<ol type="a" class="loweralpha">
+<li>
+<p>The first method involves using the Wireless interface within the Network settings. You’ll see the corresponding 2.4G and 5G WiFi connections, with an Edit button on the right for configuration.</p>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_wifi_setting1.jpg" src="/bpi-r3mini/bpi-r3_mini_wifi_setting1.jpg">
+</div>
+</div>
+<div class="paragraph">
+<p>Setting Mode</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_wifi_setting2.jpg" src="/bpi-r3mini/bpi-r3_mini_wifi_setting2.jpg">
+</div>
+</div>
+<div class="paragraph">
+<p>Set encryption (set password)</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_wifi_setting3.jpg" src="/bpi-r3mini/bpi-r3_mini_wifi_setting3.jpg">
+</div>
+</div>
+</li>
+<li>
+<p>The second method involves configuring WiFi within the MTK settings.</p>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_wifi_setting4.jpg" src="/bpi-r3mini/bpi-r3_mini_wifi_setting4.jpg">
+</div>
+</div>
+<div class="paragraph">
+<p>There is a config button on the right.</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_wifi_setting5.jpg" src="/bpi-r3mini/bpi-r3_mini_wifi_setting5.jpg">
+</div>
+</div>
+</li>
+</ol>
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_advanced_development"><a href="#_advanced_development" class="toc-anchor">¶</a> Advanced Development</h2>
+<div class="sectionbody">
+<div class="sect2">
+<h3 class="toc-header" id="_gpio_control"><a href="#_gpio_control" class="toc-anchor">¶</a> GPIO Control</h3>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">echo xxx &gt; /sys/class/gpio/export
+echo in/out &gt; /sys/class/gpio/gpioxxx/direction
+echo 0/1 &gt; /sys/class/gpio/gpioxxx/value</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>Check the base gpio, you could see mine is 411</p>
+</div>
+<div class="paragraph">
+<p>For example: if you want to change gpio 22 as out highlevel, you need input commands like this：</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">echo 433（22+411） &gt; /sys/class/gpio/export
+echo out &gt; /sys/class/gpio/gpio433/direction
+echo 1 &gt; /sys/class/gpio/gpio433/value</code></pre>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_fan"><a href="#_fan" class="toc-anchor">¶</a> FAN</h3>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini-fan-con.png" src="/picture/r3mini-fan-con.png">
+</div>
+</div>
+<div class="paragraph">
+<p>CN16 is a 1.25 pitch 3PIN socket, used to connect the fan, supports PWM control.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_pwm_fan_control"><a href="#_pwm_fan_control" class="toc-anchor">¶</a> PWM FAN Control</h3>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">echo 0 &gt; /sys/class/pwm/pwmchip0/export
+echo 10000 &gt; /sys/class/pwm/pwmchip0/pwm0/period
+echo 5000 &gt; /sys/class/pwm/pwmchip0/pwm0/duty_cycle
+echo normal &gt; /sys/class/pwm/pwmchip0/pwm0/polarity
+echo 1 &gt; /sys/class/pwm/pwmchip0/pwm0/enable</code></pre>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_m_2_key_b_slot"><a href="#_m_2_key_b_slot" class="toc-anchor">¶</a> M.2 KEY B slot</h3>
+<div class="paragraph">
+<p>Currently, M.2 KEY B slot only support USB 4G/5G module, example: Quectel RM500U-CN or RM520N-GL</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini-rm500u-1000.png" src="/picture/r3mini-rm500u-1000.png">
+</div>
+</div>
+<div class="paragraph">
+<p>when you install one 4G/5G module, you may check it.</p>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_4g5g_module"><a href="#_4g5g_module" class="toc-anchor">¶</a> 4G/5G Module</h3>
+<div class="paragraph">
+<p>BPI-R3mini supports <strong>M.2 KEYB USB interface</strong> Cellular network module: 4G LTE EM05, 5G Quectel RM500U-CN/RG200U-CN and RM520N-GL/RM500Q-GL Series.</p>
+</div>
+<div class="paragraph">
+<p>The released image(2023-09-12 or later) default driver is RM500U-CN and RM520N-GL, Install one of these two modules and you can use it directly.</p>
+</div>
+<div class="paragraph">
+<p>If use EM05 or others,you will most likely need to modify the driver.</p>
+</div>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>Install 4G/5G Cellular Module into CN4 Slot(M.2 KEYB)</p>
+</li>
+<li>
+<p>Inset the NANOSIM Card</p>
+</li>
+<li>
+<p>Install antenna on the module</p>
+</li>
+<li>
+<p>After powering on, it will automatically dial</p>
+</li>
+</ol>
+</div>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Note: The availability of 4G/5G depends on the local carrier frequency band.
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_cellular.jpg" src="/picture/bpi-r3_mini_cellular.jpg">
+</div>
+</div>
+<div class="paragraph">
+<p><strong>RM520N-GL</strong></p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">wwan0     Link encap:Ethernet  HWaddr C2:CA:76:42:83:EC
+          NOARP  MTU:1500  Metric:1
+          RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+
+wwan0_1   Link encap:Ethernet  HWaddr C2:CA:76:42:83:EC
+          NOARP  MTU:1500  Metric:1
+          RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+
+root@OpenWrt:/#
+root@OpenWrt:/# lsusb
+Bus 001 Device 001: ID 1d6b:0002 Linux 5.4.188 xhci-hcd xHCI Host Controller
+Bus 002 Device 002: ID 2c7c:0801 Quectel RM520N-GL
+Bus 002 Device 001: ID 1d6b:0003 Linux 5.4.188 xhci-hcd xHCI Host Controller
+root@OpenWrt:/#
+root@OpenWrt:/# ping ping baidu .com
+PING baidu.com (110.242.68.66) 56 data bvtes
+64 bytes from 110.242.68.66: seq=0 ttl=50 time=38.540 ms
+64 bytes from 110.242.68.66: seq=1 ttl=50 time=38.276 ms
+64 bytes from 110.242.68.66: seq=2 ttl=50 time=38.355 ms
+64 bytes from 110.242.68.66: seq=3 ttl=50 time=38.788 ms
+^C
+--- baidu.com ping statistics ---
+4 packets transmitted, 4 received，0% packet loss
+round-trip min/avg/max = 38.276/38.490/38.788 ms
+root@OpenWrt:/#</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p><strong>RM500U-CN</strong></p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre v-pre="true" class="highlight prismjs line-numbers"><code data-lang="sh" class="language-sh">usb0      Link encap:Ethernet  HWaddr 46:F7:1B:36:AE:26
+          inet addr:10.101.26.65  Bcast:10.101.26.255  Mask:255.255.255.0
+          inet6 addr: 2409:895a:30a9:55e2:44f7:1bff:fe36:ae26/64 Scope:Global
+          inet6 addr: fe80::5c3b:9cff:fe76:7c46/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:191 errors:0 dropped:2 overruns:0 frame:0
+          TX packets:243 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:71800 (70.1 KiB)  TX bytes:35923 (35.0 KiB)
+root@R3mini-Router:/#
+root@R3mini-Router:/# lsusb
+Bus 001 Device 001: ID 1d6b:0002 Linux 5.4.171 xhci-hcd xHCI Host Controller
+Bus 002 Device 002: ID 2c7c:0900 RM500U-CN
+Bus 002 Device 001: ID 1d6b:0003 Linux 5.4.171 xhci-hcd xHCI Host Controller
+root@R3mini-Router:/#</code></pre>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_wi_fi_ap_mode_on_bpi_r3mini"><a href="#_wi_fi_ap_mode_on_bpi_r3mini" class="toc-anchor">¶</a> Wi-Fi Ap mode on BPI-R3mini</h3>
+<div class="ulist">
+<ul>
+<li>
+<p>ra0 is MT7986a 2.4G wifi</p>
+</li>
+<li>
+<p>rax0 is MT7986a 5G wifi</p>
+</li>
+</ul>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_serial_cable"><a href="#_serial_cable" class="toc-anchor">¶</a> Serial cable</h3>
+<div class="paragraph">
+<p>Because the UART0_TXD of the debug port is also a wifi strap pin, this pin needs to be pull-low when poweron，</p>
+</div>
+<div class="paragraph">
+<p>some serial cable have strong pull-up, such as PL2303,if it is inserted before powering on, it will cause the wifi chip to be recognized incorrectly, and the wifi function will fail.</p>
+</div>
+<div class="paragraph">
+<p>Other types including cp2102,ch340 and FDTI are all available, serial cable power domian must be 3.3v TTL standard.</p>
+</div>
+<div class="paragraph">
+<p>You can buy the serial cable here: <a class="bare is-external-link" href="https://www.aliexpress.us/item/3256805457599756.html">https://www.aliexpress.us/item/3256805457599756.html</a></p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="r3mini-usbc2uart.png" src="/picture/r3mini-usbc2uart.png">
+</div>
+</div>
+<div class="paragraph">
+<p>If your computer has a USB TypeC connector and supports PD12V/1.5A (20W) or above, you can also directly use the computer to power BPI-R3mini.</p>
+</div>
+<div class="paragraph">
+<p>Moreover, since BPI-R3mini has built-in USB to serial port chip CH340E, you do not need to use additional serial cables.</p>
+</div>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+NOTE: If your computer does not support USB PD, then the R3mini will most likely keep restarting.
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Because the power consumption of R3mini is relatively large (all peripherals are plugged in and the power consumption is close to 20W when running)</p>
+</div>
+</div>
+</div>
+</div>
+<h1 class="sect0 toc-header" id="_faq"><a href="#_faq" class="toc-anchor">¶</a> FAQ</h1>
+<div class="paragraph">
+<p>MT7986a Reference Manual for Develope Board(BPi)</p>
+</div>
+<div class="paragraph">
+<p>Google Drive: <a class="bare is-external-link" href="https://drive.google.com/file/d/1biSJmxnIpNzQroYDg9mtPtSTAv4i0DFf/view?usp=sharing">https://drive.google.com/file/d/1biSJmxnIpNzQroYDg9mtPtSTAv4i0DFf/view?usp=sharing</a></p>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_ttl_voltage"><a href="#_ttl_voltage" class="toc-anchor">¶</a> TTL Voltage</h3>
+<div class="paragraph">
+<p>The debug uart is 3.3V TTL power domain.</p>
+</div>
+</div>
+<h1 class="sect0 toc-header" id="_reference_link"><a href="#_reference_link" class="toc-anchor">¶</a> Reference Link</h1>
+<div class="paragraph">
+<p><a class="bare is-external-link" href="http://forum.banana-pi.org/">http://forum.banana-pi.org/</a></p>
+</div></div></template><template slot="comments"><div><comments></comments></div></template></page></div></body></html>

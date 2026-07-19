@@ -1,0 +1,190 @@
+#!/bin/sh
+
+CONFIG=r3mini_fan.main
+SENSOR=/sys/class/thermal/thermal_zone0/temp
+THERMAL_MODE=/sys/class/thermal/thermal_zone0/mode
+PWM=/sys/class/hwmon/hwmon1/pwm1
+PWM_ENABLE=/sys/class/hwmon/hwmon1/pwm1_enable
+
+fail() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+is_uint() {
+	case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac
+}
+
+read_num() {
+	local value
+	value="$(cat "$1" 2>/dev/null)"
+	is_uint "$value" && printf '%s' "$value" || printf '0'
+}
+
+cfg_celsius() {
+	local value
+	value="$(uci -q get "$CONFIG.$1")"
+	is_uint "$value" || value="$2"
+	printf '%s' "$((value / 1000))"
+}
+
+wait_stopped() {
+	local attempt=0
+	while /etc/init.d/r3mini-fan status >/dev/null 2>&1; do
+		attempt=$((attempt + 1))
+		[ "$attempt" -lt 10 ] || return 1
+		sleep 1
+	done
+}
+
+wait_auto() {
+	local attempt=0 mode
+	while :; do
+		mode="$(cat "$THERMAL_MODE" 2>/dev/null)"
+		if /etc/init.d/r3mini-fan status >/dev/null 2>&1 && [ "$mode" = disabled ]; then
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		[ "$attempt" -lt 10 ] || return 1
+		sleep 1
+	done
+}
+
+restore_kernel() {
+	echo enabled > "$THERMAL_MODE" 2>/dev/null || return 1
+	[ "$(cat "$THERMAL_MODE" 2>/dev/null)" = enabled ]
+}
+
+ensure_safe() {
+	/etc/init.d/r3mini-fan stop >/dev/null 2>&1
+	if ! wait_stopped; then
+		restore_kernel
+		return $?
+	fi
+	echo disabled > "$THERMAL_MODE" 2>/dev/null || { restore_kernel; return $?; }
+	if echo 1 > "$PWM_ENABLE" 2>/dev/null && echo 0 > "$PWM" 2>/dev/null && [ "$(cat "$THERMAL_MODE" 2>/dev/null)" = disabled ] && [ "$(read_num "$PWM")" = 0 ]; then
+		return 0
+	fi
+	restore_kernel
+}
+
+restore_auto_or_high() {
+	if /etc/init.d/r3mini-fan restart >/dev/null 2>&1 && wait_auto; then
+		return 0
+	fi
+	ensure_safe
+}
+
+rollback_config() {
+	local backup="$1"
+	cp "$backup" /etc/config/r3mini_fan || { ensure_safe; return 1; }
+	if restore_auto_or_high; then
+		rm -f "$backup"
+		return 0
+	fi
+	return 1
+}
+
+status_json() {
+	local running=false control_mode=kernel mode raw_state state pwm pwm_enable temp
+	/etc/init.d/r3mini-fan status >/dev/null 2>&1 && running=true
+	mode="$(cat "$THERMAL_MODE" 2>/dev/null)"
+	[ "$running" = true ] && control_mode=auto
+	[ "$running" = false ] && [ "$mode" = disabled ] && control_mode=manual
+	temp="$(read_num "$SENSOR")"
+	pwm="$(read_num "$PWM")"
+	pwm_enable="$(read_num "$PWM_ENABLE")"
+	raw_state="$(read_num /sys/class/thermal/cooling_device0/cur_state)"
+	case "$pwm" in
+		255) state=0 ;;
+		128) state=1 ;;
+		80) state=2 ;;
+		0) state=3 ;;
+		*) if [ "$pwm" -gt 192 ]; then state=0; elif [ "$pwm" -gt 104 ]; then state=1; elif [ "$pwm" -gt 40 ]; then state=2; else state=3; fi ;;
+	esac
+	printf '{"temp":%s,"state":%s,"raw_state":%s,"pwm":%s,"pwm_enable":%s,"mode":"%s","running":%s,"control_mode":"%s","interval":%s,"config":{"stop":%s,"start":%s,"mediumDown":%s,"mediumUp":%s,"highDown":%s,"highUp":%s}}\n' \
+		"$temp" "$state" "$raw_state" "$pwm" "$pwm_enable" "$mode" "$running" "$control_mode" \
+		"$(uci -q get "$CONFIG.interval" || printf '5')" \
+		"$(cfg_celsius stop_temp 30000)" "$(cfg_celsius start_temp 35000)" \
+		"$(cfg_celsius medium_down 35000)" "$(cfg_celsius medium_up 38000)" \
+		"$(cfg_celsius high_down 37000)" "$(cfg_celsius high_up 40000)"
+}
+
+apply_config() {
+	[ "$#" -eq 6 ] || fail '需要 6 个温度参数'
+	local stop="$1" start="$2" medium_down="$3" medium_up="$4" high_down="$5" high_up="$6" value backup
+	for value in "$stop" "$start" "$medium_down" "$medium_up" "$high_down" "$high_up"; do
+		is_uint "$value" || fail '温度必须是整数'
+		[ "$value" -ge 20 ] && [ "$value" -le 80 ] || fail '温度范围必须在 20–80°C'
+	done
+	[ "$stop" -lt "$start" ] || fail '停止温度必须低于启动温度'
+	[ "$medium_down" -lt "$medium_up" ] || fail '中速降档温度必须低于升档温度'
+	[ "$high_down" -lt "$high_up" ] || fail '高速降档温度必须低于升档温度'
+	[ "$start" -le "$medium_up" ] && [ "$medium_up" -lt "$high_up" ] || fail '升档温度顺序无效'
+
+	backup="/tmp/r3mini_fan.web.$$.bak"
+	cp /etc/config/r3mini_fan "$backup" || fail '无法创建配置备份'
+	if ! uci -q batch <<-EOF
+		set $CONFIG.stop_temp='$((stop * 1000))'
+		set $CONFIG.start_temp='$((start * 1000))'
+		set $CONFIG.medium_down='$((medium_down * 1000))'
+		set $CONFIG.medium_up='$((medium_up * 1000))'
+		set $CONFIG.high_down='$((high_down * 1000))'
+		set $CONFIG.high_up='$((high_up * 1000))'
+		commit r3mini_fan
+	EOF
+	then
+		if cp "$backup" /etc/config/r3mini_fan; then
+			rm -f "$backup"
+			fail '写入配置失败，已恢复旧配置'
+		fi
+		ensure_safe
+		fail "写入配置失败且旧配置恢复失败，备份保留在 $backup"
+	fi
+
+	if ! /etc/init.d/r3mini-fan restart >/dev/null 2>&1; then
+		rollback_config "$backup" && fail '服务重启失败，已恢复旧配置与安全状态'
+		fail "服务重启失败且安全状态无法确认，备份保留在 $backup"
+	fi
+	if ! wait_auto; then
+		rollback_config "$backup" && fail '自动温控接管超时，已恢复旧配置与安全状态'
+		fail "自动温控接管超时且安全状态无法确认，备份保留在 $backup"
+	fi
+	rm -f "$backup"
+	status_json
+}
+
+set_mode() {
+	local pwm
+	case "$1" in
+		auto)
+			if ! /etc/init.d/r3mini-fan restart >/dev/null 2>&1 || ! wait_auto; then
+				ensure_safe && fail '自动温控接管失败，已进入内核或满速安全状态'
+				fail '自动温控接管失败，安全状态无法确认，请立即检查风扇'
+			fi
+			;;
+		low) pwm=128 ;;
+		medium) pwm=80 ;;
+		high) pwm=0 ;;
+		*) fail '模式仅支持 auto、low、medium、high' ;;
+	esac
+	if [ "$1" != auto ]; then
+		/etc/init.d/r3mini-fan stop >/dev/null 2>&1
+		if ! wait_stopped; then
+			restore_auto_or_high && fail '等待旧风扇进程停止超时，已恢复自动或满速安全状态'
+			fail '等待旧风扇进程停止超时，安全状态无法确认，请立即检查风扇'
+		fi
+		if ! echo disabled > "$THERMAL_MODE" || ! echo 1 > "$PWM_ENABLE" || ! echo "$pwm" > "$PWM" || [ "$(read_num "$PWM")" != "$pwm" ]; then
+			restore_auto_or_high && fail '手动档位接管失败，已恢复自动或满速安全状态'
+			fail '手动档位接管失败，安全状态无法确认，请立即检查风扇'
+		fi
+	fi
+	status_json
+}
+
+case "$1" in
+	status) status_json ;;
+	apply) shift; apply_config "$@" ;;
+	mode) set_mode "$2" ;;
+	*) fail '用法: r3mini-fan-web status | apply <6个温度> | mode <auto|low|medium|high>' ;;
+esac

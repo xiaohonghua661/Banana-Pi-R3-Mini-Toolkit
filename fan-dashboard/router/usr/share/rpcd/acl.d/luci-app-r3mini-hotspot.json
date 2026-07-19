@@ -1,0 +1,21 @@
+{
+	"luci-app-r3mini-hotspot": {
+		"description": "允许配置 BPI-R3 Mini 的手机热点 WAN 自动重连",
+		"read": {
+			"file": {
+				"/usr/sbin/r3mini-hotspot-web": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/r3mini-hotspot-web": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}

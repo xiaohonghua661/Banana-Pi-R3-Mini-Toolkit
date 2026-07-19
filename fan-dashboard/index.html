@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BPI-R3 Mini 风扇管理</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #151712;
+      --paper: #e7e2d3;
+      --paper-2: #d7d0bd;
+      --lime: #c7ff28;
+      --orange: #ff6b2c;
+      --muted: #898b80;
+      --line: rgba(231, 226, 211, .16);
+      --panel: rgba(24, 26, 21, .88);
+      --radius: 6px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        linear-gradient(rgba(231, 226, 211, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(231, 226, 211, .035) 1px, transparent 1px),
+        radial-gradient(circle at 82% 14%, rgba(199, 255, 40, .08), transparent 28%),
+        #0e100c;
+      background-size: 36px 36px, 36px 36px, auto, auto;
+      color: var(--paper);
+      font-family: "Bahnschrift", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      min-height: 100vh;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .shell {
+      width: min(1480px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 22px 0 40px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 0 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      font-weight: 800;
+    }
+
+    .brand-mark {
+      position: relative;
+      width: 31px;
+      aspect-ratio: 1;
+      border: 2px solid var(--lime);
+      border-radius: 50%;
+    }
+
+    .brand-mark::before,
+    .brand-mark::after {
+      content: "";
+      position: absolute;
+      inset: 5px 13px;
+      background: var(--lime);
+      transform: rotate(45deg);
+    }
+
+    .brand-mark::after { transform: rotate(-45deg); }
+
+    .eyebrow {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+
+    .status-cluster { display: flex; align-items: center; gap: 10px; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 99px;
+      color: var(--paper-2);
+      font-size: 12px;
+      letter-spacing: .04em;
+    }
+
+    .dot {
+      width: 7px;
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: var(--lime);
+      box-shadow: 0 0 14px var(--lime);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.35fr .65fr;
+      gap: 18px;
+      margin: 18px 0;
+    }
+
+    .panel {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, .24);
+    }
+
+    .hero-main {
+      min-height: 370px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 280px;
+      padding: 30px;
+    }
+
+    .hero-main::after {
+      content: "";
+      position: absolute;
+      width: 430px;
+      aspect-ratio: 1;
+      right: -190px;
+      bottom: -260px;
+      border: 1px solid rgba(199, 255, 40, .2);
+      border-radius: 50%;
+      box-shadow: 0 0 0 54px rgba(199, 255, 40, .015), 0 0 0 108px rgba(199, 255, 40, .01);
+    }
+
+    .temperature {
+      display: flex;
+      align-items: flex-end;
+      gap: 9px;
+      margin-top: 36px;
+      line-height: .82;
+    }
+
+    .temperature strong {
+      font-family: "DIN Condensed", "Bahnschrift Condensed", Impact, sans-serif;
+      font-size: clamp(112px, 15vw, 218px);
+      font-weight: 700;
+      letter-spacing: -.055em;
+    }
+
+    .temperature span {
+      padding-bottom: 14px;
+      color: var(--lime);
+      font-family: Georgia, serif;
+      font-size: clamp(30px, 4vw, 56px);
+      font-style: italic;
+    }
+
+    .temperature-note {
+      width: min(520px, 100%);
+      margin: 20px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .fan-wrap {
+      display: grid;
+      place-items: center;
+      align-content: center;
+      border-left: 1px solid var(--line);
+      z-index: 1;
+    }
+
+    .fan {
+      position: relative;
+      width: 172px;
+      aspect-ratio: 1;
+      border: 1px solid rgba(231, 226, 211, .22);
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 18px rgba(231, 226, 211, .018);
+    }
+
+    .fan.spinning { animation: spin var(--fan-speed, 1.2s) linear infinite; }
+
+    .blade {
+      position: absolute;
+      left: 77px;
+      top: 18px;
+      width: 45px;
+      height: 69px;
+      border-radius: 60% 10% 70% 26%;
+      background: linear-gradient(145deg, var(--lime), #688817);
+      transform-origin: 9px 68px;
+      opacity: .92;
+    }
+
+    .blade:nth-child(2) { transform: rotate(90deg); }
+    .blade:nth-child(3) { transform: rotate(180deg); }
+    .blade:nth-child(4) { transform: rotate(270deg); }
+
+    .hub {
+      position: absolute;
+      inset: 67px;
+      z-index: 2;
+      border-radius: 50%;
+      background: var(--paper);
+      box-shadow: 0 0 0 8px var(--ink);
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .fan-label { margin-top: 22px; text-align: center; }
+    .fan-label strong { display: block; font-size: 25px; }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      min-height: 370px;
+    }
+
+    .metric {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 185px;
+      padding: 20px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric:nth-child(2n) { border-right: 0; }
+    .metric:nth-child(n+3) { border-bottom: 0; }
+    .metric strong { font-family: Georgia, serif; font-size: 35px; font-style: italic; font-weight: 400; }
+    .metric small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(340px, .75fr);
+      gap: 18px;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 20px 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h2 { margin: 4px 0 0; font-size: 22px; letter-spacing: -.02em; }
+
+    .curve-body { padding: 20px 22px 24px; }
+    .curve { width: 100%; min-height: 220px; display: block; }
+    .curve text { font-family: "Bahnschrift", sans-serif; }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 17px; margin-top: 7px; color: var(--muted); font-size: 11px; }
+    .legend i { display: inline-block; width: 18px; height: 2px; margin-right: 7px; vertical-align: middle; background: var(--lime); }
+    .legend i.down { background: var(--orange); }
+
+    .control-body { padding: 22px; }
+
+    .mode-toggle {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    .mode-toggle button {
+      min-height: 42px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .mode-toggle button:last-child { border-right: 0; }
+    .mode-toggle button.active { color: var(--ink); background: var(--lime); font-weight: 800; }
+
+    .thresholds { display: grid; gap: 14px; }
+
+    .threshold {
+      display: grid;
+      grid-template-columns: 1fr 105px;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .threshold label { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+    .threshold label span { color: var(--muted); }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--lime);
+      cursor: pointer;
+    }
+
+    .number-wrap { position: relative; }
+
+    input[type="number"] {
+      width: 100%;
+      padding: 10px 30px 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      outline: 0;
+      background: rgba(0, 0, 0, .18);
+      color: var(--paper);
+    }
+
+    input[type="number"]:focus { border-color: var(--lime); }
+    .number-wrap::after { content: "°C"; position: absolute; right: 10px; top: 11px; color: var(--muted); font-size: 11px; }
+
+    .divider { height: 1px; margin: 22px 0; background: var(--line); }
+
+    .action-row { display: flex; gap: 10px; }
+    .btn {
+      flex: 1;
+      min-height: 45px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: transparent;
+      cursor: pointer;
+      transition: transform .15s ease, background .15s ease;
+    }
+
+    .btn:hover { transform: translateY(-2px); }
+    .btn.primary { border-color: var(--lime); background: var(--lime); color: var(--ink); font-weight: 800; }
+    .btn:disabled { cursor: not-allowed; opacity: .35; transform: none; }
+
+    .message { min-height: 22px; margin: 13px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .message.error { color: var(--orange); }
+    .message.ok { color: var(--lime); }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 16px;
+      color: #66695f;
+      font-size: 10px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    @media (max-width: 980px) {
+      .hero, .workspace { grid-template-columns: 1fr; }
+      .hero-main { min-height: 330px; }
+      .metrics { min-height: auto; }
+    }
+
+    @media (max-width: 650px) {
+      .shell { width: min(100% - 20px, 1480px); padding-top: 12px; }
+      .topbar { align-items: flex-start; }
+      .status-cluster .pill:first-child { display: none; }
+      .hero-main { grid-template-columns: 1fr; padding: 22px; }
+      .fan-wrap { border: 0; border-top: 1px solid var(--line); padding-top: 25px; }
+      .temperature { margin: 24px 0; }
+      .temperature strong { font-size: 110px; }
+      .temperature-note { margin-bottom: 25px; }
+      .threshold { grid-template-columns: 1fr 88px; }
+      .footer { flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>BPI-R3 Mini / Thermal</span></div>
+      <div class="status-cluster">
+        <span class="pill">节点 192.168.0.242</span>
+        <span class="pill"><i class="dot"></i><span id="connection">演示模式</span></span>
+      </div>
+    </header>
+
+    <section class="hero" aria-label="设备状态">
+      <article class="panel hero-main">
+        <div>
+          <div class="eyebrow">CPU package temperature</div>
+          <div class="temperature"><strong id="temperature">38.4</strong><span>°C</span></div>
+          <p class="temperature-note" id="temperatureNote">目标低于 40°C。控制器每 5 秒采样，当前处在中速区间；降至 35°C 后才会回到低速。</p>
+        </div>
+        <div class="fan-wrap">
+          <div class="fan spinning" id="fan" aria-label="风扇动画">
+            <i class="blade"></i><i class="blade"></i><i class="blade"></i><i class="blade"></i><i class="hub"></i>
+          </div>
+          <div class="fan-label"><div class="eyebrow">Current stage</div><strong id="stage">中速</strong></div>
+        </div>
+      </article>
+
+      <aside class="panel metrics" aria-label="实时指标">
+        <div class="metric"><span class="eyebrow">PWM 输出</span><strong id="pwm">128</strong><small>0–255<br>当前硬件输出</small></div>
+        <div class="metric"><span class="eyebrow">内核模式</span><strong id="kernelMode">OFF</strong><small>用户态服务接管<br>mode=disabled</small></div>
+        <div class="metric"><span class="eyebrow">采样周期</span><strong>5s</strong><small>下一次更新<br><span id="countdown">00:05</span></small></div>
+        <div class="metric"><span class="eyebrow">运行策略</span><strong id="policy">AUTO</strong><small>带回差调速<br>避免频繁启停</small></div>
+      </aside>
+    </section>
+
+    <section class="workspace">
+      <article class="panel">
+        <header class="panel-head">
+          <div><div class="eyebrow">Hysteresis map</div><h2>温控回差曲线</h2></div>
+          <span class="pill">高温优先保护</span>
+        </header>
+        <div class="curve-body">
+          <svg class="curve" id="curve" viewBox="0 0 760 260" role="img" aria-label="风扇升档和降档曲线"></svg>
+          <div class="legend"><span><i></i>升温档位</span><span><i class="down"></i>降温档位</span><span>阴影区域 = 回差，防止临界温度抖动</span></div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <header class="panel-head">
+          <div><div class="eyebrow">Controller</div><h2>风扇控制</h2></div>
+          <span class="pill" id="dirtyBadge">参数已同步</span>
+        </header>
+        <div class="control-body">
+          <div class="eyebrow" style="margin-bottom:10px">运行模式</div>
+          <div class="mode-toggle" id="modeToggle">
+            <button class="active" data-mode="auto">自动</button>
+            <button data-mode="low">低速</button>
+            <button data-mode="medium">中速</button>
+            <button data-mode="high">高速</button>
+          </div>
+
+          <div class="thresholds" id="thresholds"></div>
+          <div class="divider"></div>
+          <div class="action-row">
+            <button class="btn" id="reset">恢复当前值</button>
+            <button class="btn primary" id="apply">应用配置</button>
+          </div>
+          <p class="message" id="message" aria-live="polite">当前为安全演示模式，配置只保存在本机浏览器。</p>
+        </div>
+      </article>
+    </section>
+
+    <footer class="footer"><span>R3MINI-FAN / BUILD 01</span><span>STATE 0 = 255 PWM / FAIL-SAFE HIGH</span></footer>
+  </main>
+
+  <script>
+    const defaults = { stop: 30, start: 35, mediumDown: 35, mediumUp: 38, highDown: 37, highUp: 40 };
+    const fields = [
+      ["stop", "停止风扇", "stop_temp"],
+      ["start", "启动低速", "start_temp"],
+      ["mediumDown", "降为低速", "medium_down"],
+      ["mediumUp", "升为中速", "medium_up"],
+      ["highDown", "降为中速", "high_down"],
+      ["highUp", "升为高速", "high_up"]
+    ];
+    let saved = JSON.parse(localStorage.getItem("r3mini-fan-demo") || "null") || { ...defaults };
+    let config = { ...saved };
+    let temperature = 38.4;
+    let stage = 1;
+    let mode = "auto";
+    let seconds = 5;
+
+    const $ = (selector) => document.querySelector(selector);
+    const thresholds = $("#thresholds");
+
+    fields.forEach(([key, label, code]) => {
+      thresholds.insertAdjacentHTML("beforeend", `
+        <div class="threshold">
+          <div><label for="${key}-range"><span>${label}</span><code>${code}</code></label><input id="${key}-range" data-key="${key}" type="range" min="20" max="55" step="1" value="${config[key]}"></div>
+          <div class="number-wrap"><input id="${key}" data-key="${key}" type="number" min="20" max="55" step="1" value="${config[key]}" aria-label="${label}"></div>
+        </div>`);
+    });
+
+    function validate() {
+      const valid = config.stop < config.start && config.start <= config.mediumUp && config.mediumUp < config.highUp && config.mediumDown < config.mediumUp && config.highDown < config.highUp;
+      $("#apply").disabled = !valid;
+      $("#message").className = valid ? "message" : "message error";
+      $("#message").textContent = valid ? "当前为安全演示模式，配置只保存在本机浏览器。" : "阈值关系无效：停止 < 启动 ≤ 中速升档 < 高速升档，且各降档值必须低于对应升档值。";
+      return valid;
+    }
+
+    function syncInputs() {
+      fields.forEach(([key]) => document.querySelectorAll(`[data-key="${key}"]`).forEach(input => input.value = config[key]));
+      const dirty = JSON.stringify(config) !== JSON.stringify(saved);
+      $("#dirtyBadge").textContent = dirty ? "有未应用修改" : "参数已同步";
+      validate();
+      drawCurve();
+    }
+
+    function automaticStage(temp) {
+      if (stage === 3 && temp <= config.highDown) stage = 2;
+      if (stage === 2 && temp >= config.highUp) stage = 3;
+      else if (stage === 2 && temp <= config.mediumDown) stage = 1;
+      if (stage === 1 && temp >= config.mediumUp) stage = 2;
+      else if (stage === 1 && temp <= config.stop) stage = 0;
+      if (stage === 0 && temp >= config.start) stage = 1;
+      return stage;
+    }
+
+    function renderStatus() {
+      if (mode === "auto") automaticStage(temperature);
+      else stage = { low: 1, medium: 2, high: 3 }[mode];
+      const names = ["停转", "低速", "中速", "高速"];
+      const pwmValues = [255, 128, 80, 0];
+      const fanSpeeds = ["0s", "2.4s", "1.25s", ".65s"];
+      $("#temperature").textContent = temperature.toFixed(1);
+      $("#stage").textContent = names[stage];
+      $("#pwm").textContent = pwmValues[stage];
+      $("#policy").textContent = mode.toUpperCase();
+      $("#fan").classList.toggle("spinning", stage > 0);
+      $("#fan").style.setProperty("--fan-speed", fanSpeeds[stage]);
+      const down = stage === 3 ? config.highDown : stage === 2 ? config.mediumDown : config.stop;
+      $("#temperatureNote").textContent = `目标低于 ${config.highUp}°C。控制器每 5 秒采样，当前处在${names[stage]}区间；降至 ${down}°C 后才会降低档位。`;
+    }
+
+    function drawCurve() {
+      const svg = $("#curve");
+      const x = t => 70 + (t - 20) / 35 * 650;
+      const y = s => 220 - s * 58;
+      const grid = [0, 1, 2, 3].map(s => `<line x1="70" y1="${y(s)}" x2="720" y2="${y(s)}" stroke="rgba(231,226,211,.10)"/><text x="18" y="${y(s)+4}" fill="#898b80" font-size="11">${["停转","低速","中速","高速"][s]}</text>`).join("");
+      const ticks = [20, 30, 35, 40, 45, 50, 55].map(t => `<line x1="${x(t)}" y1="220" x2="${x(t)}" y2="225" stroke="#898b80"/><text x="${x(t)}" y="246" text-anchor="middle" fill="#898b80" font-size="10">${t}°</text>`).join("");
+      const up = [[20,0],[config.start,0],[config.start,1],[config.mediumUp,1],[config.mediumUp,2],[config.highUp,2],[config.highUp,3],[55,3]];
+      const down = [[55,3],[config.highDown,3],[config.highDown,2],[config.mediumDown,2],[config.mediumDown,1],[config.stop,1],[config.stop,0],[20,0]];
+      const points = arr => arr.map(([t,s]) => `${x(t)},${y(s)}`).join(" ");
+      const bands = [[config.stop,config.start,0],[config.mediumDown,config.mediumUp,1],[config.highDown,config.highUp,2]].map(([a,b,s]) => `<rect x="${x(a)}" y="${y(s+1)}" width="${Math.max(2,x(b)-x(a))}" height="58" fill="rgba(199,255,40,.055)"/>`).join("");
+      svg.innerHTML = `${bands}${grid}${ticks}<polyline points="${points(up)}" fill="none" stroke="#c7ff28" stroke-width="4" stroke-linejoin="round"/><polyline points="${points(down)}" fill="none" stroke="#ff6b2c" stroke-width="2" stroke-dasharray="7 7" stroke-linejoin="round"/>`;
+    }
+
+    thresholds.addEventListener("input", event => {
+      const key = event.target.dataset.key;
+      if (!key) return;
+      config[key] = Number(event.target.value);
+      document.querySelectorAll(`[data-key="${key}"]`).forEach(input => { if (input !== event.target) input.value = config[key]; });
+      syncInputs();
+    });
+
+    $("#modeToggle").addEventListener("click", event => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      mode = button.dataset.mode;
+      document.querySelectorAll("#modeToggle button").forEach(item => item.classList.toggle("active", item === button));
+      renderStatus();
+    });
+
+    $("#reset").addEventListener("click", () => { config = { ...saved }; syncInputs(); });
+    $("#apply").addEventListener("click", () => {
+      if (!validate()) return;
+      saved = { ...config };
+      localStorage.setItem("r3mini-fan-demo", JSON.stringify(saved));
+      $("#dirtyBadge").textContent = "参数已同步";
+      $("#message").className = "message ok";
+      $("#message").textContent = "演示配置已保存。接入路由器后，此操作将重启 r3mini-fan 服务。";
+    });
+
+    setInterval(() => {
+      seconds -= 1;
+      if (seconds <= 0) {
+        seconds = 5;
+        temperature = Math.min(46, Math.max(27, temperature + (Math.random() - .53) * 1.8));
+        renderStatus();
+      }
+      $("#countdown").textContent = `00:0${seconds}`;
+    }, 1000);
+
+    syncInputs();
+    renderStatus();
+  </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+	"admin/network/r3mini-hotspot": {
+		"title": "手机热点 WAN",
+		"order": 85,
+		"action": {
+			"type": "view",
+			"path": "network/r3mini-hotspot"
+		},
+		"depends": {
+			"acl": [ "luci-app-r3mini-hotspot" ]
+		}
+	}
+}

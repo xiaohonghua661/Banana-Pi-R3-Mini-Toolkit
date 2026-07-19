@@ -1,0 +1,224 @@
+#!/bin/sh
+
+CONFIG='r3mini_hotspot.main'
+STA='r3mini_phone_sta'
+AP='default_radio1'
+
+fail() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+cfg() { uci -q get "$CONFIG.$1"; }
+
+is_uint() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+
+if_up() {
+	ifstatus "$1" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null || printf false
+}
+
+if_ip() {
+	ifstatus "$1" 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null || true
+}
+
+radio_channel() {
+	iw dev phy1-ap0 info 2>/dev/null | awk '/channel / { print $2; exit }'
+}
+
+scan_channel() {
+	local target="$1" raw keys item found channel
+	raw="$(ubus call iwinfo scan '{"device":"phy1-ap0"}' 2>/dev/null)" || return 1
+	json_init
+	json_load "$raw" || return 1
+	json_select results || return 1
+	json_get_keys keys
+	for item in $keys; do
+		json_select "$item"
+		json_get_var found ssid
+		json_get_var channel channel
+		json_select ..
+		if [ "$found" = "$target" ]; then
+			case "$channel" in ''|*[!0-9]*) return 1 ;; esac
+			printf '%s' "$channel"
+			return 0
+		fi
+	done
+	return 1
+}
+
+interface_device() {
+	local iface="$1" dev
+	dev="$(ifstatus "$iface" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)"
+	[ -n "$dev" ] || dev="$(ifstatus "$iface" 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)"
+	printf '%s' "$dev"
+}
+
+default_device() {
+	ip -4 route show default 2>/dev/null | awk 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+cellular_interface() {
+	local iface proto
+	for iface in $(uci show network | sed -n 's/^network\.\([^=]*\)=interface$/\1/p'); do
+		[ "$iface" = wwan ] && continue
+		proto="$(uci -q get network.$iface.proto)"
+		case "$proto" in
+			3g|ncm|qmi|mbim|quectel|modemmanager) printf '%s' "$iface"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+egress_status() {
+	local dev wan_dev hotspot_dev cellular cellular_dev
+	dev="$(default_device)"
+	wan_dev="$(interface_device wan)"
+	hotspot_dev="$(interface_device wwan)"
+	cellular="$(cellular_interface || true)"
+	cellular_dev="$(interface_device "$cellular")"
+	EGRESS_KIND='none'
+	EGRESS_LABEL='未检测到默认出口'
+	EGRESS_IFACE=''
+	EGRESS_IP=''
+	[ -n "$dev" ] || return 0
+	if [ -n "$wan_dev" ] && [ "$dev" = "$wan_dev" ]; then
+		EGRESS_KIND='wan'; EGRESS_LABEL='有线 WAN'; EGRESS_IFACE='wan'; EGRESS_IP="$(if_ip wan)"
+	elif [ -n "$hotspot_dev" ] && [ "$dev" = "$hotspot_dev" ]; then
+		EGRESS_KIND='hotspot'; EGRESS_LABEL='手机热点 Wi-Fi'; EGRESS_IFACE='wwan'; EGRESS_IP="$(if_ip wwan)"
+	elif [ -n "$cellular_dev" ] && [ "$dev" = "$cellular_dev" ]; then
+		EGRESS_KIND='cellular'; EGRESS_LABEL='蜂窝网络'; EGRESS_IFACE="$cellular"; EGRESS_IP="$(if_ip "$cellular")"
+	else
+		EGRESS_KIND='other'; EGRESS_LABEL='其他上游'; EGRESS_IFACE="$dev"
+	fi
+	EGRESS_DEVICE="$dev"
+}
+
+status_json() {
+	. /usr/share/libubox/jshn.sh
+	local enabled ssid key radio interval limit cooldown cellular target_channel
+	enabled="$(cfg enabled)"; [ "$enabled" = 1 ] || enabled=0
+	ssid="$(uci -q get wireless.$STA.ssid)"
+	key="$(uci -q get wireless.$STA.key)"
+	radio="$(cfg radio)"; [ -n "$radio" ] || radio=radio1
+	interval="$(cfg check_interval)"; is_uint "$interval" || interval=20
+	limit="$(cfg failure_limit)"; is_uint "$limit" || limit=3
+	cooldown="$(cfg cooldown)"; is_uint "$cooldown" || cooldown=180
+	target_channel="$(cfg target_channel)"; is_uint "$target_channel" || target_channel=''
+	cellular="$(cellular_interface || true)"
+	egress_status
+	json_init
+	json_add_boolean enabled "$enabled"
+	json_add_boolean configured "$([ -n "$ssid" ] && printf 1 || printf 0)"
+	json_add_boolean key_configured "$([ -n "$key" ] && printf 1 || printf 0)"
+	json_add_boolean wwan_up "$([ "$(if_up wwan)" = true ] && printf 1 || printf 0)"
+	json_add_boolean wired_wan_up "$([ "$(if_up wan)" = true ] && printf 1 || printf 0)"
+	json_add_boolean cellular_up "$([ -n "$cellular" ] && [ "$(if_up "$cellular")" = true ] && printf 1 || printf 0)"
+	json_add_string ssid "$ssid"
+	json_add_string wwan_ip "$(if_ip wwan)"
+	json_add_string radio "$radio"
+	json_add_string channel "$(radio_channel)"
+	json_add_string target_channel "$target_channel"
+	json_add_string ap_ssid "$(uci -q get wireless.$AP.ssid)"
+	json_add_string cellular_iface "$cellular"
+	json_add_string egress_kind "$EGRESS_KIND"
+	json_add_string egress_label "$EGRESS_LABEL"
+	json_add_string egress_iface "$EGRESS_IFACE"
+	json_add_string egress_ip "$EGRESS_IP"
+	json_add_string egress_device "$EGRESS_DEVICE"
+	json_add_int check_interval "$interval"
+	json_add_int failure_limit "$limit"
+	json_add_int cooldown "$cooldown"
+	json_dump
+}
+
+ensure_wan_zone() {
+	local zone networks
+	for zone in $(uci show firewall | sed -n 's/^firewall\.\([^=]*\)=zone$/\1/p'); do
+		[ "$(uci -q get firewall.$zone.name)" = wan ] && break
+		zone=''
+	done
+	[ -n "$zone" ] || fail '未找到防火墙 WAN 区域'
+	networks="$(uci -q get firewall.$zone.network)"
+	case " $networks " in *' wwan '*) ;; *) uci add_list firewall.$zone.network='wwan' ;; esac
+}
+
+reconfigure_radio() {
+	/sbin/wifi reconf radio1 >/dev/null 2>&1 || fail '5GHz 无线重配置失败；已保存配置，请在系统→无线中检查 radio1'
+}
+
+apply_config() {
+	[ "$#" -eq 3 ] || fail '用法: apply <0|1> <热点SSID> <热点密码>'
+	local enabled="$1" ssid="$2" key="$3" old_key original_channel target_channel ap_mode ap_device cr newline
+	case "$enabled" in 0|1) ;; *) fail '启用状态无效' ;; esac
+	ap_mode="$(uci -q get wireless.$AP.mode)"
+	ap_device="$(uci -q get wireless.$AP.device)"
+	[ "$ap_mode" = ap ] && [ "$ap_device" = radio1 ] || fail '当前 5GHz AP 不是 radio1；为避免断网，拒绝自动改动'
+	cr="$(printf '\r')"
+	newline='
+'
+
+	if [ "$enabled" = 1 ]; then
+		[ -n "$ssid" ] || fail '请输入手机热点名称'
+		[ "$(printf '%s' "$ssid" | wc -c)" -le 32 ] || fail '热点名称不能超过 32 字节'
+		case "$ssid" in *"$cr"*|*"$newline"*) fail '热点名称不能包含换行' ;; esac
+		old_key="$(uci -q get wireless.$STA.key)"
+		[ -n "$key" ] || key="$old_key"
+		[ -n "$key" ] || fail '首次配置必须输入手机热点密码'
+		[ "$(printf '%s' "$key" | wc -c)" -ge 8 ] && [ "$(printf '%s' "$key" | wc -c)" -le 63 ] || fail '热点密码必须为 8–63 个字符'
+		case "$key" in *"$cr"*|*"$newline"*) fail '热点密码不能包含换行' ;; esac
+		target_channel="$(scan_channel "$ssid" || true)"
+		[ -n "$target_channel" ] || fail '未扫描到该手机热点；请先打开手机 5GHz 热点，并把手机放在路由器附近后重试'
+
+		uci set network.wwan=interface
+		uci set network.wwan.proto='dhcp'
+		uci set network.wwan.metric='20'
+		uci set wireless.$STA=wifi-iface
+		uci set wireless.$STA.device='radio1'
+		uci set wireless.$STA.mode='sta'
+		uci set wireless.$STA.network='wwan'
+		uci set "wireless.$STA.ssid=$ssid"
+		uci set wireless.$STA.encryption='psk2'
+		uci set "wireless.$STA.key=$key"
+		uci set wireless.$STA.disabled='0'
+		original_channel="$(uci -q get $CONFIG.original_channel)"
+		if [ -z "$original_channel" ]; then
+			original_channel="$(uci -q get wireless.radio1.channel)"
+			[ -n "$original_channel" ] && uci set "$CONFIG.original_channel=$original_channel"
+		fi
+		uci set "wireless.radio1.channel=$target_channel"
+		uci set "$CONFIG.target_channel=$target_channel"
+	else
+		uci -q set wireless.$STA.disabled='1'
+		original_channel="$(uci -q get $CONFIG.original_channel)"
+		if [ -n "$original_channel" ]; then
+			uci set "wireless.radio1.channel=$original_channel"
+			uci -q delete $CONFIG.original_channel
+		fi
+		uci -q delete $CONFIG.target_channel
+		ifdown wwan >/dev/null 2>&1 || true
+	fi
+
+	uci set $CONFIG=hotspot
+	uci set $CONFIG.enabled="$enabled"
+	uci set $CONFIG.radio='radio1'
+	uci set $CONFIG.interface='wwan'
+	uci set $CONFIG.check_interval='20'
+	uci set $CONFIG.failure_limit='3'
+	uci set $CONFIG.cooldown='180'
+	ensure_wan_zone
+	uci commit network
+	uci commit wireless
+	uci commit firewall
+	uci commit r3mini_hotspot
+	reconfigure_radio
+	/etc/init.d/firewall reload >/dev/null 2>&1 || fail '防火墙重载失败；请检查 WAN 区域'
+	/etc/init.d/r3mini-hotspot enable
+	/etc/init.d/r3mini-hotspot restart
+	status_json
+}
+
+case "$1" in
+	status) status_json ;;
+	apply) shift; apply_config "$@" ;;
+	*) fail '用法: r3mini-hotspot-web status | apply <0|1> <热点SSID> <热点密码>' ;;
+esac

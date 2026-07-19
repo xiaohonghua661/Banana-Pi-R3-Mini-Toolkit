@@ -1,0 +1,103 @@
+#!/bin/sh
+
+TAG="r3mini-fan"
+cfg() { uci -q get "r3mini_fan.main.$1"; }
+
+SENSOR="$(cfg sensor)"; [ -n "$SENSOR" ] || SENSOR="/sys/class/thermal/thermal_zone0/temp"
+MODE="$(cfg mode)"; [ -n "$MODE" ] || MODE="/sys/class/thermal/thermal_zone0/mode"
+PWM="$(cfg pwm)"; [ -n "$PWM" ] || PWM="/sys/class/hwmon/hwmon1/pwm1"
+PWM_ENABLE="$(cfg pwm_enable)"; [ -n "$PWM_ENABLE" ] || PWM_ENABLE="/sys/class/hwmon/hwmon1/pwm1_enable"
+START_TEMP="$(cfg start_temp)"; [ -n "$START_TEMP" ] || START_TEMP=38000
+STOP_TEMP="$(cfg stop_temp)"; [ -n "$STOP_TEMP" ] || STOP_TEMP=34000
+MEDIUM_UP="$(cfg medium_up)"; [ -n "$MEDIUM_UP" ] || MEDIUM_UP=40000
+MEDIUM_DOWN="$(cfg medium_down)"; [ -n "$MEDIUM_DOWN" ] || MEDIUM_DOWN=37000
+HIGH_UP="$(cfg high_up)"; [ -n "$HIGH_UP" ] || HIGH_UP=44000
+HIGH_DOWN="$(cfg high_down)"; [ -n "$HIGH_DOWN" ] || HIGH_DOWN=41000
+INTERVAL="$(cfg interval)"; [ -n "$INTERVAL" ] || INTERVAL=5
+
+is_num() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+for value in "$START_TEMP" "$STOP_TEMP" "$MEDIUM_UP" "$MEDIUM_DOWN" "$HIGH_UP" "$HIGH_DOWN" "$INTERVAL"; do
+	is_num "$value" || { logger -t "$TAG" "invalid numeric configuration"; exit 1; }
+done
+if [ "$STOP_TEMP" -ge "$START_TEMP" ] || [ "$MEDIUM_DOWN" -ge "$MEDIUM_UP" ] || [ "$HIGH_DOWN" -ge "$HIGH_UP" ] || [ "$START_TEMP" -gt "$MEDIUM_UP" ] || [ "$MEDIUM_UP" -ge "$HIGH_UP" ]; then
+	logger -t "$TAG" "invalid threshold ordering"
+	exit 1
+fi
+[ -w "$MODE" ] && [ -w "$PWM" ] && [ -w "$PWM_ENABLE" ] || { logger -t "$TAG" "fan control interface unavailable"; exit 1; }
+
+set_stage() {
+	local pwm
+	case "$1" in
+		0) pwm=255 ;; # stop
+		1) pwm=128 ;; # low
+		2) pwm=80  ;; # medium
+		3) pwm=0   ;; # high: inverted PWM
+		*) pwm=0 ;;
+	esac
+	echo 1 > "$PWM_ENABLE" && echo "$pwm" > "$PWM" || return 1
+	[ "$(cat "$PWM" 2>/dev/null)" = "$pwm" ]
+}
+
+restore_kernel() {
+	echo enabled > "$MODE" 2>/dev/null || return 1
+	[ "$(cat "$MODE" 2>/dev/null)" = enabled ]
+}
+
+echo disabled > "$MODE" || exit 1
+cleanup() { restore_kernel || logger -t "$TAG" "failed to restore kernel mode on shutdown"; }
+trap 'cleanup; exit 0' INT TERM
+
+stage=3
+if ! set_stage "$stage"; then
+	if restore_kernel; then
+		logger -t "$TAG" "initial full-speed write failed; kernel mode confirmed"
+	else
+		logger -t "$TAG" "initial full-speed write failed; kernel fallback unconfirmed"
+	fi
+	exit 1
+fi
+initialized=0
+while :; do
+	temp="$(cat "$SENSOR" 2>/dev/null)"
+	if ! is_num "$temp"; then
+		new=3
+	elif [ "$initialized" -eq 0 ]; then
+		if [ "$temp" -ge "$HIGH_UP" ]; then
+			new=3
+		elif [ "$temp" -ge "$MEDIUM_UP" ]; then
+			new=2
+		elif [ "$temp" -ge "$START_TEMP" ]; then
+			new=1
+		else
+			new=0
+		fi
+		initialized=1
+	else
+		new="$stage"
+		case "$stage" in
+			0) if [ "$temp" -ge "$HIGH_UP" ]; then new=3; elif [ "$temp" -ge "$MEDIUM_UP" ]; then new=2; elif [ "$temp" -ge "$START_TEMP" ]; then new=1; fi ;;
+			1) if [ "$temp" -ge "$HIGH_UP" ]; then new=3; elif [ "$temp" -ge "$MEDIUM_UP" ]; then new=2; elif [ "$temp" -le "$STOP_TEMP" ]; then new=0; fi ;;
+			2) if [ "$temp" -ge "$HIGH_UP" ]; then new=3; elif [ "$temp" -le "$MEDIUM_DOWN" ]; then new=1; fi ;;
+			3) if [ "$temp" -le "$HIGH_DOWN" ]; then new=2; fi ;;
+			*) new=3 ;;
+		esac
+	fi
+	if [ "$new" != "$stage" ]; then
+		if set_stage "$new"; then
+			logger -t "$TAG" "temp=${temp} stage=${stage}->${new}"
+			stage="$new"
+		else
+			if set_stage 3; then
+				logger -t "$TAG" "fan write failed; full speed confirmed"
+			else
+				if restore_kernel; then
+					logger -t "$TAG" "fan write and full-speed fallback failed; kernel mode confirmed"
+				else
+					logger -t "$TAG" "fan write and full-speed fallback failed; kernel fallback unconfirmed"
+				fi
+			fi
+			exit 1
+		fi
+	fi
+	sleep "$INTERVAL"
+done

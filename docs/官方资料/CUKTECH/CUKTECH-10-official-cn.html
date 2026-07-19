@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--头部文件使用这个-->
+<head>
+<meta content="text/html; charset=UTF-8" http-equiv="Content-Type">
+<meta content="width=device-width, initial-scale=1, shrink-to-fit=no"
+	name="viewport">
+<title>CUKTECH酷态科官网</title>
+<meta name="keywords" content="南京酷科,酷科电子,酷科科技,酷科电子科技有限公司，酷科充电器">
+<meta name="description" content="南京酷科电子科技有限公司，成立于2016年，获得小米、紫米和顺为资本投资，总部坐落于六朝古都南京，是一家集研发、设计、销售、服务于一体，聚焦于数码充电领域的技术驱动型创新企业，国家高新技术企业。">
+
+<link rel="stylesheet"
+	href="https://cuktech.com.cn/kuke/template/statics/kuke/swiper/swiper-bundle.min.css">
+<script src="https://cuktech.com.cn/kuke/template/statics/kuke/swiper/swiper-bundle.min.js"></script>
+<script src="https://cdn.staticfile.org/jquery/3.2.1/jquery.min.js"></script>
+<script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+<link rel="stylesheet" href="https://cuktech.com.cn/kuke/template/statics/kuke/css/home.css?v=250317">
+<script src="https://cuktech.com.cn/kuke/template/statics/kuke/js/common.js?v=250317"></script>
+
+<link rel="stylesheet"
+	href="https://at.alicdn.com/t/c/font_3952153_nravl3aeq8h.css">
+<script>
+		$(window).scroll(function () {
+			$(".search_pop").hide();
+		})
+
+	</script>
+</head>
+
+<style>  
+.fenlei_link{
+    display:inline-block;
+    position:relative;
+    padding-top:10px;
+    padding-bottom:10px;
+}
+
+.fenlei>.fenlei_item>.fenlei_link::before {
+    content: "";
+    position: absolute;
+    bottom: -1px;
+    background-color: currentColor;
+    height: 2px;
+    transition: transform 0.3s;
+    z-index: 20;
+    width: calc(100%);
+    transform: scaleX(0);
+    will-change: transform;
+}
+
+.fenlei>.fenlei_item>.fenlei_link:hover::before{
+    transform: scaleX(1);
+}
+
+/*当前页面时，给fenlei_item里再新增一个class fenlei_item_active */
+.fenlei>.fenlei_item.fenlei_item_active>.fenlei_link::before{
+    transform: scaleX(1);
+}
+
+
+
+/*头部菜单的下滑菜单样式*/
+.left_menu_item{
+    background: transparent;
+    padding:10px 20px;
+    margin-bottom:15px;
+}
+
+.left_menu_item:hover {
+	    background-color: #262626;
+	}
+/*当前菜单导航时，加*/
+.left_menu_item.on{
+    background: #262626;
+}
+.left_menu_item.active{
+    background: #262626;
+}
+
+
+
+/*new导航 start*/
+.newcon{
+    display: flex;
+}
+.left-menu {
+    width: 16.5%;
+}
+
+.left-menu ul {
+    list-style-type: none;
+    padding: 0;
+}
+
+.left-menu li {
+    font-style: normal;
+    font-weight: 400;
+    font-size: 16px;
+    cursor: pointer;
+    background: transparent;
+    padding:8px 20px;
+    margin-bottom:15px;
+    transition: background-color 0.3s;
+    width: 74%;
+    letter-spacing: 3px;
+    
+}
+.left-menu li.active{
+    background-color: #262626;
+}
+
+.left-menu li:hover {
+    background-color: #262626;
+}
+
+/* 右侧内容展示样式 */
+.right-content {
+    width: 80%;
+    
+    .content {
+	    display: none;
+	}
+	
+	.content.active {
+	    display: block;
+	}
+}
+
+.rconblock{
+width: 100%;
+}
+
+.rconblock .imgroup {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+}
+
+.rconblock .imgroup div {
+    width: 25%;
+    text-align: center;
+    font-style: normal;
+    font-weight: 400;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+    margin-bottom: 25px;
+}
+.rconblock .imgroup div img {
+    height: 76px;
+}		
+
+
+</style>
+
+<body>
+	<div class="all">
+
+		<!--导航栏-->
+		<div class="head">
+			<div class="head_a">
+				<div class="head_left">
+					<!-- <img src="../images/CUKTECH_LOGO11.png" alt=""> -->
+					<img src="https://cuktech.com.cn/kuke/template/statics/kuke/images/CUKTECH_LOGO11.png" alt="">
+					<div class="fenlei" id="menu">
+						<!--头部导航循环开始--> 
+        		         <div class="fenlei_item " id="1" classType="1">
+        		            <a class="fenlei_link" href="https://cuktech.com.cn/list_pro.thtml?classId=1">移动电源</a>
+        		         </div> 
+        		         <div class="fenlei_item " id="3" classType="1">
+        		            <a class="fenlei_link" href="https://cuktech.com.cn/list_pro.thtml?classId=3">充电器</a>
+        		         </div> 
+        		         <div class="fenlei_item " id="4" classType="1">
+        		            <a class="fenlei_link" href="https://cuktech.com.cn/list_pro.thtml?classId=4">数据线</a>
+        		         </div> 
+        		         <div class="fenlei_item " id="5" classType="1">
+        		            <a class="fenlei_link" href="https://cuktech.com.cn/list_pro.thtml?classId=5">其他配件</a>
+        		         </div> 
+        		         <div class="fenlei_item " id="25" classType="1">
+        		            <a class="fenlei_link" href="https://cuktech.com.cn/evaluation.thtml?classId=25">产品测评</a>
+        		         </div> 
+					  <!--头部导航循环开始-->
+					</div>
+				</div>
+				<script type="text/javascript">
+					//返回首页
+					$(".head_left>img").click(function () {
+						window.location.href = 'https://cuktech.com.cn/'
+					})
+
+					// 移出标题,商品消失
+					$(".head").mouseleave(function () {
+						// 	//移除把所有的都隐藏
+						$(".head_b").stop(true.true).slideUp();
+						/* $(".head_c").stop(true.true).slideUp();
+					 	$(".head_d").stop(true.true).slideUp(); */
+
+					})
+					// // 移入显示标题分类,改变下拉框文字
+					$('.fenlei').on('mouseover', 'div', function () {
+						var cateId = $(this).attr("id");
+						var classType = $(this).attr("classType");
+						 console.log("cateId=====>",cateId) 
+						 console.log("classType=====>",classType)
+				 
+						//非外链接
+						if (classType!=2) {
+							var cflag = $("#input_"+cateId).val();
+							 console.log("cflag>>>>",cflag);
+							if(cflag){ //有数据
+							/* 	$(".head_c").hide();
+								$(".head_d").hide() */;
+								$(".head_b").stop(true.true).slideDown();
+								$("#subClassify_" + cateId).show();
+								$("#subClassify_" + cateId).siblings(".head_b").hide(); 
+								
+							    // 页面加载时默认激活第一个菜单项并显示对应内容
+							   var menuItems = $("li[pid='"+cateId+"']");
+							    console.log("menuItems===>",menuItems); 
+							    
+							    
+							    if(menuItems){
+							       //先把所有给删除掉样式
+							       menuItems.each(function(index,element){
+							           var  item =  menuItems[index]
+							             item.classList.remove('active'); 
+							            var contentId =  item.dataset.content; 
+							            var content = document.getElementById(contentId); 
+							             content.classList.remove('active');  
+							       })
+							    
+							    
+							        var firstMenuItem = menuItems[0];
+							        var firstContentId = firstMenuItem.dataset.content;
+							        var firstContent = document.getElementById(firstContentId);
+							        firstMenuItem.classList.add('active');
+							        firstContent.classList.add('active'); 
+							    } 
+								
+								
+							}else{ //外链接
+								$(".head_b").hide();
+							/* 	if(cateId==4){ //户外电源
+								  $(".head_d").hide();
+								  $(".head_c").stop(true.true).show();
+								}
+								if(cateId==2){ //车用充电
+								    $(".head_d").stop(true.true).show();
+								    $(".head_c").hide();
+								} */
+								
+							}
+							 
+						  
+						}else{
+							// 第三方链接
+							$(this).addClass("hand");
+							// $(".head_c").hide();
+							$(".head_b").hide();
+							// $(".head_d").hide();
+						}
+
+					});
+				</script>
+				<div class="head_right">
+					<div>
+						<div>
+							<a href="https://cuktech.com.cn/list_about.thtml" style="color: white;">关于我们</a>
+						</div>
+					</div>
+					<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/search.png" alt=""
+						class="search" style="width: 16px; height: 16px;">
+					<div class="nav-account">
+						<a href="javascript:;" class="nav-link"> <span style="color: #fff;"
+							class="buy">购买渠道</span>
+						</a>
+						<div class="dui-dropdown-menu single"
+							style="display: none; z-index: 1000;">
+							<ul>
+					       <!--   <li class="nav-item"><a href="https://mall.jd.com/index-1000454827.html?from=pc">京东商城</a></li> -->
+					         <li class="nav-item"><a data-ga-category="pc_nav_V2_hover"
+									data-ga-action="click" data-ga-label="other-login" href="https://mall.jd.com/index-1000454827.html?from=pc"
+									class="login-link ga-data" target="_blank">京东商城</a></li>
+					       <!--   <li class="nav-item"><a href="https://cuktechsm.tmall.com/?spm=a21dvs.24047116.0.dshop.52d2645eWODwCq">天猫商城</a></li> -->
+					         <li class="nav-item"><a data-ga-category="pc_nav_V2_hover"
+									data-ga-action="click" data-ga-label="other-login" href="https://cuktechsm.tmall.com/?spm=a21dvs.24047116.0.dshop.52d2645eWODwCq"
+									class="login-link ga-data" target="_blank">天猫商城</a></li>
+					       <!--   <li class="nav-item"><a href="https://m.xiaomiyoupin.com/w/spchome?_rt=weex&amp;id=WWjngNfZdAIe4YaMudRylA&amp;hideNavBar=1&amp;useWebKit=1">小米有品</a></li> -->
+					         <li class="nav-item"><a data-ga-category="pc_nav_V2_hover"
+									data-ga-action="click" data-ga-label="other-login" href="https://m.xiaomiyoupin.com/w/spchome?_rt=weex&amp;id=WWjngNfZdAIe4YaMudRylA&amp;hideNavBar=1&amp;useWebKit=1"
+									class="login-link ga-data" target="_blank">小米有品</a></li>
+						 
+							</ul>
+						</div>
+					</div>
+				</div>
+				<script type="text/javascript">
+					//购买渠道
+					$(".buy").hover(function () {
+						$(".single").show();
+
+					})
+					
+					$(".buy").click(function () {
+						$(".single").show();
+
+					})
+					
+					$(".nav-account").mouseleave(function () {
+						$(".single").hide();
+
+					})
+					//点击搜索，显示搜索框
+					$(".search").click(function () {
+						// $(".head_a").hide();
+						$(".search_pop").show();
+
+					})
+					//点击X和其他区域，关闭搜索框
+				//	 $(".cance").click(function () {
+				//   $(".search_pop").hide();
+				//   $(".head_a").show();
+
+				//	 })
+					
+				   $(document).on('click', '.search_pop', function(e) {
+                        if ($(e.target).is('d')||(!$(e.target).closest('.search_a').length &&!$(e.target).closest('.search_b ul').length)) {
+                       	$(".search_pop").hide();
+                    }
+                 });
+					
+				</script>
+			</div>
+			<!-- 未来无界 -->
+			<!-- <div class="head_c" style="z-index: 400;">
+				<div style="background-image: url('https://cuktech.com.cn/kuke/template/statics/kuke/images/head3.jpg');"></div>
+			</div> -->
+			
+				<!-- 车位充电 -->
+			<!-- <div class="head_d" style="z-index: 400;">
+				<div style="background-image: url('https://cuktech.com.cn/kuke/template/statics/kuke/images/head5.jpg');"></div>
+			</div> -->
+			
+			<!-- 下滑的二级分类 -->
+			
+			<div class="head_b" style="z-index: 400;padding-top: 40px;" id="subClassify_1">
+				<div class="frame">
+				    <!--new导航 start--->
+				        <div class="newcon">
+    				        <!-- 左侧菜单导航 -->
+                            <div class="left-menu">
+                                <ul>
+                                    <li pid="1" data-content="content8">CP系列</li>
+                                    <li pid="1" data-content="content9">数字系列</li>
+                                </ul>
+                            </div>
+                            <!-- 右侧内容展示 -->
+                            <div class="right-content">
+	                                <div id="content8" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=230'">
+		            								 <img src="/kuke/upload/2025-03-19/17423658737634028808395ac41fe1650195ad19566301d0.png" alt="电能块 磁吸自带线">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=236'">
+		            								 <img src="/kuke/upload/2025-03-19/17423658065044028808395ac41fe1800195ad184fa801b2.png" alt="电能块 磁吸支架款 CP">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=235'">
+		            								 <img src="/kuke/upload/2025-03-19/17423658426814028808395ac41fe1080195ad18dcf901bf.png" alt="电能块 自带线 CP">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=204'">
+		            								 <img src="/kuke/upload/2025-04-02/17435779896494028808395ac41fe9050195f558c2110727.png" alt="电能块探索版">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=159'">
+		            								 <img src="/kuke/upload/2025-03-19/17423688082634028808395ac41fe7470195ad461d47023f.png" alt="电能块口袋版">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=160'">
+		            								 <img src="/kuke/upload/2025-03-19/17423681999054028808395ac41fe3880195ad3cd4e10224.png" alt="电能块自带线">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+	                					   </div>
+	                                </div>
+	                                <div id="content9" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=181'">
+		            								 <img src="/kuke/upload/2025-03-19/17423692736224028808395ac41fe7870195ad4d3716028f.png" alt="6号超级电能块">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=158'">
+		            								 <img src="/kuke/upload/2025-03-19/17423693183644028808395ac41fe3350195ad4de5dc02ac.png" alt="10号超级电能棒">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=247'">
+		            								 <img src="/kuke/upload/2025-03-19/17423693093754028808395ac41fe6440195ad4dc2bf02a1.png" alt="10号超级电能棒 Plus">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=8'">
+		            								 <img src="/kuke/upload/2025-03-19/17423693297684028808395ac41fe4240195ad4e126802b7.png" alt="15号电能柱">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=182'">
+		            								 <img src="/kuke/upload/2025-03-19/17423692607884028808395ac41fe4720195ad4d04f40282.png" alt="15号电能柱 SE">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=219'">
+		            								 <img src="/kuke/upload/2025-03-19/17423692426334028808395ac41fe6080195ad4cbe090276.png" alt="15号超级电能柱 ULTRA">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=13'">
+		            								 <img src="/kuke/upload/2025-03-19/17423693483384028808395ac41fe2910195ad4e5af202c2.png" alt="20号超级电能柱">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=7'">
+		            								 <img src="/kuke/upload/2025-03-19/17423693635614028808395ac41fe3520195ad4e966902ce.png" alt="30号超级电能仓">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_1"> 
+	                					   </div>
+	                                </div>
+                         
+                            </div>
+                        </div>
+				    <!--new导航 end--->
+				    
+			
+
+				</div>
+			</div>
+			
+			
+			<div class="head_b" style="z-index: 400;padding-top: 40px;" id="subClassify_3">
+				<div class="frame">
+				    <!--new导航 start--->
+				        <div class="newcon">
+    				        <!-- 左侧菜单导航 -->
+                            <div class="left-menu">
+                                <ul>
+                                    <li pid="3" data-content="content14">CP系列</li>
+                                    <li pid="3" data-content="content15">数字系列</li>
+                                </ul>
+                            </div>
+                            <!-- 右侧内容展示 -->
+                            <div class="right-content">
+	                                <div id="content14" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=258'">
+		            								 <img src="/kuke/upload/2025-03-26/17429549028384028808395ac41fe2960195d03535364607.png" alt="CP13三合一电能块 自带线">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_3"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=259'">
+		            								 <img src="/kuke/upload/2025-03-19/17423758306174028808395ac41fe6940195adb144590722.png" alt="CP16 二合一电能块">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_3"> 
+	                					   </div>
+	                                </div>
+	                                <div id="content15" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=240'">
+		            								 <img src="/kuke/upload/2025-03-19/17423694804804028808395ac41fe8860195ad505f2002f4.png" alt="6号氮化镓充电器 65W">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_3"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=179'">
+		            								 <img src="/kuke/upload/2025-07-21/17530862422024028808397a2063968501982c152d9a0781.png" alt="10号超级电能充 SE">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_3"> 
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=58'">
+		            								 <img src="/kuke/upload/2025-03-19/17423694991514028808395ac41fe4470195ad50a80f02ff.png" alt="15号GaN超级电能闪充">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_3"> 
+	                					   </div>
+	                                </div>
+                         
+                            </div>
+                        </div>
+				    <!--new导航 end--->
+				    
+			
+
+				</div>
+			</div>
+			
+			
+			<div class="head_b" style="z-index: 400;padding-top: 40px;" id="subClassify_4">
+				<div class="frame">
+				    <!--new导航 start--->
+				        <div class="newcon">
+    				        <!-- 左侧菜单导航 -->
+                            <div class="left-menu">
+                                <ul>
+                                    <li pid="4" data-content="content17">CP系列</li>
+                                    <li pid="4" data-content="content18">数字系列</li>
+                                </ul>
+                            </div>
+                            <!-- 右侧内容展示 -->
+                            <div class="right-content">
+	                                <div id="content17" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=60'">
+		            								 <img src="/kuke/upload/2025-03-19/17423798397844028808395ac41fe9240195adee712808d5.png" alt="240W编织磁吸线">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_4"> 
+	                					   </div>
+	                                </div>
+	                                <div id="content18" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=253'">
+		            								 <img src="/kuke/upload/2025-03-19/17423698528414028808395ac41fe3540195ad560da90354.png" alt="10号超级电能线 一拖二">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_4"> 
+	                					   </div>
+	                                </div>
+                         
+                            </div>
+                        </div>
+				    <!--new导航 end--->
+				    
+			
+
+				</div>
+			</div>
+			
+			
+			<div class="head_b" style="z-index: 400;padding-top: 40px;" id="subClassify_5">
+				<div class="frame">
+				    <!--new导航 start--->
+				        <div class="newcon">
+    				        <!-- 左侧菜单导航 -->
+                            <div class="left-menu">
+                                <ul>
+                                    <li pid="5" data-content="content20">CP系列</li>
+                                    <li pid="5" data-content="content21">数字系列</li>
+                                </ul>
+                            </div>
+                            <!-- 右侧内容展示 -->
+                            <div class="right-content">
+	                                <div id="content20" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+		            						       <div onclick="window.location.href='https://cuktech.com.cn/show_procon.thtml?id=256'">
+		            								 <img src="/kuke/upload/2025-03-19/17423751795374028808395ac41fe4230195ada7551106eb.png" alt="5/7号 碱性电池">
+		            								</div>  
+	            								 <input type="hidden" value="1" id="input_5"> 
+	                					   </div>
+	                                </div>
+	                                <div id="content21" class="content rconblock">
+	                                    <div class="imgroup">
+	                					   <!-- 循环产品start -->
+	                					   </div>
+	                                </div>
+                         
+                            </div>
+                        </div>
+				    <!--new导航 end--->
+				    
+			
+
+				</div>
+			</div>
+			
+			
+			<div class="head_b" style="z-index: 400;padding-top: 40px;" id="subClassify_25">
+				<div class="frame">
+				    <!--new导航 start--->
+				        <div class="newcon">
+    				        <!-- 左侧菜单导航 -->
+                            <div class="left-menu">
+                                <ul>
+                                </ul>
+                            </div>
+                            <!-- 右侧内容展示 -->
+                            <div class="right-content">
+                         
+                            </div>
+                        </div>
+				    <!--new导航 end--->
+				    
+			
+
+				</div>
+			</div>
+			
+			
+			
+
+		</div>
+		<!-- 蒙层 -->
+		<div class="search_pop">
+			<div class="search_a">
+				<div class="container">
+					<div>
+						<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/search.png" alt=""
+							style="width: 16px; height: 16px;">
+					</div>
+					<input type="text" placeholder="站内搜索"  id="searchKey" onkeydown="enterSearch(event)">
+					<div class="cance iconfont icon-guanbi1"></div>
+				</div>
+			</div>
+			<div class="search_b">
+				<div>建议</div>
+				<ul>
+				<!-- 热门搜索关键词 -->
+			       	<li onclick="searchGo('充电器')" style="cursor:pointer;">充电器</li>
+			       	<li onclick="searchGo('配件')" style="cursor:pointer;">配件</li>
+			       	<li onclick="searchGo('电源')" style="cursor:pointer;">电源</li>
+				</ul>
+			</div>
+		</div>
+		<script type="text/javascript">
+			//点击X，关闭搜索框
+			$(".cance").click(function () {
+				$(".search_pop").hide();
+				// $(".head_a").show();
+
+			});
+			//enter按键搜索
+			function enterSearch(event){
+			  if (event.keyCode == 13) {
+			      var searchSpan = $("#searchKey").val();
+			      window.location.href="https://cuktech.com.cn/search_result.thtml?keyword="+searchSpan
+			      event.returnValue = false;
+			   } 
+			}
+			
+			function searchGo(searchKey){
+			    window.location.href="https://cuktech.com.cn/search_result.thtml?keyword="+searchKey
+			}
+			
+		</script>
+		
+		
+		 <script>
+		 // 获取所有菜单项和内容项
+        const menuItems = document.querySelectorAll('.left-menu li');
+        const contentItems = document.querySelectorAll('.right-content .content');
+
+        // 为每个菜单项添加鼠标滑过事件监听器
+        menuItems.forEach(item => {
+            item.addEventListener('mouseover', function () {
+                // 移除所有菜单项的 active 类
+                menuItems.forEach(menuItem => {
+                    menuItem.classList.remove('active');
+                });
+                // 移除所有内容项的 active 类
+                contentItems.forEach(content => {
+                    content.classList.remove('active');
+                });
+
+                // 为当前菜单项添加 active 类
+                this.classList.add('active');
+                // 获取当前菜单项对应的内容 ID
+                const contentId = this.dataset.content;
+                // 显示当前菜单项对应的内容项
+                const targetContent = document.getElementById(contentId);
+                targetContent.classList.add('active');
+            });
+        });
+
+        // 页面加载时默认激活第一个菜单项并显示对应内容
+        const firstMenuItem = menuItems[0];
+        const firstContentId = firstMenuItem.dataset.content;
+        const firstContent = document.getElementById(firstContentId);
+
+        firstMenuItem.classList.add('active');
+        firstContent.classList.add('active');
+		
+	</script>
+
+		<!--主体 -->
+<div id="title"></div>
+<div class="product">
+	<div class="product_a">
+
+		<div class="left">10号超级电能棒</div>
+	 
+		<div class="right">
+			<a href="#title" class="active">
+				<div>概述</div>
+			</a> <a href="#title">
+				<div>常见问题</div>
+			</a> <a href="#title">
+				<div>规格</div>
+			</a> <a href="https://item.jd.com/10088212243482.html">
+				<div>现在购买</div>
+			</a>
+		</div>
+	</div>
+</div>
+<script type="text/javascript">
+<!-- 概述 问题 规格 切换 -->
+	$(".product_a>.right").on('click', 'a', function() {
+		$(this).addClass("active").siblings().removeClass("active");
+		if ($(this).index() == 0) {
+			$(".summary").show()
+			$(".recommend").show()
+			$(".question").hide()
+			$(".specifications").hide()
+		  $(".questionName").siblings().hide()
+     $(".question_b").find("i").removeClass('revolve')
+		} else if ($(this).index() == 1) {
+			$(".summary").hide()
+			$(".recommend").hide()
+			$(".specifications").hide()
+			$(".question").show()
+			// $('body,html').animate({scrollTop:0},1000); 
+		} else if ($(this).index() == 2) {
+			$(".summary").hide()
+			$(".recommend").hide()
+			$(".question").hide()
+			$(".specifications").show()
+		  $(".questionName").siblings().hide()
+     $(".question_b").find("i").removeClass('revolve')
+		}
+	})
+</script>
+<!-- 选项卡对应内容 -->
+<!-- 图片 -->
+<div class="summary">
+	<img src="/kuke/upload/2023-10-13/1697192125369ff80808188850bbc669018b2888a3b92ec8.jpeg" alt="" class="summary_img">
+</div>
+<!-- 问题start -->
+<div class="question" style="display: none;">
+	<div class="question_a">
+		<h1 class="title">常见问题</h1>
+	  <!-- 设置10个常见问题start -->
+		<div class="question_b">
+			<div class="questionName">
+				<div>支持哪些小米手机快充？</div>
+				<i class="iconfont icon-arrow-down"></i>
+			</div>
+			<div style="display: none;">截至2023年10月，小米平台官方在售手机均支持最高功率快充。</div>
+		</div>
+			<div class="question_b">
+				<div class="questionName">
+					<div>屏幕可展示哪些数据？</div>
+					<i class="iconfont icon-arrow-down"></i>
+				</div>
+				<div style="display: none;">可实时展示电池电量百分比、充电/放电剩余时间、输入总功率、输出总功率、单口功率、单口电流、单口电压、充电/放电功率图等。</div>
+			</div> 
+			<div class="question_b">
+				<div class="questionName">
+					<div>能够给iPhone快充吗？</div>
+					<i class="iconfont icon-arrow-down"></i>
+				</div>
+				<div style="display: none;">可为iPhone、iPad、iPhone等设备提供快充服务，iPhone 14 Pro MAX可激活27W快充，半小时可充至55%。</div>
+			</div> 
+		
+	
+	 <!-- 设置10个常见问题end -->
+	</div>
+</div>
+<!-- 问题end -->
+<script type="text/javascript">
+	$(".questionName").click(function() {
+		var iClass = $(this).find("i").attr('class').split(" ");
+		if (iClass.includes("revolve")) {
+			$(".question_b").find("i").removeClass('revolve')
+			$(".questionName").siblings().hide()
+		} else {
+			$(".question_b").find("i").removeClass('revolve')
+			$(".questionName").siblings().hide()
+			$(this).find("i").addClass("revolve").parent().siblings().show()
+		}
+	})
+</script>
+<!-- 规格start -->
+<div class="specifications" style="display: none;">
+	<div class="specifications_a">
+	<!-- 规格图start -->
+		<div>
+			<img src="/kuke/upload/2023-10-14/1697219899894ff80808188850bbc835018b2a3071f631da.png" alt="" />
+		</div>
+			<!-- 规格图end -->
+			<!-- 规格列表start -->
+	 <!-- 设置10个规格属性 -->
+		<div class="specifications_box">
+			<div style="font-size: 26px; font-weight: 500;">基本参数</div>
+			<div style="font-size: 17px;">
+			
+				    <div class="box">
+						<div>产品型号</div>
+						<div>PB100P </div>
+					 </div>
+				    <div class="box">
+						<div>
+电池种类</div>
+						<div>锂离子电池</div>
+					 </div>
+				    <div class="box">
+						<div>
+电池能量（额定/典型）</div>
+						<div>35.28Wh/36Wh 14.4V </div>
+					 </div>
+				    <div class="box">
+						<div>
+额定容量</div>
+						<div>5500mAh（5V/4A）</div>
+					 </div>
+				    <div class="box">
+						<div>
+输入接口</div>
+						<div>Type-C </div>
+					 </div>
+				    <div class="box">
+						<div>
+输出接口</div>
+						<div>USB-A/Type-C</div>
+					 </div>
+		 
+			</div>
+
+		</div>
+		
+		
+		
+		<!-- 规格2 --> 
+		<div class="specifications_box">
+			<div style="font-size: 26px; font-weight: 500;">输入功率</div>
+			<div style="font-size: 17px;">
+			 
+				    <div class="box">
+						<div>IN1(Type-C)</div>
+						<div>5V 3A;9V 3A;12V 3A; 15V 3A;20V 4.5A</div>
+					 </div>
+			</div>
+
+		</div>
+ 
+ <!-- 规格3 --> 
+		<div class="specifications_box">
+			<div style="font-size: 26px; font-weight: 500;">输出功率</div>
+			<div style="font-size: 17px;">
+			 
+				    <div class="box">
+						<div>双口输出</div>
+						<div>150W MAX</div>
+					 </div>
+				    <div class="box">
+						<div>
+OUT1(Type-C)</div>
+						<div>5V 3A;9V 3A;12V 3A;15V 3A;20V 6A;120W MAX</div>
+					 </div>
+				    <div class="box">
+						<div>
+OUT2(USB-A)</div>
+						<div>5V 3A;9V 3A;5~11V 3A;33W MAX</div>
+					 </div>
+			</div>
+
+		</div>
+	  <!-- 规格4 --> 
+	 
+	 	  <!-- 规格5 --> 
+	 
+	 	 	  <!-- 规格6 --> 
+	 
+	  <!-- 规格7 --> 
+	 
+	 	 	 	  <!-- 规格8 --> 
+	 	 	 	 	  <!-- 规格9 --> 
+      <!-- 规格10 --> 
+			<!-- 规格列表end -->
+	</div>
+</div>
+ <!-- 规格start -->
+ 
+ 
+<!-- 推荐 -->
+<div class="recommend">
+	<div class="recommend_a">
+		<h1 style="text-align: left;">更多推荐</h1>
+		<div class="recommend_b">
+		
+		
+				<div style="background-image: url('/kuke/upload/2024-06-05/1717595142343402880838fe897f9110018fe8a5f8c7002f.png')">
+			<a style=" width: 100%;height: 100%;border: 0px;" href="https://cuktech.com.cn/show_procon.thtml?id=53">
+			</a>
+			<!-- 	<div class="info">
+					<div>电能闪充 67W</div>
+					<div></div>
+					<p>
+					 <a href="https://cuktech.com.cn/show_procon.thtml?id=53">点击了解</a>
+					</p>
+				</div>-->
+			</div>
+				<div style="background-image: url('/kuke/upload/2024-06-05/1717595157168402880838fe897f9626018fe8a632b00037.png')">
+			<a style=" width: 100%;height: 100%;border: 0px;" href="https://cuktech.com.cn/show_procon.thtml?id=54">
+			</a>
+			<!-- 	<div class="info">
+					<div>电能卡片 65W</div>
+					<div></div>
+					<p>
+					 <a href="https://cuktech.com.cn/show_procon.thtml?id=54">点击了解</a>
+					</p>
+				</div>-->
+			</div>
+				<div style="background-image: url('/kuke/upload/2024-06-05/1717595166314402880838fe897f9859018fe8a6566a003f.png')">
+			<a style=" width: 100%;height: 100%;border: 0px;" href="https://cuktech.com.cn/show_procon.thtml?id=7">
+			</a>
+			<!-- 	<div class="info">
+					<div>30号超级电能仓</div>
+					<div></div>
+					<p>
+					 <a href="https://cuktech.com.cn/show_procon.thtml?id=7">点击了解</a>
+					</p>
+				</div>-->
+			</div>
+		</div>
+	</div>
+</div>
+
+<script type="text/javascript" src="https://cuktech.com.cn/core/javascript/stat.js?siteId=1&siteUrl=https://cuktech.com.cn/&notHost=false&contentId=158&classId=-1" ></script>
+<!--底部文件使用这个-->
+
+	<div class="end">
+	
+		<!-- 友情链接区域start -->
+		<div class="footer-first">
+			<div class="ul">
+				<h3>产品展示</h3>
+				<ul>
+				 <!--  -->
+				 
+				    <li> <a href="https://cuktech.com.cn/list_pro.thtml?classId=1" style="color: white;">移动电源</a></li> 
+				    <li> <a href="https://cuktech.com.cn/list_pro.thtml?classId=3" style="color: white;">充电器</a></li> 
+				    <li> <a href="https://cuktech.com.cn/list_pro.thtml?classId=4" style="color: white;">数据线</a></li> 
+				    <li> <a href="https://cuktech.com.cn/list_pro.thtml?classId=5" style="color: white;">其他配件</a></li> 
+				    <li> <a href="https://cuktech.com.cn/evaluation.thtml?classId=25" style="color: white;">产品测评</a></li> 
+				 
+				</ul>
+			</div>
+			  <div class="ul">
+				<h3>商城入口</h3>
+				<ul>
+					<li><a href="https://mall.jd.com/index-1000454827.html?from=pc" style="color: white;">京东商城</a></li>
+					<li><a href="https://cuktechsm.tmall.com/?spm=a21dvs.24047116.0.dshop.52d2645eWODwCq" style="color: white;">天猫商城</a></li>
+					<li><a href="https://m.xiaomiyoupin.com/w/spchome?_rt=weex&amp;id=WWjngNfZdAIe4YaMudRylA&amp;hideNavBar=1&amp;useWebKit=1" style="color: white;">小米有品</a></li>
+
+				</ul>
+			</div>
+			<div class="ul">
+				<h3>服务与支持</h3>
+				<ul>
+				<!--   -->
+				 
+                        <li><a href="https://cuktech.com.cn/page_jrwm.thtml" style="color: white;">合作加盟</a></li>
+				 <li><a href="https://cuktech.com.cn/co_brand.thtml">品牌合作</a></li>
+				 <li><a href="https://cuktech.com.cn/after_sales.thtml">售后政策</a></li>
+				 
+				</ul>
+			</div>
+			<div class="ul">
+				<h3>关于CUKTECH</h3>
+				<ul>
+				<!-- 	 -->
+                       <li><a href="https://cuktech.com.cn/list_about.thtml?id=27" style="color: white;">关于我们</a></li>
+                     
+                       <li><a href="https://cuktech.com.cn/list_news.thtml?classId=24" style="color: white;">新闻中心</a></li>
+				 
+				</ul>
+			</div>  
+			<div class="ul" style="width:200px;">
+				<img class="footerlogo" src="https://cuktech.com.cn/kuke/template/statics/kuke/images/logo_footer.png" alt="">
+				<div class="footercon contact">
+    				<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/ico1.png" alt="" style="width: 18px;height: 18px;margin-right:20px;">
+    				<div style="font-size: 14px; white-space: nowrap;">400-996-1219</div>
+    			</div>
+    			
+    			<ul class="footer-social">
+			  <!-- 微信 -->
+				<li class="social-wechat">
+					<a href="" target="_blank" data-ga-category="pc-footer" data-ga-action="mouseenter"
+						data-ga-label="social-wechat" class="ga-data ga-data1">
+						<!-- <img alt="wechat" src="//www3.djicdn.com/uploads/footer_social/cover/120/ead4fc6850bc8dd360e91db867446a68.png"> -->
+						<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/ico2.png" alt="" style="width: 22px;height: 22px;">
+					</a>
+					<div class="popup popup1" style="display: none;">
+						<div class="er-code"><img class="dps" src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/wxma.jpg"></div>
+						<div class="triangle"></div>
+					</div>
+				</li>
+				<!-- 微博 -->
+				<li><a href="" target="_blank" data-ga-category="pc-footer" data-ga-action="click"
+						data-ga-label="social-微博" class="ga-data ga-data2">
+						<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/ico3.png" alt="" style="width: 22px;height: 22px;">
+					</a>
+				</li>
+				<!-- 抖音 -->
+				<li class="social-wechat">
+					<a href="" target="_blank" data-ga-category="pc-footer" data-ga-action="mouseenter"
+						data-ga-label="social-douyin" class="ga-data ga-data3">
+						<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/ico4.png" alt="" style="width: 22px;height: 22px;">
+					</a>
+					<div class="popup popup3" style="display: none;">
+						<div class="er-code">
+							<img class="dps" src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/dyma.jpg">
+						</div>
+						<div class="triangle"></div>
+					</div>
+				</li>
+				<!-- 小红书 -->
+					<li class="social-wechat">
+					<a href="https://www.xiaohongshu.com/user/profile/6203739d00000000100044a7?xhsshare=CopyLink&appuid=6203739d00000000100044a7&apptime=1718348934" target="_blank" data-ga-category="pc-footer" data-ga-action="mouseenter"
+						data-ga-label="social-douyin" class="ga-data ga-data3">
+						<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/xiaohongshu.png" alt="" style="width: 22px;height: 22px;">
+					</a>
+					<!-- <div class="popup popup3" style="display: none;">
+						<div class="er-code">
+							<img class="dps" src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/dyma.jpg">
+						</div>
+						<div class="triangle"></div>
+					</div> -->
+				</li>
+				
+				
+				<!-- 快手 -->
+				<li class="social-wechat">
+					<a href="" target="_blank" data-ga-category="pc-footer" data-ga-action="mouseenter"
+						data-ga-label="social-wechat" class="ga-data ga-data4">
+						<!-- <img alt="wechat" src="//www3.djicdn.com/uploads/footer_social/cover/120/ead4fc6850bc8dd360e91db867446a68.png"> -->
+						<img src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/ico5.png" alt="" style="width: 22px;height: 22px;">
+					</a>
+					<div class="popup popup4" style="display: none;">
+						<div class="er-code">
+							<img class="dps" src="https://cuktech.com.cn/kuke/template/statics/kuke/ico/ksma.jpg">
+						</div>
+						<div class="triangle"></div>
+					</div>
+				</li>
+			</ul>
+			<script type="text/javascript">
+			$(".footer-social").on("click", "li", function () {
+				// $(this).index
+				console.log($(this).index());
+				if ($(this).index() == 0) {
+					//微信
+				//	window.location.href = 'https://mp.weixin.qq.com/s/G2gxxKePugghqAPkLj4Xqw'
+					window.location.href = 'https://mp.weixin.qq.com/s/I8_IH3Exgj6oAmA1Th10oQ'
+				} else if ($(this).index() == 1) {
+					console.log("wwwwwwwwwwwww");
+					//微博
+					window.location.href = 'https://weibo.com/u/7752675932'
+				} else if ($(this).index() == 2) {
+					//抖音
+					window.location.href = 'https://www.douyin.com/user/MS4wLjABAAAAvDAP2Clp-RSOV2b9g2OFjOaEEJ3ItNq-TUtfokBebdUSCr41Dl9gHyVowkn0knAR'
+				}else if ($(this).index() == 3) {
+					//小红书
+					window.location.href = 'https://www.xiaohongshu.com/user/profile/6203739d00000000100044a7?xhsshare=CopyLink&appuid=6203739d00000000100044a7&apptime=1718348934'
+				}
+				
+				else if ($(this).index() == 4) {
+					//快手
+					window.location.href = 'https://www.kuaishou.com/profile/3xsnys7fsru4ztg'
+				}
+			})
+			$(".footer-social").on("mouseover", ".social-wechat", function () {
+				// $(this).index
+				console.log($(this).index());
+				if ($(this).index() == 0) {
+					//微信
+					$(".popup1").show();
+				} else if ($(this).index() == 1) {
+					//微博
+					$(".popup2").show();
+				} else if ($(this).index() == 2) {
+					//抖音
+					$(".popup3").show();
+				}else if ($(this).index() == 3) {
+					//小红书
+					// $(".popup4").show();
+				}
+				
+				else if ($(this).index() == 4) {
+					//快手
+					$(".popup4").show();
+				}
+			})
+			$(".footer-social").on("mouseleave", ".social-wechat", function () {
+				// $(this).index
+				if ($(this).index() == 0) {
+					//微信
+					$(".popup1").hide();
+				} else if ($(this).index() == 1) {
+					//微博
+					$(".popup2").hide();
+				} else if ($(this).index() == 2) {
+					//抖音
+					$(".popup3").hide();
+				} else if ($(this).index() == 3) {
+					//快手
+					$(".popup4").hide();
+				}
+			})
+		</script>
+    			
+    			
+			</div>
+			
+			
+		</div>
+			<!-- 友情链接区域end -->
+		<div class="footer-sec">
+		<!-- BrandName.ALL rights reserved -->
+			&copy;2023 CUKTECH.ALL rights reserved   <a href="https://beian.miit.gov.cn">苏ICP备2022027368号-2</a>
+		</div>
+	</div>
+
+</div>
+
+</body>
+
+</html>

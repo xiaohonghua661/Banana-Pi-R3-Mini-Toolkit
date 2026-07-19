@@ -1,0 +1,539 @@
+<!DOCTYPE html><html lang="en"><head><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta charset="UTF-8"><meta name="viewport" content="user-scalable=yes, width=device-width, initial-scale=1, maximum-scale=5"><meta name="theme-color" content="#1976d2"><meta name="msapplication-TileColor" content="#1976d2"><meta name="msapplication-TileImage" content="/_assets/favicons/mstile-150x150.png"><title>Banana Pi BPI-R3 Mini | BananaPi Docs</title><meta name="description" content="BPI-R3 Mini Introduction"><meta property="og:title" content="Banana Pi BPI-R3 Mini"><meta property="og:type" content="website"><meta property="og:description" content="BPI-R3 Mini Introduction"><meta property="og:image"><meta property="og:url" content="https://docs.banana-pi.org/en/BPI-R3_Mini/BananaPi_BPI-R3_Mini"><meta property="og:site_name" content="BananaPi Docs"><link rel="apple-touch-icon" sizes="180x180" href="/_assets/favicons/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="192x192" href="/_assets/favicons/android-chrome-192x192.png"><link rel="icon" type="image/png" sizes="32x32" href="/_assets/favicons/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/_assets/favicons/favicon-16x16.png"><link rel="mask-icon" href="/_assets/favicons/safari-pinned-tab.svg" color="#1976d2"><link rel="manifest" href="/_assets/manifest.json"><script>var siteConfig = {"title":"BananaPi Docs","theme":"default","darkMode":false,"tocPosition":"right","lang":"en","rtl":false,"company":"BananaPi","contentLicense":"ccbysa","footerOverride":"","logoUrl":"/docs_logo_34.png"}
+var siteLangs = [{"code":"en","name":"English"},{"code":"zh","name":"中文 (Zhōngwén)"}]
+</script><link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css"><link type="text/css" rel="stylesheet" href="/_assets/css/app.8b3419043b6a2ea86e38.css"><script type="text/javascript" src="/_assets/js/runtime.js?1691709097"></script><script type="text/javascript" src="/_assets/js/app.js?1691709097"></script><!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-MC1WHM66NP"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-MC1WHM66NP');
+</script>
+</head><body><div id="root"><page locale="en" path="BPI-R3_Mini/BananaPi_BPI-R3_Mini" title="Banana Pi BPI-R3 Mini" description="BPI-R3 Mini Introduction" :tags="[]" created-at="2023-11-02T01:24:57.297Z" updated-at="2026-04-08T10:32:11.977Z" author-name="Superman" :author-id="12" editor="asciidoc" :is-published="true" toc="W3sidGl0bGUiOiJCUEktUjMgTWluaSBJbnRyb2R1Y3Rpb24iLCJhbmNob3IiOiIjYnBpLXIzLW1pbmktaW50cm9kdWN0aW9uIiwiY2hpbGRyZW4iOlt7InRpdGxlIjoiS2V5IEZlYXR1cmVzIiwiYW5jaG9yIjoiI19rZXlfZmVhdHVyZXMiLCJjaGlsZHJlbiI6W119LHsidGl0bGUiOiJBcHBsaWNhdGlvbiBkaXJlY3Rpb24iLCJhbmNob3IiOiIjX2FwcGxpY2F0aW9uX2RpcmVjdGlvbiIsImNoaWxkcmVuIjpbXX0seyJ0aXRsZSI6IkdldHRpbmcgU3RhcnQiLCJhbmNob3IiOiIjX2dldHRpbmdfc3RhcnQiLCJjaGlsZHJlbiI6W119XX0seyJ0aXRsZSI6IkhhcmR3YXJlIiwiYW5jaG9yIjoiI19oYXJkd2FyZSIsImNoaWxkcmVuIjpbeyJ0aXRsZSI6IkhhcmR3YXJlIEludGVyZmFjZSIsImFuY2hvciI6IiNfaGFyZHdhcmVfaW50ZXJmYWNlIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiSGFyZHdhcmUgU3BlYyIsImFuY2hvciI6IiNfaGFyZHdhcmVfc3BlYyIsImNoaWxkcmVuIjpbXX0seyJ0aXRsZSI6IlNTRCBhbmQgNUcgc3VwcG9ydCIsImFuY2hvciI6IiNfc3NkX2FuZF81Z19zdXBwb3J0IiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiQWNjZXNzb3JpZXMiLCJhbmNob3IiOiIjX2FjY2Vzc29yaWVzIiwiY2hpbGRyZW4iOlt7InRpdGxlIjoiQ2FzZSBkZXNpZ24iLCJhbmNob3IiOiIjX2Nhc2VfZGVzaWduIiwiY2hpbGRyZW4iOltdfSx7InRpdGxlIjoiNUcgbW9kdWxlIHN1cHBvcnQiLCJhbmNob3IiOiIjXzVnX21vZHVsZV9zdXBwb3J0IiwiY2hpbGRyZW4iOltdfV19XX0seyJ0aXRsZSI6IkRldmVsb3BtZW50IiwiYW5jaG9yIjoiI19kZXZlbG9wbWVudCIsImNoaWxkcmVuIjpbeyJ0aXRsZSI6IlNvdXJjZSBDb2RlIiwiYW5jaG9yIjoiI19zb3VyY2VfY29kZSIsImNoaWxkcmVuIjpbXX0seyJ0aXRsZSI6IlJlc291cmNlcyIsImFuY2hvciI6IiNfcmVzb3VyY2VzIiwiY2hpbGRyZW4iOltdfV19LHsidGl0bGUiOiJTeXN0ZW0gSW1hZ2UiLCJhbmNob3IiOiIjX3N5c3RlbV9pbWFnZSIsImNoaWxkcmVuIjpbeyJ0aXRsZSI6Ik9wZW5XUlQiLCJhbmNob3IiOiIjX29wZW53cnQiLCJjaGlsZHJlbiI6W119LHsidGl0bGUiOiJUaGlyZCBQYXJ0eSIsImFuY2hvciI6IiNfdGhpcmRfcGFydHkiLCJjaGlsZHJlbiI6W3sidGl0bGUiOiJTdXBlckthbGkvQmFuYW5hV1JUIiwiYW5jaG9yIjoiI19zdXBlcmthbGliYW5hbmF3cnQiLCJjaGlsZHJlbiI6W119XX1dfSx7InRpdGxlIjoiRWFzeSB0byBidXkiLCJhbmNob3IiOiIjX2Vhc3lfdG9fYnV5IiwiY2hpbGRyZW4iOltdfV0=" :page-id="71" sidebar="W3siaSI6InNkaS0xIiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfSx7ImkiOiJzZGktMiIsImsiOiJsaW5rIiwibCI6Ik1haW4gUGFnZSIsImMiOiJtZGktaG9tZSIsInkiOiJleHRlcm5hbCIsInQiOiJodHRwczovL2RvY3MuYmFuYW5hLXBpLm9yZy9lbi9ob21lIn0seyJpIjoic2RpLTMiLCJrIjoibGluayIsImwiOiJQcm9kdWN0cyIsImMiOiJtZGktZGV2ZWxvcGVyLWJvYXJkIiwieSI6ImV4dGVybmFsIiwidCI6Imh0dHBzOi8vZG9jcy5iYW5hbmEtcGkub3JnL2VuL2hvbWUjX2JhbmFuYV9waV9wcm9kdWN0cyJ9LHsiaSI6InNkaS00IiwiayI6ImxpbmsiLCJsIjoiU29mdHdhcmUgJiBEZXZlbG9wbWVudCBUb29scyIsImMiOiJtZGktZmlsZS1jb2RlIiwieSI6ImV4dGVybmFsIiwidCI6Imh0dHBzOi8vZG9jcy5iYW5hbmEtcGkub3JnL2VuL2hvbWUjX3NvZnR3YXJlX2RldmVsb3BtZW50X3Rvb2xzIn0seyJpIjoic2RpLTUiLCJrIjoiZGl2aWRlciIsImwiOm51bGwsImMiOm51bGwsInkiOm51bGwsInQiOm51bGx9LHsiaSI6InNkaS02IiwiayI6ImxpbmsiLCJsIjoiQmFuYW5hIFBpIE9mZmljYWwgV2Vic2l0ZSIsImMiOiJtZGktd2ViIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cHM6Ly9iYW5hbmEtcGkub3JnLyJ9LHsiaSI6InNkaS03IiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfSx7ImkiOiJzZGktOCIsImsiOiJsaW5rIiwibCI6IkJhbmFuYSBQaSBFbmdsaXNoIEZvcnVtIiwiYyI6Im1kaS1mb3J1bS1vdXRsaW5lIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cDovL2ZvcnVtLmJhbmFuYS1waS5vcmcvIn0seyJpIjoic2RpLTkiLCJrIjoibGluayIsImwiOiJCYW5hbmEgUGkgQ2hpbmVzZSBGb3J1bSIsImMiOiJtZGktZm9ydW0iLCJ5IjoiZXh0ZXJuYWxibGFuayIsInQiOiJodHRwczovL2ZvcnVtLmJhbmFuYS1waS5vcmcuY24vIn0seyJpIjoic2RpLTEwIiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfSx7ImkiOiJzZGktMTEiLCJrIjoiaGVhZGVyIiwibCI6IkZvbGxvdyB1cyIsImMiOm51bGwsInkiOm51bGwsInQiOm51bGx9LHsiaSI6InNkaS0xMiIsImsiOiJsaW5rIiwibCI6IllvdXR1YmUiLCJjIjoibWRpLXlvdXR1YmUiLCJ5IjoiZXh0ZXJuYWxibGFuayIsInQiOiJodHRwczovL3d3dy55b3V0dWJlLmNvbS9AbGlvbndhbmdzaW5vdm9pcCJ9LHsiaSI6InNkaS0xMyIsImsiOiJsaW5rIiwibCI6IkZhY2Vib29rIFBhZ2UiLCJjIjoibWRpLWZhY2Vib29rIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cHM6Ly93d3cuZmFjZWJvb2suY29tL3Npbm92b2lwYnBpIn0seyJpIjoic2RpLTE0IiwiayI6ImxpbmsiLCJsIjoiRmFjZWJvb2sgR3JvdXAiLCJjIjoibWRpLWZhY2Vib29rIiwieSI6ImV4dGVybmFsYmxhbmsiLCJ0IjoiaHR0cHM6Ly93d3cuZmFjZWJvb2suY29tL2dyb3Vwcy9CYW5hbmEuUGkuQ29tbXVuaXR5LyJ9LHsiaSI6InNkaS0xNSIsImsiOiJsaW5rIiwibCI6IlR3aXR0ZXIiLCJjIjoiZmEgZmEtdHdpdHRlciIsInkiOiJleHRlcm5hbGJsYW5rIiwidCI6Imh0dHBzOi8vdHdpdHRlci5jb20vc2lub3ZvaXAifSx7ImkiOiJzZGktMTYiLCJrIjoibGluayIsImwiOiJSZWRkaXQiLCJjIjoibWRpLXJlZGRpdCIsInkiOiJleHRlcm5hbGJsYW5rIiwidCI6Imh0dHBzOi8vd3d3LnJlZGRpdC5jb20vci9CYW5hbmFQaV9CUEkvIn0seyJpIjoic2RpLTE3IiwiayI6ImRpdmlkZXIiLCJsIjpudWxsLCJjIjpudWxsLCJ5IjpudWxsLCJ0IjpudWxsfV0=" nav-mode="STATIC" effective-permissions="eyJjb21tZW50cyI6eyJyZWFkIjpmYWxzZSwid3JpdGUiOmZhbHNlLCJtYW5hZ2UiOmZhbHNlfSwiaGlzdG9yeSI6eyJyZWFkIjpmYWxzZX0sInNvdXJjZSI6eyJyZWFkIjpmYWxzZX0sInBhZ2VzIjp7InJlYWQiOnRydWUsIndyaXRlIjpmYWxzZSwibWFuYWdlIjpmYWxzZSwiZGVsZXRlIjpmYWxzZSwic2NyaXB0IjpmYWxzZSwic3R5bGUiOmZhbHNlfSwic3lzdGVtIjp7Im1hbmFnZSI6ZmFsc2V9fQ==" edit-shortcuts="eyJlZGl0RmFiIjp0cnVlLCJlZGl0TWVudUJhciI6ZmFsc2UsImVkaXRNZW51QnRuIjp0cnVlLCJlZGl0TWVudUV4dGVybmFsQnRuIjp0cnVlLCJlZGl0TWVudUV4dGVybmFsTmFtZSI6IkdpdEh1YiIsImVkaXRNZW51RXh0ZXJuYWxJY29uIjoibWRpLWdpdGh1YiIsImVkaXRNZW51RXh0ZXJuYWxVcmwiOiJodHRwczovL2dpdGh1Yi5jb20vb3JnL3JlcG8vYmxvYi9tYWluL3tmaWxlbmFtZX0ifQ==" filename="en/BPI-R3_Mini/BananaPi_BPI-R3_Mini.html"><template slot="contents"><div><h1 class="toc-header" id="bpi-r3-mini-introduction"><a href="#bpi-r3-mini-introduction" class="toc-anchor">¶</a> BPI-R3 Mini Introduction</h1>
+<div id="preamble">
+<div class="sectionbody">
+<div class="paragraph">
+<p>Banana Pi BPI-R3 Mini Router board with MediaTek MT7986A(Filogic 830) quad core ARM A53 chip design ,2G DDR RAM ,8G eMMC flash onboard,It is a very high performance open source router development board,support Wi-Fi6 2.4G/5G with MT7976C, support 2x 2.5GbE ethernet port.</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="banana_pi_bpi-r3_mini_banner_1.jpg" src="/picture/banana_pi_bpi-r3_mini_banner_1.jpg">
+</div>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+MediaTek MT7988 (Filogic 880) design: <a class="is-internal-link is-valid-page" href="/en/BPI-R4_Pro/BananaPi_BPI-R4_Pro">Banana Pi BPI-R4 Pro</a> Router development board<br>
+MediaTek MT7988 (Filogic 880) design: <a class="is-internal-link is-valid-page" href="/en/BPI-R4/BananaPi_BPI-R4">Banana Pi BPI-R4</a> Router development board<br>
+MediaTek MT7987 (Filogic 860) design: <a class="is-internal-link is-valid-page" href="/en/BPI-R4_Lite/BananaPi_BPI-R4_Lite">Banana Pi BPI-R4 Lite</a>  Router board<br>
+MediaTek MT7987 (Filogic 860) design: <a class="is-internal-link is-valid-page" href="/en/BPI-R4_Mini/BananaPi_BPI-R4_Mini">Banana Pi BPI-R4 Mini</a>  Wifi7 Router board<br>
+MediaTek MT7986(Filogic 830) design: <a class="is-internal-link is-valid-page" href="/en/BPI-R3_Mini/BananaPi_BPI-R3_Mini">Banana Pi BPI-R3 Mini</a> Mini size Router development board<br>
+MediaTek MT7986(Filogic 830) design: <a class="is-internal-link is-valid-page" href="/en/BPI-R3/BananaPi_BPI-R3">Banana Pi BPI-R3</a> Router development board
+</td>
+</tr>
+</tbody></table>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_mediatek_mt7986filogic_830"><a href="#_mediatek_mt7986filogic_830" class="toc-anchor">¶</a> MediaTek MT7986(Filogic 830)</h3>
+<div class="paragraph">
+<p>The MT7986A(Filogic 830) integrates four Arm Cortex-A53 cores up to 2GHz with up to 18,000 DMIPs of processing power and 6Gbps of dual 4x4 Wi-Fi6 connectivity. It has two 2.5g Ethernet interfaces and serial peripheral interfaces (SPI). Filogic 830‘s built-in hardware acceleration engine enables fast and reliable Wi-Fi offloading and wireless network connection. In addition, the chip supports Mediatek FastPath™ technology, which is suitable for games, AR/VR and other low-latency applications.</p>
+</div>
+<div class="paragraph">
+<p>Wi-fi 6 has many advantages over its predecessors, including lower latency, larger bandwidth capacity and faster transmission rates. Wireless network devices supporting the 6GHz band mainly use 160MHz wide channel and 6GHz uncongested bandwidth to provide multigigabit transmission and low-latency wi-fi connection, providing reliable wireless network for streaming media, games, AR/VR and other applications.</p>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_key_features"><a href="#_key_features" class="toc-anchor">¶</a> Key Features</h2>
+<div class="sectionbody">
+<div class="ulist">
+<ul>
+<li>
+<p>MediaTek MT7986A(Filogic 830) Quad core ARM Cortex A53</p>
+</li>
+<li>
+<p>Wifi 6 2.4G/5G（MT7976C）</p>
+</li>
+<li>
+<p>2G DDR RAM</p>
+</li>
+<li>
+<p>8G eMMC flash</p>
+</li>
+<li>
+<p>128MB Nand flash</p>
+</li>
+<li>
+<p>2x 2.5GbE network port</p>
+</li>
+<li>
+<p>1x M.2 Key B USB interface</p>
+</li>
+<li>
+<p>1x M.2 KEY M PCIe interface</p>
+</li>
+<li>
+<p>1x USB2.0 interface</p>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_application_direction"><a href="#_application_direction" class="toc-anchor">¶</a> Application direction</h2>
+<div class="sectionbody">
+<div class="ulist">
+<ul>
+<li>
+<p>Internet service Router</p>
+</li>
+<li>
+<p>Wireless Router</p>
+</li>
+<li>
+<p>Wireless Repeater</p>
+</li>
+<li>
+<p>Home security Gateway</p>
+</li>
+<li>
+<p>Home Automation</p>
+</li>
+<li>
+<p>Nas device</p>
+</li>
+<li>
+<p>Soft router</p>
+</li>
+<li>
+<p>Network and communication applications</p>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_getting_start"><a href="#_getting_start" class="toc-anchor">¶</a> Getting Start</h2>
+<div class="sectionbody">
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+<a class="is-internal-link is-valid-page" href="/en/BPI-R3_Mini/GettingStarted_BPI-R3_Mini">Getting Started BPI-R3_Mini</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+<a class="is-external-link" href="https://www.fw-web.de/dokuwiki/doku.php?id=en:bpi-r3mini:start">Frank wiki for BPI-R3 Mini</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+<a class="is-external-link" href="https://github.com/def324/bananapi-r3-mini-guide">Banana Pi R3 Mini — 5G Router Setup Guide</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+</div>
+</div>
+<h1 class="sect0 toc-header" id="_hardware"><a href="#_hardware" class="toc-anchor">¶</a> Hardware</h1>
+<div class="sect1">
+<h2 class="toc-header" id="_hardware_interface"><a href="#_hardware_interface" class="toc-anchor">¶</a> Hardware Interface</h2>
+<div class="sectionbody">
+<div class="imageblock">
+<div class="content">
+<img width="1000px" alt="r3-mini_interface1500_260408.jpg" src="/bpi-r3mini/r3-mini_interface1500_260408.jpg">
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_hardware_spec"><a href="#_hardware_spec" class="toc-anchor">¶</a> Hardware Spec</h2>
+<div class="sectionbody">
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 25%;">
+<col style="width: 75%;">
+</colgroup>
+<thead>
+<tr>
+<th colspan="2" class="tableblock halign-left valign-top"><strong>HardWare Specification of Banana Pi R3 Mini</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">CPU	MediaTek</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MT7986A(Filogic 830) Quad-core ARM Cortex-A53</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">SDRAM</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">2 GB DDR4</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">On board Storage</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">128MB SPI NandFlash，8GB eMMC</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">On board Network</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">2x 2.5GbE Ethernet</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Wifi</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Wifi6 2x2 2.4G + 3x3 5G(MT7976C)</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">M.2 Key B</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">1x M.2 Key B interface</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">M.2 Key M</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">1x M.2 KEY-M PCIe inerface</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">USB</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">1x USB 2.0</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Buttons</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Reset button, boot switch</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">5x Leds</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Power ,System, Wifi 2G ,Wifi 5G ,4G Lte ,SSD</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">DC Power</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">20W/12V,USB TypeC PD</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Sizes</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">65x65mm</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Weight</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">100g</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_ssd_and_5g_support"><a href="#_ssd_and_5g_support" class="toc-anchor">¶</a> SSD and 5G support</h2>
+<div class="sectionbody">
+<div class="imageblock">
+<div class="content">
+<img alt="bpi-r3_mini_ssd_5g.jpg" src="/picture/bpi-r3_mini_ssd_5g.jpg">
+</div>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_accessories"><a href="#_accessories" class="toc-anchor">¶</a> Accessories</h2>
+<div class="sectionbody">
+<div class="sect2">
+<h3 class="toc-header" id="_case_design"><a href="#_case_design" class="toc-anchor">¶</a> Case design</h3>
+<div class="imageblock">
+<div class="content">
+<img alt="banana_pi_bpi-r3_mini_case_9.jpg" src="/picture/banana_pi_bpi-r3_mini_case_9.jpg">
+</div>
+</div>
+<div class="paragraph">
+<p>lowcost case :</p>
+</div>
+<div class="imageblock">
+<div class="content">
+<img alt="banana_pi_bpi-wifi6_mini_and_r3_mini_case_3.jpg" src="/bpi-r3mini/banana_pi_bpi-wifi6_mini_and_r3_mini_case_3.jpg">
+</div>
+</div>
+<div class="paragraph">
+<p><strong>Easy to buy :</strong></p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>SINOVOIP Aliexpress shop: <a class="bare is-external-link" href="https://www.aliexpress.com/item/3256805835838023.html?gatewayAdapt=4itemAdapt">https://www.aliexpress.com/item/3256805835838023.html?gatewayAdapt=4itemAdapt</a></p>
+</li>
+<li>
+<p>Bipai Aliexpress shop: <a class="bare is-external-link" href="https://www.aliexpress.com/item/3256805835981489.html?gatewayAdapt=4itemAdapt">https://www.aliexpress.com/item/3256805835981489.html?gatewayAdapt=4itemAdapt</a></p>
+</li>
+<li>
+<p>Taobao Shop: <a class="bare is-external-link" href="https://item.taobao.com/item.htm?spm=a1z10.5-c-s.w4002-25059194413.49.a7203765WMAKz4&amp;id=738492265416">https://item.taobao.com/item.htm?spm=a1z10.5-c-s.w4002-25059194413.49.a7203765WMAKz4&amp;id=738492265416</a></p>
+</li>
+</ul>
+</div>
+</div>
+<div class="sect2">
+<h3 class="toc-header" id="_5g_module_support"><a href="#_5g_module_support" class="toc-anchor">¶</a> 5G module support</h3>
+<div class="ulist">
+<ul>
+<li>
+<p>BPI-R3 mini can use Quectel RM500U-CN &amp; RM520N-GL 5G Modules</p>
+</li>
+</ul>
+</div>
+</div>
+</div>
+</div>
+<h1 class="sect0 toc-header" id="_development"><a href="#_development" class="toc-anchor">¶</a> Development</h1>
+<div class="sect1">
+<h2 class="toc-header" id="_source_code"><a href="#_source_code" class="toc-anchor">¶</a> Source Code</h2>
+<div class="sectionbody">
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+Opensource Driver BSP :
+<a class="bare is-external-link" href="https://github.com/BPI-SINOVOIP/BPI-R3MINI-OPENWRT-V21.02.3">https://github.com/BPI-SINOVOIP/BPI-R3MINI-OPENWRT-V21.02.3</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+Third-party images BananaWrt : <a class="bare is-external-link" href="https://github.com/SuperKali/BananaWRT">https://github.com/SuperKali/BananaWRT</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_resources"><a href="#_resources" class="toc-anchor">¶</a> Resources</h2>
+<div class="sectionbody">
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+BPI-R3 Mini DXF file
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Google Drive: <a class="bare is-external-link" href="https://drive.google.com/file/d/1FgNVjR-kPdFVNZBPkAF8xTIZ4YauJ_2O/view?usp=sharing">https://drive.google.com/file/d/1FgNVjR-kPdFVNZBPkAF8xTIZ4YauJ_2O/view?usp=sharing</a></p>
+</div>
+<div class="paragraph">
+<p>Baidu Cloud: <a class="bare is-external-link" href="https://pan.baidu.com/s/1t1hZjNdg7rMBJcqVEZN-Ag?pwd=8888">https://pan.baidu.com/s/1t1hZjNdg7rMBJcqVEZN-Ag?pwd=8888</a> PIN code: 8888</p>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+BPI-R3 Mini schematic diagram
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Google Drive: <a class="bare is-external-link" href="https://drive.google.com/file/d/1wvovcYf0OtvQl5fekJku25QNeER1D7cM/view?usp=sharing">https://drive.google.com/file/d/1wvovcYf0OtvQl5fekJku25QNeER1D7cM/view?usp=sharing</a></p>
+</div>
+<div class="paragraph">
+<p>Baidu Cloud: <a class="bare is-external-link" href="https://pan.baidu.com/s/1HohHjd2w-mqLlBhwsXR87A?pwd=8888">https://pan.baidu.com/s/1HohHjd2w-mqLlBhwsXR87A?pwd=8888</a> PIN code: 8888</p>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+MT7986A_Datasheet_1.15 : <a class="bare is-external-link" href="https://drive.google.com/file/d/1t_nuPTeoAcFb1dmEe4kJVlLWdHcAA6OB/view?usp=sharing">https://drive.google.com/file/d/1t_nuPTeoAcFb1dmEe4kJVlLWdHcAA6OB/view?usp=sharing</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+MT7986A_Reference_Manual_for_BPI-R3 : <a class="bare is-external-link" href="https://drive.google.com/file/d/1biSJmxnIpNzQroYDg9mtPtSTAv4i0DFf/view?usp=sharing">https://drive.google.com/file/d/1biSJmxnIpNzQroYDg9mtPtSTAv4i0DFf/view?usp=sharing</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock tip">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Tip" class="fa icon-tip"></i>
+</td>
+<td class="content">
+Bananapi R3 review with WiFi / CPU benchmarks and power consumption numbers: <a class="bare is-external-link" href="https://wiki.junicast.de/en/junicast/review/bananapi-BPI-R3">https://wiki.junicast.de/en/junicast/review/bananapi-BPI-R3</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+</div>
+</div>
+<h1 class="sect0 toc-header" id="_system_image"><a href="#_system_image" class="toc-anchor">¶</a> System Image</h1>
+<div class="sect1">
+<h2 class="toc-header" id="_openwrt"><a href="#_openwrt" class="toc-anchor">¶</a> OpenWRT</h2>
+<div class="sectionbody">
+<div class="admonitionblock note">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Note" class="fa icon-note"></i>
+</td>
+<td class="content">
+bl2_emmc.img
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Google Drive: <a class="bare is-external-link" href="https://drive.google.com/file/d/1L5lVyg8dDl60eyzkqBr-8aeG2Weq5ouo/view?usp=sharing">https://drive.google.com/file/d/1L5lVyg8dDl60eyzkqBr-8aeG2Weq5ouo/view?usp=sharing</a></p>
+</div>
+<div class="paragraph">
+<p>Baidu Cloud: <a class="bare is-external-link" href="https://pan.baidu.com/s/1vdnCKqr0GSzQid7Y3ADCKw?pwd=8888">https://pan.baidu.com/s/1vdnCKqr0GSzQid7Y3ADCKw?pwd=8888</a> PIN code: 8888</p>
+</div>
+<div class="admonitionblock note">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Note" class="fa icon-note"></i>
+</td>
+<td class="content">
+2023-11-15 BPI-R3 Mini OpenWRT image with Opensource MAC80211 wifi Driver BSP (support Quectel RM500U-CN &amp; RM520N-GL 5G Modules)
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Google Drive: <a class="bare is-external-link" href="https://drive.google.com/drive/folders/1lENckxpiZa5bdkPAA6FfbGx1IlLJqHql?usp=sharing">https://drive.google.com/drive/folders/1lENckxpiZa5bdkPAA6FfbGx1IlLJqHql?usp=sharing</a></p>
+</div>
+<div class="paragraph">
+<p>Baidu Cloud: <a class="bare is-external-link" href="https://pan.baidu.com/s/1btkUMs84-Agj31WxRx8_Dg?pwd=8888">https://pan.baidu.com/s/1btkUMs84-Agj31WxRx8_Dg?pwd=8888</a> (pincode:8888)</p>
+</div>
+<div class="admonitionblock note">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Note" class="fa icon-note"></i>
+</td>
+<td class="content">
+2023-11-15 BPI-R3 Mini OpenWRT image with MTK vendor wifi driver, Not OpenSource Driver BSP (support Quectel RM500U-CN &amp; RM520N-GL 5G Modules)
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="paragraph">
+<p>Google Drive: <a class="bare is-external-link" href="https://drive.google.com/drive/folders/1RaKPSbQU94miUyawoyPq8RNUdubabKYq?usp=sharing">https://drive.google.com/drive/folders/1RaKPSbQU94miUyawoyPq8RNUdubabKYq?usp=sharing</a></p>
+</div>
+<div class="paragraph">
+<p>Baidu Cloud: <a class="bare is-external-link" href="https://pan.baidu.com/s/1yFp2P-pV4-b1_x6FjD8NBg?pwd=8888">https://pan.baidu.com/s/1yFp2P-pV4-b1_x6FjD8NBg?pwd=8888</a> (pincode:8888)</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 class="toc-header" id="_third_party"><a href="#_third_party" class="toc-anchor">¶</a> Third Party</h2>
+<div class="sectionbody">
+<div class="sect2">
+<h3 class="toc-header" id="_superkalibananawrt"><a href="#_superkalibananawrt" class="toc-anchor">¶</a> SuperKali/BananaWRT</h3>
+<div class="paragraph">
+<p><a class="bare is-external-link" href="https://github.com/SuperKali/BananaWRT/releases/latest">https://github.com/SuperKali/BananaWRT/releases/latest</a></p>
+</div>
+</div>
+</div>
+</div>
+<h1 class="sect0 toc-header" id="_easy_to_buy"><a href="#_easy_to_buy" class="toc-anchor">¶</a> Easy to buy</h1>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+BANANAPI Official Shop:
+<a class="bare is-external-link" href="https://www.bpi-shop.com/products/banana-pi-bpi-r3-mini-router-board-with-mediatek-mt7986a.html">https://www.bpi-shop.com/products/banana-pi-bpi-r3-mini-router-board-with-mediatek-mt7986a.html</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+BIPAI Aliexpress shop : <a class="bare is-external-link" href="https://www.aliexpress.com/item/1005005873750368.html">https://www.aliexpress.com/item/1005005873750368.html</a>?
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+SINOVOIP Aliexpress shop: <a class="bare is-external-link" href="https://www.aliexpress.com/store/group/BPI-R3-Mini/1100417230_40000004378662.html">https://www.aliexpress.com/store/group/BPI-R3-Mini/1100417230_40000004378662.html</a>?
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+Taobao shop : <a class="bare is-external-link" href="https://item.taobao.com/item.htm?spm=a213gs.success.result.1.1bd14831HTwBxZ&amp;id=730610953668">https://item.taobao.com/item.htm?spm=a213gs.success.result.1.1bd14831HTwBxZ&amp;id=730610953668</a>
+</td>
+</tr>
+</tbody></table>
+</div>
+<div class="admonitionblock warning">
+<table>
+<tbody><tr>
+<td class="icon">
+<i title="Warning" class="fa icon-warning"></i>
+</td>
+<td class="content">
+OEM&amp;ODM ,please contact : <a href="/cdn-cgi/l/email-protection#bad0cfdec3d2cfdbd4ddfad8dbd4dbd4db97cad394d9d5d7"><span class="__cf_email__" data-cfemail="18726d7c61706d79767f587a7976797679356871367b7775">[email&#160;protected]</span></a>
+</td>
+</tr>
+</tbody></table>
+</div></div></template><template slot="comments"><div><comments></comments></div></template></page></div><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script></body></html>

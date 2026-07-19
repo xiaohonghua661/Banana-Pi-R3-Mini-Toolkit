@@ -1,0 +1,21 @@
+{
+	"luci-app-r3mini-fan": {
+		"description": "允许查看和调整 BPI-R3 Mini 风扇温控",
+		"read": {
+			"file": {
+				"/usr/sbin/r3mini-fan-web": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/r3mini-fan-web": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}

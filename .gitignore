@@ -1,0 +1,34 @@
+# 本机私密交付资料与设备备份
+docs/私密/
+backups/
+tmp/
+.tmp/
+fan-dashboard/backups/
+fan-dashboard/ssh-askpass.cmd
+
+# Netdata 上游旧补丁仅保留来源说明与 compat/；旧安装器不兼容 v1.38.1
+third_party/netdata-chinese-patch/dashboard.js
+third_party/netdata-chinese-patch/dashboard_info.js
+third_party/netdata-chinese-patch/index.html
+third_party/netdata-chinese-patch/install-Netdata-chinese.sh
+third_party/netdata-chinese-patch/install-Netdata-chinese-patch.sh
+third_party/netdata-chinese-patch/main.js
+
+# 发布过程与本地运行产物
+.release/
+**/__pycache__/
+**/.git.upstream/
+*.py[cod]
+*.bak
+.env
+.env.*
+
+# 不进入公开源码仓库的大体积/敏感设备产物
+*.dpapi
+*.img
+*.bin
+*.tar.gz
+*.zip
+*.ipk
+*.key
+*.pem

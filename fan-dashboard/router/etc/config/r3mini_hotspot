@@ -1,0 +1,7 @@
+config hotspot 'main'
+	option enabled '0'
+	option radio 'radio1'
+	option interface 'wwan'
+	option check_interval '20'
+	option failure_limit '3'
+	option cooldown '180'

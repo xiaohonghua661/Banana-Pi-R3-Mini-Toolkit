@@ -1,0 +1,13 @@
+{
+	"admin/system/r3mini-fan": {
+		"title": "风扇管理",
+		"order": 12,
+		"action": {
+			"type": "view",
+			"path": "system/r3mini-fan"
+		},
+		"depends": {
+			"acl": [ "luci-app-r3mini-fan" ]
+		}
+	}
+}
