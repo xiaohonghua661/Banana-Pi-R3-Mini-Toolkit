@@ -66,23 +66,29 @@ def run(client: paramiko.SSHClient, command: str, timeout: int = 60) -> str:
     return out
 
 
+def put(client: paramiko.SSHClient, local: Path, remote: PurePosixPath) -> None:
+    run(client, f"mkdir -p '{remote.parent}'")
+    stdin, stdout, stderr = client.exec_command(f"cat > '{remote}'", timeout=60)
+    stdin.channel.sendall(local.read_bytes())
+    stdin.channel.shutdown_write()
+    out = stdout.read().decode("utf-8", "replace")
+    err = stderr.read().decode("utf-8", "replace")
+    code = stdout.channel.recv_exit_status()
+    if code != 0:
+        raise RuntimeError(f"upload failed: {remote} ({code})\n{out}{err}")
+
+
 def main() -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     stage = PurePosixPath(f"/tmp/r3mini-hotspot-src-{stamp}")
     deploy = PurePosixPath(f"/tmp/deploy-hotspot-{stamp}.sh")
     client = connect()
-    sftp = client.open_sftp()
-    try:
-        for relative in FILES:
-            local = ROOT / "router" / Path(relative)
-            if not local.is_file():
-                raise FileNotFoundError(local)
-            remote = stage / PurePosixPath(relative)
-            run(client, f"mkdir -p '{remote.parent}'")
-            sftp.put(str(local), str(remote))
-        sftp.put(str(ROOT / "deploy-hotspot-router.sh"), str(deploy))
-    finally:
-        sftp.close()
+    for relative in FILES:
+        local = ROOT / "router" / Path(relative)
+        if not local.is_file():
+            raise FileNotFoundError(local)
+        put(client, local, stage / PurePosixPath(relative))
+    put(client, ROOT / "deploy-hotspot-router.sh", deploy)
 
     print(run(client, f"sh '{deploy}' '{stage}'", timeout=90), end="")
     remote_hashes = run(
