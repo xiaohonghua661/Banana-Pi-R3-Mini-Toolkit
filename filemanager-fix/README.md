@@ -12,7 +12,7 @@
 sh /tmp/apply-router.sh /mnt
 ```
 
-脚本只修改 `filemanager.@filemanager[0].currentDirectory`，目标必须是已存在的绝对目录。失败时恢复 `/root/filemanager-backups/` 中的改前文件；重复执行会输出 `FILEMANAGER_PATH_ALREADY_OK`。
+脚本只修改 `filemanager.@filemanager[0].currentDirectory`，目标必须是已存在的绝对目录。失败时恢复 `/root/filemanager-backups/` 中的改前文件，并清除未提交的 UCI delta；重复执行会输出 `FILEMANAGER_PATH_ALREADY_OK`。
 
 ## 验收
 

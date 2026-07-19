@@ -32,6 +32,7 @@ cp -p "$config_file" "$backup"
 
 rollback() {
     cp -p "$backup" "$config_file"
+    uci -q revert filemanager || true
     echo "FILEMANAGER_PATH_ROLLED_BACK backup=$backup" >&2
 }
 
