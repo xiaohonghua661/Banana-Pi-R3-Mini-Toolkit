@@ -117,7 +117,13 @@ for p in \
   /etc/init.d/r3mini-fan \
   /usr/share/rpcd/acl.d/luci-app-r3mini-fan.json \
   /usr/share/luci/menu.d/luci-app-r3mini-fan.json \
-  /www/luci-static/resources/view/system/r3mini-fan.js; do
+  /www/luci-static/resources/view/system/r3mini-fan.js \
+  /usr/sbin/r3mini-hotspot-web \
+  /usr/sbin/r3mini-hotspot-watchdog \
+  /etc/init.d/r3mini-hotspot \
+  /usr/share/rpcd/acl.d/luci-app-r3mini-hotspot.json \
+  /usr/share/luci/menu.d/luci-app-r3mini-hotspot.json \
+  /www/luci-static/resources/view/network/r3mini-hotspot.js; do
   if [ -e "$p" ]; then
     mkdir -p "{remote_dir}/files$(dirname "$p")"
     cp -a "$p" "{remote_dir}/files$p"

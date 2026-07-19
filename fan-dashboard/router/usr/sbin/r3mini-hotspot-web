@@ -21,30 +21,48 @@ if_ip() {
 	ifstatus "$1" 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null || true
 }
 
+interface_exists() { uci -q get "network.$1" >/dev/null 2>&1; }
+
+wwan_ready() {
+	local dev
+	[ "$(if_up wwan)" = true ] && [ -n "$(if_ip wwan)" ] || return 1
+	dev="$(interface_device wwan)"
+	[ -n "$dev" ] && iw dev "$dev" link 2>/dev/null | grep -q '^Connected to '
+}
+
 radio_channel() {
 	iw dev phy1-ap0 info 2>/dev/null | awk '/channel / { print $2; exit }'
 }
 
 scan_channel() {
-	local target="$1" raw keys item found channel
-	. /usr/share/libubox/jshn.sh
-	raw="$(ubus call iwinfo scan '{"device":"phy1-ap0"}' 2>/dev/null)" || return 1
-	json_init
-	json_load "$raw" || return 1
-	json_select results || return 1
-	json_get_keys keys
-	for item in $keys; do
-		json_select "$item"
-		json_get_var found ssid
-		json_get_var channel channel
-		json_select ..
-		if [ "$found" = "$target" ]; then
-			case "$channel" in ''|*[!0-9]*) return 1 ;; esac
-			printf '%s' "$channel"
-			return 0
-		fi
-	done
-	return 1
+	local target="$1" raw rc lock='/var/lock/r3mini-hotspot-scan'
+	mkdir "$lock" 2>/dev/null || return 1
+	rc=0
+	/sbin/wifi down radio1 >/dev/null 2>&1 || rc=1
+	iw dev r3scan0 del 2>/dev/null || true
+	if [ "$rc" -eq 0 ] && iw phy phy1 interface add r3scan0 type station 2>/dev/null; then
+		ip link set r3scan0 up 2>/dev/null || rc=1
+	else
+		rc=1
+	fi
+	if [ "$rc" -eq 0 ]; then
+		raw="$(iw dev r3scan0 scan ssid "$target" 2>/dev/null)" || rc=1
+	fi
+	iw dev r3scan0 del 2>/dev/null || true
+	/sbin/wifi up radio1 >/dev/null 2>&1 || rc=1
+	rmdir "$lock" 2>/dev/null || true
+	[ "$rc" -eq 0 ] || return 1
+	printf '%s\n' "$raw" | awk -v target="$target" '
+		/^BSS / { freq = 0; signal = -999 }
+		/^[[:space:]]*freq:/ { freq = $2 + 0 }
+		/^[[:space:]]*signal:/ { signal = $2 + 0 }
+		/^[[:space:]]*SSID:/ {
+			ssid = $0; sub(/^[[:space:]]*SSID:[[:space:]]*/, "", ssid)
+			if (ssid == target && (freq == 5180 || freq == 5200 || freq == 5220 || freq == 5240 || freq == 5745 || freq == 5765 || freq == 5785 || freq == 5805) && (!found || signal > best_signal)) {
+				best_freq = freq; best_signal = signal; found = 1
+			}
+		}
+		END { if (!found) exit 1; print (best_freq - 5000) / 5 }'
 }
 
 interface_device() {
@@ -96,22 +114,25 @@ egress_status() {
 
 status_json() {
 	. /usr/share/libubox/jshn.sh
-	local enabled ssid key radio interval limit cooldown cellular target_channel
+	local enabled ssid key radio interval limit cooldown cellular target_channel preferred wwan_up
 	enabled="$(cfg enabled)"; [ "$enabled" = 1 ] || enabled=0
 	ssid="$(uci -q get wireless.$STA.ssid)"
 	key="$(uci -q get wireless.$STA.key)"
 	radio="$(cfg radio)"; [ -n "$radio" ] || radio=radio1
-	interval="$(cfg check_interval)"; is_uint "$interval" || interval=20
-	limit="$(cfg failure_limit)"; is_uint "$limit" || limit=3
-	cooldown="$(cfg cooldown)"; is_uint "$cooldown" || cooldown=180
+	interval="$(cfg check_interval)"; is_uint "$interval" && [ "$interval" -ge 5 ] && [ "$interval" -le 3600 ] || interval=20
+	limit="$(cfg failure_limit)"; is_uint "$limit" && [ "$limit" -ge 1 ] && [ "$limit" -le 20 ] || limit=3
+	cooldown="$(cfg cooldown)"; is_uint "$cooldown" && [ "$cooldown" -ge 30 ] && [ "$cooldown" -le 3600 ] || cooldown=180
 	target_channel="$(cfg target_channel)"; is_uint "$target_channel" || target_channel=''
 	cellular="$(cellular_interface || true)"
+	preferred="$(cfg preferred_egress)"
+	case "$preferred" in auto|wan|cellular|hotspot) ;; *) preferred=auto ;; esac
+	wwan_ready && wwan_up=1 || wwan_up=0
 	egress_status
 	json_init
 	json_add_boolean enabled "$enabled"
 	json_add_boolean configured "$([ -n "$ssid" ] && printf 1 || printf 0)"
 	json_add_boolean key_configured "$([ -n "$key" ] && printf 1 || printf 0)"
-	json_add_boolean wwan_up "$([ "$(if_up wwan)" = true ] && printf 1 || printf 0)"
+	json_add_boolean wwan_up "$wwan_up"
 	json_add_boolean wired_wan_up "$([ "$(if_up wan)" = true ] && printf 1 || printf 0)"
 	json_add_boolean cellular_up "$([ -n "$cellular" ] && [ "$(if_up "$cellular")" = true ] && printf 1 || printf 0)"
 	json_add_string ssid "$ssid"
@@ -121,6 +142,7 @@ status_json() {
 	json_add_string target_channel "$target_channel"
 	json_add_string ap_ssid "$(uci -q get wireless.$AP.ssid)"
 	json_add_string cellular_iface "$cellular"
+	json_add_string preferred_egress "$preferred"
 	json_add_string egress_kind "$EGRESS_KIND"
 	json_add_string egress_label "$EGRESS_LABEL"
 	json_add_string egress_iface "$EGRESS_IFACE"
@@ -132,24 +154,154 @@ status_json() {
 	json_dump
 }
 
-ensure_wan_zone() {
-	local zone networks
+find_wan_zone() {
+	local zone
 	for zone in $(uci show firewall | sed -n 's/^firewall\.\([^=]*\)=zone$/\1/p'); do
-		[ "$(uci -q get firewall.$zone.name)" = wan ] && break
-		zone=''
+		[ "$(uci -q get firewall.$zone.name)" = wan ] && { printf '%s' "$zone"; return 0; }
 	done
-	[ -n "$zone" ] || fail '未找到防火墙 WAN 区域'
-	networks="$(uci -q get firewall.$zone.network)"
-	case " $networks " in *' wwan '*) ;; *) uci add_list firewall.$zone.network='wwan' ;; esac
+	return 1
 }
 
 reconfigure_radio() {
 	/sbin/wifi reconf radio1 >/dev/null 2>&1 || fail '5GHz 无线重配置失败；已保存配置，请在系统→无线中检查 radio1'
 }
 
+rollback_apply() {
+	local backup="$1" message="$2" package
+	for package in network wireless firewall r3mini_hotspot; do
+		cp -f "$backup/$package" "/etc/config/$package" 2>/dev/null || true
+		uci -q revert "$package" || true
+	done
+	/sbin/wifi reconf radio1 >/dev/null 2>&1 || true
+	/etc/init.d/firewall reload >/dev/null 2>&1 || true
+	rm -rf "$backup"
+	fail "$message；已自动恢复应用前配置"
+}
+
+stage_set() {
+	local backup="$1" value="$2"
+	uci set "$value" || rollback_apply "$backup" '配置暂存失败'
+}
+
+restore_preference() {
+	local backup="$1" route_file="$2" device_file="$3" message="$4" line dev ok=1
+	cp -f "$backup/network" /etc/config/network 2>/dev/null || true
+	cp -f "$backup/r3mini_hotspot" /etc/config/r3mini_hotspot 2>/dev/null || true
+	uci -q revert network || true
+	uci -q revert r3mini_hotspot || true
+	while IFS= read -r dev; do
+		[ -n "$dev" ] || continue
+		while ip -4 route del default dev "$dev" 2>/dev/null; do :; done
+	done < "$device_file"
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		dev="$(printf '%s\n' "$line" | awk '{ for (i=1;i<=NF;i++) if ($i=="dev") { print $(i+1); exit } }')"
+		grep -Fxq "$dev" "$device_file" 2>/dev/null || continue
+		ip -4 route add $line 2>/dev/null || ok=0
+	done < "$route_file"
+	rm -rf "$backup"
+	[ "$ok" -eq 1 ] || fail "$message；配置已恢复，但运行路由恢复失败，请检查默认路由"
+	fail "$message；已自动恢复出口配置"
+}
+
+set_runtime_metric() {
+	local iface="$1" metric="$2" state dev route gateway source
+	[ "$(if_up "$iface")" = true ] || return 1
+	state="$(ifstatus "$iface" 2>/dev/null)"
+	dev="$(printf '%s\n' "$state" | jsonfilter -e '@.l3_device' 2>/dev/null)"
+	[ -n "$dev" ] || dev="$(printf '%s\n' "$state" | jsonfilter -e '@.device' 2>/dev/null)"
+	[ -n "$dev" ] || return 1
+	route="$(ip -4 route show default dev "$dev" 2>/dev/null | head -n 1)"
+	if [ -n "$route" ]; then
+		gateway="$(printf '%s\n' "$route" | awk '{ for (i=1;i<=NF;i++) if ($i=="via") { print $(i+1); exit } }')"
+		source="$(printf '%s\n' "$route" | awk '{ for (i=1;i<=NF;i++) if ($i=="src") { print $(i+1); exit } }')"
+		ip -4 route del default dev "$dev" 2>/dev/null || true
+	else
+		gateway="$(printf '%s\n' "$state" | jsonfilter -e '@.route[@.mask=0].nexthop' 2>/dev/null | head -n 1)"
+		source="$(printf '%s\n' "$state" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	fi
+	if [ -n "$gateway" ] && [ -n "$source" ]; then
+		ip -4 route add default via "$gateway" dev "$dev" src "$source" metric "$metric"
+	elif [ -n "$gateway" ]; then
+		ip -4 route add default via "$gateway" dev "$dev" metric "$metric"
+	else
+		ip -4 route add default dev "$dev" metric "$metric"
+	fi
+}
+
+apply_runtime_metric() {
+	local iface="$1" metric="$2" required="$3" backup="$4" route_file="$5" device_file="$6" message="$7"
+	interface_exists "$iface" || {
+		[ "$required" = 1 ] && restore_preference "$backup" "$route_file" "$device_file" "$message"
+		return 0
+	}
+	set_runtime_metric "$iface" "$metric" && return 0
+	[ "$required" = 1 ] && restore_preference "$backup" "$route_file" "$device_file" "$message"
+	return 0
+}
+
+lock_write() {
+	local lock='/var/lock/r3mini-hotspot-write' rc
+	mkdir "$lock" 2>/dev/null || fail '另一项热点或出口配置正在执行，请稍后重试'
+	trap 'rmdir /var/lock/r3mini-hotspot-write 2>/dev/null || true' 0 1 2 15
+	"$@"; rc=$?
+	rmdir "$lock" 2>/dev/null || true
+	trap - 0 1 2 15
+	return "$rc"
+}
+
+prefer_egress() {
+	[ "$#" -eq 1 ] || fail '用法: prefer <auto|wan|cellular|hotspot>'
+	local preferred="$1" cellular wan_metric cellular_metric hotspot_metric backup route_file device_file dev
+	case "$preferred" in
+		auto) wan_metric=10; cellular_metric=20; hotspot_metric=30 ;;
+		wan) wan_metric=5; cellular_metric=20; hotspot_metric=30 ;;
+		cellular) wan_metric=20; cellular_metric=5; hotspot_metric=30 ;;
+		hotspot) wan_metric=20; cellular_metric=30; hotspot_metric=5 ;;
+		*) fail '出口选择无效' ;;
+	esac
+	cellular="$(cellular_interface || true)"
+	case "$preferred" in
+		wan) interface_exists wan && [ "$(if_up wan)" = true ] || fail '有线 WAN 当前未连接' ;;
+		cellular) [ -n "$cellular" ] && [ "$(if_up "$cellular")" = true ] || fail '蜂窝网络当前未连接' ;;
+		hotspot) interface_exists wwan && wwan_ready || fail '手机热点当前未连接' ;;
+	esac
+	backup="/tmp/r3mini-egress-$$"
+	route_file="$backup/default-routes"
+	device_file="$backup/devices"
+	mkdir -p "$backup" || fail '无法创建出口切换备份'
+	cp -p /etc/config/network "$backup/network" || { rm -rf "$backup"; fail '无法备份网络配置'; }
+	cp -p /etc/config/r3mini_hotspot "$backup/r3mini_hotspot" || { rm -rf "$backup"; fail '无法备份热点配置'; }
+	ip -4 route show default > "$route_file"
+	: > "$device_file"
+	for dev in "$(interface_device wan)" "$(interface_device "$cellular")" "$(interface_device wwan)"; do
+		[ -n "$dev" ] && ! grep -Fxq "$dev" "$device_file" && printf '%s\n' "$dev" >> "$device_file"
+	done
+	if interface_exists wan; then
+		uci set "network.wan.metric=$wan_metric" || restore_preference "$backup" "$route_file" "$device_file" '有线 WAN 优先级暂存失败'
+	fi
+	if interface_exists wwan; then
+		uci set "network.wwan.metric=$hotspot_metric" || restore_preference "$backup" "$route_file" "$device_file" '手机热点优先级暂存失败'
+	fi
+	if [ -n "$cellular" ]; then
+		uci set "network.$cellular.metric=$cellular_metric" || restore_preference "$backup" "$route_file" "$device_file" '蜂窝网络优先级暂存失败'
+	fi
+	uci set "$CONFIG.preferred_egress=$preferred" || restore_preference "$backup" "$route_file" "$device_file" '出口选择暂存失败'
+	uci commit network && uci commit r3mini_hotspot || restore_preference "$backup" "$route_file" "$device_file" '出口选择提交失败'
+	# 先移出最终 metric 区间，避免目标出口复用其他出口的 metric 时触发 EEXIST。
+	apply_runtime_metric wan 1010 0 "$backup" "$route_file" "$device_file" '有线 WAN 临时路由更新失败'
+	[ -z "$cellular" ] || apply_runtime_metric "$cellular" 1020 0 "$backup" "$route_file" "$device_file" '蜂窝网络临时路由更新失败'
+	apply_runtime_metric wwan 1030 0 "$backup" "$route_file" "$device_file" '手机热点临时路由更新失败'
+	apply_runtime_metric wan "$wan_metric" "$([ "$preferred" = wan ] && printf 1 || printf 0)" "$backup" "$route_file" "$device_file" '有线 WAN 运行路由更新失败'
+	[ -z "$cellular" ] || apply_runtime_metric "$cellular" "$cellular_metric" "$([ "$preferred" = cellular ] && printf 1 || printf 0)" "$backup" "$route_file" "$device_file" '蜂窝网络运行路由更新失败'
+	apply_runtime_metric wwan "$hotspot_metric" "$([ "$preferred" = hotspot ] && printf 1 || printf 0)" "$backup" "$route_file" "$device_file" '手机热点运行路由更新失败'
+	rm -rf "$backup"
+	status_json
+}
+
 apply_config() {
 	[ "$#" -eq 3 ] || fail '用法: apply <0|1> <热点SSID> <热点密码>'
-	local enabled="$1" ssid="$2" key="$3" old_key original_channel target_channel ap_mode ap_device cr newline
+	local enabled="$1" ssid="$2" key="$3" old_key original_channel target_channel ap_mode ap_device wan_zone networks backup package preferred wwan_metric cr newline
 	case "$enabled" in 0|1) ;; *) fail '启用状态无效' ;; esac
 	ap_mode="$(uci -q get wireless.$AP.mode)"
 	ap_device="$(uci -q get wireless.$AP.device)"
@@ -168,58 +320,74 @@ apply_config() {
 		[ "$(printf '%s' "$key" | wc -c)" -ge 8 ] && [ "$(printf '%s' "$key" | wc -c)" -le 63 ] || fail '热点密码必须为 8–63 个字符'
 		case "$key" in *"$cr"*|*"$newline"*) fail '热点密码不能包含换行' ;; esac
 		target_channel="$(scan_channel "$ssid" || true)"
-		[ -n "$target_channel" ] || fail '未扫描到该手机热点；请先打开手机 5GHz 热点，并把手机放在路由器附近后重试'
+		[ -n "$target_channel" ] || fail '未扫描到兼容的手机热点；请确认热点已开启 5GHz，并通过 LAN 管理后重试'
+		wan_zone="$(find_wan_zone || true)"
+		[ -n "$wan_zone" ] || fail '未找到防火墙 WAN 区域'
+	else
+		wan_zone=''
+	fi
 
-		uci set network.wwan=interface
-		uci set network.wwan.proto='dhcp'
-		uci set network.wwan.metric='20'
-		uci set wireless.$STA=wifi-iface
-		uci set wireless.$STA.device='radio1'
-		uci set wireless.$STA.mode='sta'
-		uci set wireless.$STA.network='wwan'
-		uci set "wireless.$STA.ssid=$ssid"
-		uci set wireless.$STA.encryption='psk2'
-		uci set "wireless.$STA.key=$key"
-		uci set wireless.$STA.disabled='0'
+	backup="/tmp/r3mini-hotspot-apply-$$"
+	mkdir -p "$backup" || fail '无法创建应用前临时备份'
+	for package in network wireless firewall r3mini_hotspot; do
+		cp -p "/etc/config/$package" "$backup/$package" || rollback_apply "$backup" '无法备份当前配置'
+	done
+
+	if [ "$enabled" = 1 ]; then
+		stage_set "$backup" network.wwan=interface
+		stage_set "$backup" network.wwan.proto='dhcp'
+		preferred="$(cfg preferred_egress)"
+		[ "$preferred" = hotspot ] && wwan_metric=5 || wwan_metric=30
+		stage_set "$backup" "network.wwan.metric=$wwan_metric"
+		stage_set "$backup" wireless.$STA=wifi-iface
+		stage_set "$backup" wireless.$STA.device='radio1'
+		stage_set "$backup" wireless.$STA.mode='sta'
+		stage_set "$backup" wireless.$STA.network='wwan'
+		stage_set "$backup" "wireless.$STA.ssid=$ssid"
+		stage_set "$backup" wireless.$STA.encryption='sae-mixed'
+		stage_set "$backup" "wireless.$STA.key=$key"
+		stage_set "$backup" wireless.$STA.disabled='0'
 		original_channel="$(uci -q get $CONFIG.original_channel)"
 		if [ -z "$original_channel" ]; then
 			original_channel="$(uci -q get wireless.radio1.channel)"
-			[ -n "$original_channel" ] && uci set "$CONFIG.original_channel=$original_channel"
+			[ -n "$original_channel" ] && stage_set "$backup" "$CONFIG.original_channel=$original_channel"
 		fi
-		uci set "wireless.radio1.channel=$target_channel"
-		uci set "$CONFIG.target_channel=$target_channel"
+		stage_set "$backup" "wireless.radio1.channel=$target_channel"
+		stage_set "$backup" "$CONFIG.target_channel=$target_channel"
+		networks="$(uci -q get firewall.$wan_zone.network)"
+		case " $networks " in *' wwan '*) ;; *) uci add_list firewall.$wan_zone.network='wwan' || rollback_apply "$backup" '防火墙配置暂存失败' ;; esac
 	else
-		uci -q set wireless.$STA.disabled='1'
+		if uci -q get wireless.$STA >/dev/null 2>&1; then
+			stage_set "$backup" wireless.$STA.disabled='1'
+		fi
 		original_channel="$(uci -q get $CONFIG.original_channel)"
 		if [ -n "$original_channel" ]; then
-			uci set "wireless.radio1.channel=$original_channel"
+			stage_set "$backup" "wireless.radio1.channel=$original_channel"
 			uci -q delete $CONFIG.original_channel
 		fi
 		uci -q delete $CONFIG.target_channel
 		ifdown wwan >/dev/null 2>&1 || true
 	fi
 
-	uci set $CONFIG=hotspot
-	uci set $CONFIG.enabled="$enabled"
-	uci set $CONFIG.radio='radio1'
-	uci set $CONFIG.interface='wwan'
-	uci set $CONFIG.check_interval='20'
-	uci set $CONFIG.failure_limit='3'
-	uci set $CONFIG.cooldown='180'
-	ensure_wan_zone
-	uci commit network
-	uci commit wireless
-	uci commit firewall
-	uci commit r3mini_hotspot
-	reconfigure_radio
-	/etc/init.d/firewall reload >/dev/null 2>&1 || fail '防火墙重载失败；请检查 WAN 区域'
-	/etc/init.d/r3mini-hotspot enable
-	/etc/init.d/r3mini-hotspot restart
+	stage_set "$backup" $CONFIG=hotspot
+	stage_set "$backup" $CONFIG.enabled="$enabled"
+	stage_set "$backup" $CONFIG.radio='radio1'
+	stage_set "$backup" $CONFIG.interface='wwan'
+	stage_set "$backup" $CONFIG.check_interval='20'
+	stage_set "$backup" $CONFIG.failure_limit='3'
+	stage_set "$backup" $CONFIG.cooldown='180'
+	uci commit network && uci commit wireless && uci commit firewall && uci commit r3mini_hotspot || rollback_apply "$backup" '配置提交失败'
+	/sbin/wifi reconf radio1 >/dev/null 2>&1 || rollback_apply "$backup" '5GHz 无线重配置失败'
+	/etc/init.d/firewall reload >/dev/null 2>&1 || rollback_apply "$backup" '防火墙重载失败'
+	/etc/init.d/r3mini-hotspot enable >/dev/null 2>&1 || rollback_apply "$backup" '自动重连服务启用失败'
+	/etc/init.d/r3mini-hotspot restart >/dev/null 2>&1 || rollback_apply "$backup" '自动重连服务启动失败'
+	rm -rf "$backup"
 	status_json
 }
 
 case "$1" in
 	status) status_json ;;
-	apply) shift; apply_config "$@" ;;
-	*) fail '用法: r3mini-hotspot-web status | apply <0|1> <热点SSID> <热点密码>' ;;
+	apply) shift; lock_write apply_config "$@" ;;
+	prefer) shift; lock_write prefer_egress "$@" ;;
+	*) fail '用法: r3mini-hotspot-web status | apply <0|1> <热点SSID> <热点密码> | prefer <auto|wan|cellular|hotspot>' ;;
 esac
