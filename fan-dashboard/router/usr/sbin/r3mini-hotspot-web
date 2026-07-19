@@ -27,6 +27,7 @@ radio_channel() {
 
 scan_channel() {
 	local target="$1" raw keys item found channel
+	. /usr/share/libubox/jshn.sh
 	raw="$(ubus call iwinfo scan '{"device":"phy1-ap0"}' 2>/dev/null)" || return 1
 	json_init
 	json_load "$raw" || return 1
