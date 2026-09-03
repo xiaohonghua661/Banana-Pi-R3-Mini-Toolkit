@@ -4,7 +4,7 @@
 		"order": 12,
 		"action": {
 			"type": "view",
-			"path": "system/r3mini-fan"
+			"path": "system/r3mini-fan-3848230b8f"
 		},
 		"depends": {
 			"acl": [ "luci-app-r3mini-fan" ]

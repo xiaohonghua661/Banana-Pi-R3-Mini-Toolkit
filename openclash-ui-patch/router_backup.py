@@ -118,9 +118,12 @@ for p in \
   /usr/share/rpcd/acl.d/luci-app-r3mini-fan.json \
   /usr/share/luci/menu.d/luci-app-r3mini-fan.json \
   /www/luci-static/resources/view/system/r3mini-fan.js \
+  /www/luci-static/resources/view/system/r3mini-fan-3848230b8f.js \
   /usr/sbin/r3mini-hotspot-web \
   /usr/sbin/r3mini-hotspot-watchdog \
+  /usr/sbin/r3mini-egress-manager \
   /etc/init.d/r3mini-hotspot \
+  /etc/hotplug.d/iface/95-r3mini-egress \
   /usr/share/rpcd/acl.d/luci-app-r3mini-hotspot.json \
   /usr/share/luci/menu.d/luci-app-r3mini-hotspot.json \
   /www/luci-static/resources/view/network/r3mini-hotspot.js; do

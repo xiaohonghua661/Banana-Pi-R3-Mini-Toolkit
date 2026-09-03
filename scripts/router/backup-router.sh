@@ -18,6 +18,9 @@ opkg list-installed | sort > "$dest/packages-full.txt"
 opkg list-installed | awk '{print $1}' | sort -u > "$dest/packages.txt"
 
 : > "$dest/custom-files.list"
+: > "$dest/custom-files.missing"
+# 本清单与 fan-dashboard/deploy-router.sh、deploy-hotspot-router.sh 的推送清单一一对应。
+# 新增受管件必须同步加到这里，否则备份静默缺件；scripts/router/test-backup-covers-managed-files.sh 守这条。
 for path in \
 	/etc/config/r3mini_fan \
 	/etc/init.d/r3mini-fan \
@@ -26,12 +29,29 @@ for path in \
 	/usr/share/luci/menu.d/luci-app-r3mini-fan.json \
 	/usr/share/rpcd/acl.d/luci-app-r3mini-fan.json \
 	/www/luci-static/resources/view/system/r3mini-fan.js \
+	/www/luci-static/resources/view/system/r3mini-fan-3848230b8f.js \
+	/etc/config/r3mini_hotspot \
+	/etc/init.d/r3mini-hotspot \
+	/usr/sbin/r3mini-hotspot-web \
+	/usr/sbin/r3mini-hotspot-watchdog \
+	/usr/sbin/r3mini-egress-manager \
+	/etc/hotplug.d/iface/95-r3mini-egress \
+	/usr/share/luci/menu.d/luci-app-r3mini-hotspot.json \
+	/usr/share/rpcd/acl.d/luci-app-r3mini-hotspot.json \
+	/www/luci-static/resources/view/network/r3mini-hotspot.js \
+	/usr/lib/lua/luci/controller/openclash.lua \
+	/usr/lib/lua/luci/view/openclash/status.htm \
+	/usr/lib/lua/luci/view/openclash/sub_info_show.htm \
 	/etc/openclash \
 	/etc/crontabs \
 	/etc/rc.local \
 	/etc/sysupgrade.conf \
 	/usr/lib/opkg/status; do
-	[ ! -e "$path" ] || printf '%s\n' "$path" >> "$dest/custom-files.list"
+	if [ -e "$path" ]; then
+		printf '%s\n' "$path" >> "$dest/custom-files.list"
+	else
+		printf '%s\n' "$path" >> "$dest/custom-files.missing"
+	fi
 done
 
 if [ -s "$dest/custom-files.list" ]; then
@@ -69,5 +89,7 @@ tar -tzf "$dest/custom-files.tar.gz" >/dev/null
 printf 'BACKUP_DIR=%s\n' "$dest"
 printf 'CONFIG_ENTRIES='; wc -l < "$dest/config-files.txt"
 printf 'CUSTOM_ENTRIES='; wc -l < "$dest/custom-files.checked.txt"
+printf 'CUSTOM_PATHS_CAPTURED='; wc -l < "$dest/custom-files.list"
+printf 'CUSTOM_PATHS_MISSING='; wc -l < "$dest/custom-files.missing"
 printf 'PACKAGE_COUNT='; wc -l < "$dest/packages.txt"
 echo 'BACKUP_OK'
