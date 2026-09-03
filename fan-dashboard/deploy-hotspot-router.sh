@@ -58,8 +58,10 @@ put_if_missing() {
 
 put /usr/sbin/r3mini-hotspot-web 755
 put /usr/sbin/r3mini-hotspot-watchdog 755
+put /usr/sbin/r3mini-egress-manager 755
 put /etc/init.d/r3mini-hotspot 755
 put_if_missing /etc/config/r3mini_hotspot 600
+put /etc/hotplug.d/iface/95-r3mini-egress 755
 put /usr/share/luci/menu.d/luci-app-r3mini-hotspot.json 644
 put /usr/share/rpcd/acl.d/luci-app-r3mini-hotspot.json 644
 put /www/luci-static/resources/view/network/r3mini-hotspot.js 644
@@ -73,5 +75,5 @@ rm -f /tmp/luci-indexcache
 finished=1
 trap - 0 1 2 15
 printf 'BACKUP=%s\n' "$backup"
-printf 'MANAGED_FILES=6\n'
+printf 'MANAGED_FILES=8\n'
 printf 'PRESERVED_CONFIG=/etc/config/r3mini_hotspot\n'

@@ -1,0 +1,21 @@
+#!/bin/sh
+
+case "$INTERFACE" in
+	wan|wwan) ;;
+	*)
+		proto="$(uci -q get network.$INTERFACE.proto)"
+		case "$proto" in 3g|ncm|qmi|mbim|quectel|modemmanager) ;; *) exit 0;; esac ;;
+esac
+
+dispatch_event() {
+	started="$(LC_ALL=C awk '{ printf "%.0f", $1 * 1000 }' /proc/uptime 2>/dev/null)"
+	R3MINI_EVENT_STARTED_MS="$started" R3MINI_EVENT_ACTION="$ACTION" R3MINI_EVENT_INTERFACE="$INTERFACE" \
+		/usr/sbin/r3mini-egress-manager event >/dev/null 2>&1 &
+}
+
+case "$ACTION" in
+	ifup|ifupdate|update)
+		dispatch_event
+		/usr/sbin/r3mini-egress-manager wake >/dev/null 2>&1 & ;;
+	ifdown|link) dispatch_event ;;
+esac

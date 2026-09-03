@@ -11,7 +11,8 @@
 		},
 		"write": {
 			"file": {
-				"/usr/sbin/r3mini-hotspot-web": [ "exec" ]
+				"/usr/sbin/r3mini-hotspot-web": [ "exec" ],
+				"/tmp/r3mini-hotspot-key-*": [ "write", "remove" ]
 			},
 			"ubus": {
 				"file": [ "exec" ]

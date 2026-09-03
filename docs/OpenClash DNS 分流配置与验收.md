@@ -1,6 +1,6 @@
 # OpenClash DNS 分流配置与验收
 
-> 当前状态（2026-07-19 17:48 +08:00）：管理地址 `192.168.0.242` 只代表当前恢复态可达，不代表独立软路由拓扑已完成。fresh 只读回读为 `br-lan=eth0`、`WAN=eth1`、`eth0` 有链路、`eth1` 无链路、无默认路由、dnsmasq 与 OpenClash 运行。上游仍落在 LAN 侧，最终客户端出口/DNS 黑盒尚未通过；在物理接线和拓扑收口前，不执行本文的写入或重启步骤，也不修改 `network`、`wireless`、`r3mini_hotspot`。
+> 当前状态（2026-07-19 20:28 +08:00）：管理地址为 `192.168.0.242`，dnsmasq 与 OpenClash 正在运行。该时刻 `eth1 carrier=1`，存在经 `192.168.0.254` 的默认路由；后续热点任务可能切换默认出口，因此每次验收先 fresh 回读当前路由，不把某一出口写成永久事实。本文只记录 DNS 证据，不授权修改或重启 `network`、`wireless`、`r3mini_hotspot`、OpenClash。
 
 ## 目标与边界
 
@@ -245,7 +245,7 @@ running
 - 持久 UCI 的 4 个命名 `dns_servers` section、6 个主开关、Policy 正文和启用数量检查输出 `UCI_DNS_OK`。
 - 从 OpenClash 当前实际运行 YAML 校验 `default-nameserver`、`nameserver`、`proxy-server-nameserver`、`fallback`、`geosite:cn` 和 `MESL` 组，输出 `RUNTIME_DNS_OK`。
 - OpenClash 重启后 dnsmasq 曾处于 inactive；未修改 DHCP/network UCI，只启动 dnsmasq 后恢复 53 端口监听和本机 DNS 查询。复现脚本已增加 `DNSMASQ_OK` 与 `PROTECTED_HASHES_OK`，但这些 marker 是当次恢复证据，不自动代表后续每一时刻仍通过。
-- [`scripts/router/restore-openclash-dns.sh`](../scripts/router/restore-openclash-dns.sh) 是当次恢复脚本：会先备份 OpenClash 并保护 network/wireless/hotspot 哈希，但失败时不会自动恢复已提交的 OpenClash。当前阻塞态禁止直接运行；需要再次部署时，先做路由器外部备份并使用带失败回滚的 `restore-stable-baseline.sh`。
+- [`scripts/router/restore-openclash-dns.sh`](../scripts/router/restore-openclash-dns.sh) 是当次恢复脚本：会先备份 OpenClash 并保护 network/wireless/hotspot 哈希，但失败时不会自动恢复已提交的 OpenClash。当前没有再次部署授权；需要再次部署时，先做路由器外部备份并使用带失败回滚的 `restore-stable-baseline.sh`。
 - 本轮没有修改订阅、节点、WAN DNS、时区或业务 VPN。
 
 ## 2026-07-19 RST 后恢复记录
@@ -275,14 +275,14 @@ fallback: https://1.0.0.1/dns-query#MESL
 
 联网冒烟结果：路由器侧 `curl` 打开百度返回 `200`，Net.Coffee Claude 页和 DNS 页均返回 `200`；腾讯首页对命令行请求返回 `501`，该结果只记录为 curl 兼容性现象，不作为浏览器访问失败结论。
 
-## 2026-07-19 客户端路径：历史结果与当前阻塞
+## 2026-07-19 客户端路径：历史结果与当前差异
 
 ### 已验证但不能替代端到端黑盒的证据
 
 - 当次 OpenClash UCI、Policy 和实际运行 YAML 通过 `UCI_DNS_OK` 与 `RUNTIME_DNS_OK`。
 - 当次运行规则包含中国域名/IP 直连，最终规则为 `MATCH,Final`；`Final` 选择 `MESL` 且可递归到 `MESL`，`MESL` 当时选择美国节点。路由器内部经 Clash 认证代理请求 Claude trace 时国家代码为 `US`。
 - 当次对 `192.168.0.242:53` 发起两次唯一域名查询后，Net.Coffee 返回 `0` 个可见递归解析器，其中中国解析器为 `0`。该结果只能证明那次指定 DNS 路径未被页面观察到中国递归出口，不能替代客户端默认网关、浏览器 DoH、IPv6 和 WebRTC 的联合验收。
-- 同期使用浏览器 User-Agent 请求百度和腾讯首页均返回 `200`；这是历史可用性冒烟，不代表当前阻塞态的国内访问已通过。
+- 同期使用浏览器 User-Agent 请求百度和腾讯首页均返回 `200`；这是历史可用性冒烟，不代表当前客户端样本的国内访问已通过。
 - 该次只读复验没有提交或重启 OpenClash，也没有修改 Nikki、系统时区、WAN DNS、订阅或节点凭据；风扇仅做只读保护检查，`r3mini_fan.high_up=40000`。
 
 ### 已判废的旧客户端结果
@@ -299,44 +299,95 @@ fallback: https://1.0.0.1/dns-query#MESL
 
 该路径总体为 `REJECT`；它证明客户端没有经过软路由，不证明 OpenClash DNS 配置本身失败。截图中的完整公网 IP 未写入文档。文档中曾出现的 `192.168.101.x/192.168.101.1` 是过期候选，禁止继续使用。
 
-### 当前物理阻塞
+### 当前网络状态边界
 
-fresh 只读回读为：
+2026-07-19 20:28 的 fresh 只读回读为：
 
 ```text
 管理地址: 192.168.0.242
 br-lan: eth0
 WAN: eth1
 eth0: carrier=1
-eth1: carrier=0
-default route: 不存在
+eth1: carrier=1
+default route: via 192.168.0.254 dev eth1
 dnsmasq: running
 OpenClash: running
+Nikki: inactive
 ```
 
-上游网线仍接在 `eth0`（LAN 桥），`eth1`（WAN）没有链路。该状态可能让上游 DHCP 进入 BPI LAN，也无法给路由器自身提供正常 WAN 出口。先停止客户端黑盒和 OpenClash 写入；不要用内部 YAML、路由器本机代理请求或旧截图宣称端到端通过。
+后续 5 GHz 热点任务可能让 `wwan` 成为默认出口。DNS 验收只要求当次存在可用默认路由，并以 `ip route`、Mihomo debug 和客户端网络详情为真相源；不要继续引用早期“eth1 无链路、无默认路由”的阻塞结论，也不要把 `eth1` 或 `wwan` 写成永久默认出口。
 
-### 接线和 fresh 验收
+只读验收使用 `UCI_DNS_OK`、`RUNTIME_DNS_OK`、dnsmasq 状态、53 端口监听和实际查询结果。`PROTECTED_HASHES_OK` 只用于确有写入时证明冻结配置未变化，不能冒充只读验收 marker。
 
-用户选用独立软路由拓扑后，按下列物理路径接线：
+### Net.Coffee 的 DNS 判定算法
+
+页面在浏览器中生成随机 token，并连续请求两次：
 
 ```text
-硬路由 LAN / 上游交换机 -> BPI WAN eth1
-测试电脑或独立下游交换机 -> BPI LAN eth0
-手机或笔记本 -> BPI Wi-Fi
+https://<token>-1.d.ip.net.coffee/pixel.gif
+https://<token>-2.d.ip.net.coffee/pixel.gif
 ```
 
-接线后先只读确认 `eth1 carrier=1`、WAN 已获得地址、存在默认路由且公网可达。LAN 地址和 DHCP 必须以届时的 fresh 回读为准；若另一个已备份的网络任务把 LAN 切到计划网段 `192.168.110.0/24`，客户端应取得 `192.168.110.100–199`，默认网关和 DNS 均为 `192.168.110.1`。这些数值是计划验收值，不是本文授权修改网络的命令，也不是当前 `.242` 恢复态地址。
+随后页面读取 `/api/dns/result/<token>` 返回的递归解析器地址。只要 Claude 出口不在中国、任一解析器的 `country_code=cn`，页面就显示“可能泄露/中国 DNS”；它不判断该解析器是否由国内域名策略产生，也不证明某个应走国外 DNS 的查询实际走了中国 DNS。因此，单看黄色提示不能判定路由器分流失败，必须把同一 token 与 Mihomo debug 对齐。
 
-满足网络前置条件后执行：
+### 路由器侧实时证据
 
-1. 运行只读配置/YAML 验收，要求 `UCI_DNS_OK`、`RUNTIME_DNS_OK`，并单独确认 dnsmasq 正在运行、UDP/TCP 53 端口监听和本机查询成功。`PROTECTED_HASHES_OK` 只用于后续确有写入时证明冻结配置未变化，不能冒充只读验收 marker。
-2. 让客户端重新获取地址，确认默认网关和 DNS 都指向 BPI LAN；清空 DNS 缓存并关闭浏览器安全 DNS 或应用自带 DoH。
-3. fresh 打开 `https://ip.net.coffee/claude/` 和 `https://ip.net.coffee/dns/`，确认美国出口、无中国 DNS、WebRTC 无国内真实出口。
-4. 打开百度和腾讯，确认国内站点可用；记录 RTT、TTFB 或 CDN 对比时，使用修改前后同一客户端和同一时间窗口。
-5. 保存不含完整公网 IP、订阅或凭据的截图与命令输出，再由无上下文黑盒代理判定 `ACCEPT/REJECT`。
+dnsmasq 没有混入 WAN DNS：
 
-在上述五步全部通过前，客户端状态保持 `PENDING`，当前没有 fresh 客户端 `ACCEPT`。当前 `.242` 恢复态已生成 `backups/router-20260719-175110-stable-current`：DPAPI 主归档隔离解包、内部摘要 `12/12`、DPAPI 往返和官方 IPK 摘要 `13/13` 均通过；该备份仍明确排除尚未完成的 WAN、美国出口和 DNS 泄漏验收，且未再次执行破坏性 RST 整机回灌。
+```text
+no-resolv
+server=127.0.0.1#7874
+append_wan_dns=0
+append_default_dns=0
+```
+
+国内随机子域名 `dnsprobe-1784464469.baidu.com` 的实时日志为：
+
+```text
+[DNS] resolve ... from https://dns.alidns.com:443/dns-query
+[DNS] resolve ... from https://doh.pub:443/dns-query
+```
+
+对 Net.Coffee 完全同类的 `codex-1784465302.d.ip.net.coffee`，实时日志为：
+
+```text
+[DNS] resolve ... from https://1.0.0.1:443/dns-query
+[DNS] resolve ... from https://1.1.1.1:443/dns-query
+[TCP] mihomo -> 1.0.0.1:443 using MESL[美国住宅节点]
+[TCP] mihomo -> 1.1.1.1:443 using MESL[美国住宅节点]
+[TCP] ... -> codex-1784465302.d.ip.net.coffee:443 using Final[美国住宅节点]
+```
+
+这组同域合成探针证明：路由器会把 `d.ip.net.coffee` 国外探测域交给 Cloudflare DoH，并通过 `MESL` 出站。路由器配置与机制判定为 `PASS`；页面当次随机 token 仍需按下文逐条与 Mihomo debug 对齐，不能用合成探针替代客户端端到端证据。
+
+### 有线 PC 与移动端差异
+
+| 客户端 | 当次可见结果 | 判定 |
+|---|---|---|
+| 有线 PC / Edge | DNS“加密或未暴露出口”；Claude 与 WebRTC 为美国；Cloudflare 卡片获取失败 | 该样本未观察到 DNS 出口；不把 Cloudflare 卡片失败当 DNS 泄漏 |
+| 移动端 | 系统“私人 DNS”已关闭；Claude、Cloudflare、WebRTC 为美国；DNS 先后显示中国移动与中国联通 | 代理路径正常，但 DNS/网络路径存在旁路嫌疑且尚未闭环，也可能是结果聚合误报；判定 `PARTIAL` |
+
+BPI 当次 DHCP 租约表为空，不能证明移动端从 BPI 获得了地址、网关和 DNS；客户端也可能使用静态地址或从上游 DHCP 获址。OpenClash 的 DNS Hijack 只覆盖 TCP/UDP 53，不能拦截浏览器 DoH、系统/应用 DoT 853、IPv6 RDNSS、蜂窝双通道或 VPN。
+
+### 移动端最小排查与验收
+
+1. 关闭移动数据、VPN、WLAN+/双通道网络加速，只保留 BPI Wi-Fi。
+2. 查看 Wi-Fi 详情，确认默认网关和 DNS 均为当前 BPI LAN 地址 `192.168.0.242`；使用 BPI DHCP 时，租约表必须出现该设备。
+3. 保持系统“私人 DNS”关闭，同时关闭浏览器“安全 DNS/加密 DNS”和应用自带 DoH/DoT；彻底退出并重新打开浏览器。
+4. 暂时关闭客户端 IPv6，排除 DHCPv6/RDNSS、IPv6 默认路由和 IPv6 WebRTC 旁路。
+5. 重新打开 Net.Coffee，同时记录 Mihomo debug；页面生成的两个 `<token>-<n>.d.ip.net.coffee` 必须逐条出现在日志中，并全部命中 `1.0.0.1/1.1.1.1 + MESL`。
+6. 保存不含完整公网 IP、订阅或凭据的截图、token、时间和命令输出，再交给 fresh 无上下文黑盒代理判定 `ACCEPT/REJECT`；主线自审不能替代该裁决。
+
+| 结果 | 处置 |
+|---|---|
+| 页面 token 未出现在 Mihomo 日志 | 客户端绕过 BPI DNS；检查网关、DNS、SSID、蜂窝、VPN、浏览器 DoH 和 IPv6 |
+| token 出现且日志走国内 DNS | 路由器策略异常；停止验收，回读实际运行 YAML 与规则匹配 |
+| token 出现且日志走 `1.0.0.1/1.1.1 + MESL`，页面仍报中国 DNS | 保留 token、时间和脱敏截图，按 Net.Coffee 归属库/结果聚合误报处理 |
+| token 与日志一致且页面不再显示中国 DNS | 移动端 DNS 验收 `ACCEPT` |
+
+当前结论为：路由器 DNS 分流 `PASS`；有线 PC 样本未暴露解析器；移动端 `PARTIAL`；整套客户端验收保持 `PARTIAL`。
+
+当前 `.242` 恢复态备份为 `backups/router-20260719-175110-stable-current`。DPAPI 主归档隔离解包、内部摘要 `12/12`、DPAPI 往返和官方 IPK 摘要 `13/13` 均通过；该备份明确不包含 WAN、美国出口和 DNS 泄漏的通过结论，且未再次执行破坏性 RST 整机回灌。
 
 ### 国内/国外时区的边界
 
