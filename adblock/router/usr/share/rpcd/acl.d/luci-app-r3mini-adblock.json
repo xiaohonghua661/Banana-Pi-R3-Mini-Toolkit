@@ -1,0 +1,21 @@
+{
+	"luci-app-r3mini-adblock": {
+		"description": "允许查看和切换 BPI-R3 Mini 的广告过滤",
+		"read": {
+			"file": {
+				"/usr/sbin/r3mini-adblock": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/r3mini-adblock": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}

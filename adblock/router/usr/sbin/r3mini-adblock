@@ -1,0 +1,345 @@
+#!/bin/sh
+# r3mini-adblock —— 广告过滤开关 + 规则定时更新（OpenClash 规则集，改规则热加载，不重启 OpenClash）
+#
+# 用法：r3mini-adblock <命令>
+#   status              输出 JSON 状态
+#   enable | disable    打开 / 关闭广告过滤，立即生效
+#   sub on|off          打开 / 关闭订阅规则；关掉后只留内置的红果 / 抖音规则
+#   auto on|off [0-23]  打开 / 关闭每天定时更新，可带更新时刻（几点，分钟固定 30）
+#   update              下载订阅、重建规则集并热加载（定时任务调用；同一时间只跑一个）
+#   update-bg           后台跑 update，立即输出 JSON 状态
+#   apply               不下载：按配置和已下载的订阅重建规则集、热加载、同步定时任务
+#   build               只重建规则集文件，不热加载、不碰定时任务（安装器用）
+#   normalize           调试：stdin 的规则文本规范成「+.域名」/「域名」行
+#   prune '<白名单>'     调试：对 stdin 的规范行套白名单（空格分隔）并去重
+# status/enable/disable/sub/auto/update-bg 在 stdout 输出 JSON，没生效的原因写在 message 里；
+# 设置没保存上（配置文件缺失或损坏）时 stderr 报错、退出码 1。
+# 退出码：0 成功；1 用法错误或没装好；2 规则集已写好但没热加载上（OpenClash 未运行或没加载本规则集）；
+#         3 订阅全部下载失败或被拒收（沿用旧订阅）；4 已有一次更新在跑
+#
+# 规则集由 /etc/openclash/custom/openclash_custom_rules.list 里的受管段引用（安装器写入）：
+#   r3mini-adblock-rule    classical：/etc/r3mini-adblock/core.rules（内置正则等规则）
+#   r3mini-adblock-domain  domain：内置域名 + 订阅 + 额外域名，减去白名单和订阅自己的下载站
+# 关闭时两个规则集只剩一条 .invalid 占位规则，等于不拦任何东西。
+# 并发：改设置、重建、热加载在 apply 锁里串行；下载在 update 锁里，同一时间只跑一个，下载期间不占 apply 锁。
+set -u
+PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONF=r3mini_adblock
+DATA=${R3AB_DATA:-/etc/r3mini-adblock}
+PROV=${R3AB_PROV:-/etc/openclash/rule_provider}
+CRON=${R3AB_CRON:-/etc/crontabs/root}
+RUN=${R3AB_RUN:-/var/run/r3mini-adblock}
+SELF=${R3AB_SELF:-/usr/sbin/r3mini-adblock}
+PD=r3mini-adblock-domain
+PR=r3mini-adblock-rule
+SENT=r3mini-adblock-disabled.invalid
+TAG='#r3mini-adblock'
+MESSAGE=
+NL='
+'
+
+uc() { uci -q ${R3AB_UCI_DIR:+-c "$R3AB_UCI_DIR"} "$@"; }
+cfg() { v=$(uc get "$CONF.main.$1") && [ -n "$v" ] && echo "$v" || echo "$2"; }
+cfg_set() {
+	uc set "$CONF.main.$1=$2" && uc commit "$CONF" && return 0
+	echo "保存设置失败：读写不了 /etc/config/$CONF" >&2
+	exit 1
+}
+hour() { h=$(cfg update_hour 4); case "$h" in [0-9]|1[0-9]|2[0-3]) echo "$h" ;; *) echo 4 ;; esac; }
+now() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { logger -t r3mini-adblock "$*" 2>/dev/null; }
+count() { n=$(grep -c -v -e '^#' -e '^$' -e "$SENT" "$1" 2>/dev/null); echo "${n:-0}"; }
+key_of() { printf '%s' "$1" | md5sum | cut -c1-12; }
+sources() { uc get "$CONF.main.source"; }
+installed() { [ "$(uc get "$CONF.main")" = adblock ] || { echo "广告过滤没装好：缺 /etc/config/$CONF（重新运行安装器）" >&2; exit 1; }; }
+
+# apply 锁：改设置 + 重建 + 热加载的临界区，阻塞等待（临界区只有一两秒）。安装器自己持锁时设 R3AB_LOCKED=1。
+lock_apply() { [ "${R3AB_LOCKED:-}" = 1 ] && return 0; mkdir -p "$RUN"; exec 7> "$RUN/apply.lock"; flock 7; }
+
+# 持久状态（上次更新结果）：$DATA/state，每行 key=value
+st_get() { [ -f "$DATA/state" ] && sed -n "s/^$1=//p" "$DATA/state" | tail -n 1; }
+st_set() {
+	mkdir -p "$DATA"
+	{ [ -f "$DATA/state" ] && grep -v "^$1=" "$DATA/state"; printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -d '\n')"; } > "$DATA/state.tmp"
+	mv "$DATA/state.tmp" "$DATA/state"
+}
+
+# 把常见格式的规则文本规范成每行一个「+.域名」（含子域名）或「域名」（只此一个）：
+# Clash domain/classical（YAML 或文本）、dnsmasq address=/server=、hosts、AdGuard ||域名^、纯域名。
+# 关键词、正则、IP 等规则跳过；不合法的域名和 com.cn 这类公共后缀丢弃。
+normalize() {
+	awk -v bom="$(printf '\357\273\277')" -v q="'" '
+	function emit(d, s) {
+		d = tolower(d); sub(/\.$/, "", d)
+		if (length(d) > 253 || d in psl) return
+		if (d !~ /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*\.[a-z]([a-z0-9-]*[a-z0-9])?$/) return
+		print (s ? "+." : "") d
+	}
+	BEGIN {
+		n = split("com.cn net.cn org.cn gov.cn edu.cn ac.cn mil.cn co.uk org.uk ac.uk co.jp ne.jp or.jp com.hk com.tw com.au co.kr com.sg co.nz com.br", t, " ")
+		for (i = 1; i <= n; i++) psl[t[i]] = 1
+	}
+	{
+		l = $0
+		if (NR == 1 && substr(l, 1, 3) == bom) l = substr(l, 4)
+		gsub(/\r/, "", l); sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l)
+		if (l == "" || l ~ /^(#|!|;|\[|\/\/|@@|payload:)/) next
+		if (l ~ /^-[ \t]/) { l = substr(l, 2); sub(/^[ \t]+/, "", l) }
+		sub(/[ \t]+#.*$/, "", l)
+		c = substr(l, 1, 1)
+		if (c == q || c == "\"") { l = substr(l, 2); if (substr(l, length(l)) == c) l = substr(l, 1, length(l) - 1) }
+		u = toupper(l)
+		if (u ~ /^DOMAIN-SUFFIX,/) { split(l, a, ","); emit(a[2], 1); next }
+		if (u ~ /^DOMAIN,/) { split(l, a, ","); emit(a[2], 0); next }
+		if (u ~ /^[A-Z0-9-]+,/) next
+		if (l ~ /^(address|server|local)=\//) {
+			# 只认屏蔽写法：address 指向空 / 0.0.0.0 / ::，server/local 不带上游；server=/域名/IP 是转发，跳过
+			n = split(l, a, "/"); v = a[n]
+			if (substr(l, 1, 7) == "address") { if (v !~ /^(#|0\.0\.0\.0|::|127\.0\.0\.1|::1)?$/) next }
+			else if (v != "") next
+			for (i = 2; i < n; i++) emit(a[i], 1)
+			next
+		}
+		if (l ~ /^\|\|/) { l = substr(l, 3); if (l ~ /^[A-Za-z0-9_.-]+\^(\$important)?$/) { sub(/\^.*$/, "", l); emit(l, 1) } next }
+		if (l ~ /^(0\.0\.0\.0|127\.0\.0\.1|::1?)[ \t]/) { n = split(l, a, /[ \t]+/); for (i = 2; i <= n; i++) emit(a[i], 0); next }
+		if (l ~ /^(\+|\*)\./) { emit(substr(l, 3), 1); next }
+		if (l ~ /^\./) { emit(substr(l, 2), 1); next }
+		if (l ~ /^[A-Za-z0-9_.-]+$/) emit(l, 0)
+	}'
+}
+
+# 去重、套白名单：白名单里的域名本身和它的上级域名都不拦（它的子域名照拦）；
+# 已被上级「+.」条目覆盖的条目丢掉。输入输出都是 normalize 的格式，输出排好序。
+prune() {
+	awk -v allow="$1" '
+	BEGIN { n = split(allow, t, " "); for (i = 1; i <= n; i++) { a = tolower(t[i]); sub(/^(\+|\*)?\./, "", a); if (a != "") ok[a] = 1 } }
+	function parent_in(d, set,   i) { while ((i = index(d, ".")) > 0) { d = substr(d, i + 1); if (d in set) return 1 } return 0 }
+	{
+		s = substr($0, 1, 2) == "+."; d = s ? substr($0, 3) : $0
+		if (d in ok) next
+		if (s) { hit = 0; for (a in ok) if (length(a) > length(d) && substr(a, length(a) - length(d)) == "." d) { hit = 1; break } if (hit) next; suf[d] = 1 }
+		else ex[d] = 1
+	}
+	END {
+		for (d in suf) if (!parent_in(d, suf)) print "+." d
+		for (d in ex) if (!(d in suf) && !parent_in(d, suf)) print d
+	}' | LC_ALL=C sort
+}
+
+# 订阅自己的下载站（含 GitHub raw 的 jsDelivr 镜像）永远不拦，免得一份坏订阅把自己的修复也拦掉
+source_hosts() {
+	for u in $(sources); do
+		echo "$u" | sed -n 's#^[A-Za-z]*://\([^/:]*\).*#\1#p'
+		case "$u" in https://raw.githubusercontent.com/*) echo cdn.jsdelivr.net; echo fastly.jsdelivr.net ;; esac
+	done
+}
+
+# core.rules 里的规则（去掉注释和末尾的策略名），只收 classical 规则集认的域名类规则
+core_lines() {
+	sed -e 's/\r$//' -e 's/^[ \t]*//' -e 's/[ \t]*$//' "$DATA/core.rules" 2>/dev/null |
+		grep -E '^(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN-REGEX),[^,]+' | sed 's/,REJECT$//'
+}
+
+replace() { if cmp -s "$1" "$2"; then rm -f "$1"; else mv "$1" "$2"; fi; }
+
+# 第二个文件里有、第一个文件里没有的行数（第一个文件可以为空或不存在）
+newer_lines() { awk -v f="$1" 'BEGIN { while ((getline l < f) > 0) a[l] = 1 } !($0 in a) { n++ } END { print n + 0 }' "$2"; }
+
+build() {
+	mkdir -p "$PROV" "$DATA/cache" || return 1
+	td="$PROV/.$PD.tmp"; tr_="$PROV/.$PR.tmp"
+	: > "$td" && : > "$tr_" || return 1
+	if [ "$(cfg enabled 1)" = 1 ]; then
+		{
+			awk 'NF && $1 !~ /^#/ { print "+." $1 }' "$DATA/domains.list" 2>/dev/null
+			if [ "$(cfg subscription 1)" = 1 ]; then
+				for u in $(sources); do cat "$DATA/cache/$(key_of "$u").list" 2>/dev/null; done
+			fi
+			for d in $(uc get "$CONF.main.extra"); do echo "+.$d"; done
+		} | normalize | prune "$(uc get "$CONF.main.allow") $(source_hosts)" > "$td"
+		core_lines > "$tr_"
+	fi
+	[ -s "$td" ] || echo "$SENT" > "$td"
+	[ -s "$tr_" ] || echo "DOMAIN,$SENT" > "$tr_"
+	replace "$td" "$PROV/$PD.txt"
+	replace "$tr_" "$PROV/$PR.txt"
+}
+
+api() { # 方法 路径 → API_CODE / API_BODY
+	port=$(uci -q get openclash.config.cn_port); secret=$(uci -q get openclash.config.dashboard_password)
+	out=$(curl -s -m 8 -X "$1" -H "Authorization: Bearer ${R3AB_SECRET-$secret}" -w "$NL%{http_code}" \
+		"${R3AB_API:-http://127.0.0.1:${port:-9090}}$2" 2>/dev/null)
+	API_CODE=${out##*"$NL"}; API_BODY=${out%"$NL"*}
+}
+
+# 运行中的规则条数；读不到或不是数字输出空
+runtime_count() {
+	n=$(jsonfilter -s "$PROVIDERS_JSON" -e "@.providers['$1'].ruleCount" 2>/dev/null)
+	case "$n" in ''|*[!0-9]*) ;; *) echo "$n" ;; esac
+}
+
+reload() { # 热加载两个规则集，再核对运行中的条数和文件一致
+	for p in "$PR" "$PD"; do
+		api PUT "/providers/rules/$p"
+		case "$API_CODE" in
+			204|200) ;;
+			404) MESSAGE="OpenClash 没有加载本规则集：确认 OpenClash「覆写设置 → 规则设置」里自定义规则是开着的，再重启 OpenClash"; return 2 ;;
+			*) MESSAGE="连不上 OpenClash（API 返回 ${API_CODE:-无}）；规则已保存，OpenClash 运行后自动生效"; return 2 ;;
+		esac
+	done
+	api GET /providers/rules; PROVIDERS_JSON=$API_BODY
+	for p in "$PR" "$PD"; do
+		want=$(grep -c -v -e '^#' -e '^$' "$PROV/$p.txt"); got=$(runtime_count "$p")
+		[ "$got" = "$want" ] || { MESSAGE="规则集 $p 热加载后条数不符（文件 $want 条，运行中 ${got:-读不到} 条）"; return 2; }
+	done
+	return 0
+}
+
+cron_sync() {
+	want=
+	[ "$(cfg auto_update 1)" = 1 ] && want="30 $(hour) * * * $SELF update >/dev/null 2>&1 $TAG"
+	[ "$(grep -F "$TAG" "$CRON" 2>/dev/null)" = "$want" ] && return 0
+	{ grep -v -F "$TAG" "$CRON" 2>/dev/null; [ -n "$want" ] && echo "$want"; } > "$CRON.r3ab.tmp"
+	cat "$CRON.r3ab.tmp" > "$CRON"; rm -f "$CRON.r3ab.tmp"
+	[ -n "${R3AB_CRON:-}" ] || /etc/init.d/cron restart >/dev/null 2>&1
+}
+
+apply() { build || { MESSAGE="写规则集文件失败"; return 2; }; cron_sync; reload; }
+
+fetch() { # 地址 输出文件：先原地址；GitHub raw 失败再依次走 jsDelivr 的 cdn / fastly 节点
+	mirror=$(echo "$1" | sed -n 's#^https://raw\.githubusercontent\.com/\([^/]*\)/\([^/]*\)/\([^/]*\)/\(.*\)$#https://cdn.jsdelivr.net/gh/\1/\2@\3/\4 https://fastly.jsdelivr.net/gh/\1/\2@\3/\4#p')
+	for fu in "$1" $mirror; do
+		rm -f "$2"
+		curl -fsSL --connect-timeout 10 -m 90 --max-filesize 8388608 -o "$2" "$fu" 2>/dev/null && [ -s "$2" ] && return 0
+	done
+	return 1
+}
+
+update() {
+	installed
+	mkdir -p "$RUN" "$DATA/cache"
+	if [ "${R3AB_LOCKED:-}" != 1 ]; then
+		exec 9> "$RUN/update.lock"
+		flock -n 9 || { MESSAGE="已有一次更新在跑"; return 4; }
+	fi
+	echo $$ > "$RUN/update.pid"
+	trap 'rm -f "$RUN/update.pid"' EXIT
+	# 1. 下载并检查（不占 apply 锁，开关照常能用）
+	ok=0; fail=0; errs=; good=
+	for u in $(sources); do
+		k=$(key_of "$u"); dl="$RUN/$k.dl"; norm="$RUN/$k.norm"
+		if ! fetch "$u" "$dl"; then
+			err="下载失败"
+		else
+			normalize < "$dl" | LC_ALL=C sort -u > "$norm"
+			n=$(grep -c . "$norm"); prev=$(count "$DATA/cache/$k.list")
+			if [ "$n" -lt 10 ]; then
+				err="只解析出 $n 条，格式不认识或内容异常"
+			elif [ "$n" -gt 100000 ]; then
+				err="$n 条，超过上限 100000"
+			elif [ "$prev" -ge 100 ] && [ $((n * 2)) -lt "$prev" ]; then
+				err="条数从 $prev 骤降到 $n，疑似上游出错"
+			elif [ "$prev" -ge 100 ] && [ "$n" -gt $((prev * 3 + 1000)) ]; then
+				err="条数从 $prev 暴涨到 $n，疑似上游出错"
+			else
+				err=; good="$good $k"
+			fi
+		fi
+		rm -f "$dl"
+		if [ -n "$err" ]; then
+			rm -f "$norm"; fail=$((fail + 1)); errs="$errs；$err（沿用旧规则）"; log "$u: $err"
+		else
+			ok=$((ok + 1))
+		fi
+		eval "err_$k=\$err"
+	done
+	# 2. 换缓存、重建、热加载（占 apply 锁，期间的开关操作排队）
+	lock_apply
+	old="$RUN/before.txt"; cp "$PROV/$PD.txt" "$old" 2>/dev/null || : > "$old"
+	for k in $good; do replace "$RUN/$k.norm" "$DATA/cache/$k.list"; done
+	keys=" $(for u in $(sources); do key_of "$u"; done | tr '\n' ' ') "
+	for f in "$DATA"/cache/*.list; do
+		k=${f##*/}; k=${k%.list}
+		case "$keys" in *" $k "*) ;; *) rm -f "$f" ;; esac
+	done
+	apply; rc=$?
+	added=$(newer_lines "$old" "$PROV/$PD.txt"); removed=$(newer_lines "$PROV/$PD.txt" "$old")
+	rm -f "$old"
+	if [ "$rc" -ne 0 ]; then result=failed; msg=$MESSAGE
+	elif [ "$fail" -gt 0 ] && [ "$ok" -eq 0 ]; then result=failed; msg="订阅全部更新失败${errs}"; rc=3
+	elif [ "$fail" -gt 0 ]; then result=partial; msg="部分订阅失败${errs}"
+	elif [ "$added" -eq 0 ] && [ "$removed" -eq 0 ]; then result=unchanged; msg="规则没有变化"
+	else result=ok; msg="新增 $added 条，移除 $removed 条"
+	fi
+	t=$(now)
+	for u in $(sources); do k=$(key_of "$u"); eval "e=\${err_$k-}"; st_set "src_${k}_time" "$t"; st_set "src_${k}_error" "$e"; done
+	st_set last_time "$t"; st_set last_result "$result"; st_set last_message "$msg"
+	log "update $result: $msg"
+	MESSAGE=$msg
+	return "$rc"
+}
+
+jesc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\000-\037'; }
+jb() { [ "$1" = 1 ] && echo true || echo false; }
+
+status() {
+	updating=false
+	p=$(cat "$RUN/update.pid" 2>/dev/null)
+	[ -n "$p" ] && grep -q r3mini-adblock "/proc/$p/cmdline" 2>/dev/null && updating=true
+	running=false; loaded=unknown; rt_d=; rt_r=
+	if [ -n "${R3AB_API:-}" ] || pidof clash > /dev/null 2>&1; then
+		running=true
+		api GET /providers/rules
+		if [ "$API_CODE" = 200 ]; then
+			PROVIDERS_JSON=$API_BODY; rt_d=$(runtime_count "$PD"); rt_r=$(runtime_count "$PR")
+			[ -n "$rt_d" ] && [ -n "$rt_r" ] && loaded=yes || loaded=no
+		fi
+	fi
+	printf '{"enabled":%s,"subscription":%s,"auto_update":%s,"update_hour":%s,' \
+		"$(jb "$(cfg enabled 1)")" "$(jb "$(cfg subscription 1)")" "$(jb "$(cfg auto_update 1)")" "$(hour)"
+	printf '"updating":%s,"openclash_running":%s,"loaded":"%s","runtime_domain":%s,"runtime_rule":%s,' \
+		"$updating" "$running" "$loaded" "${rt_d:-null}" "${rt_r:-null}"
+	printf '"domain_rules":%s,"core_rules":%s,"builtin_rules":%s,"builtin_domains":%s,' \
+		"$(count "$PROV/$PD.txt")" "$(count "$PROV/$PR.txt")" "$(core_lines | grep -c .)" "$(count "$DATA/domains.list")"
+	printf '"last_time":"%s","last_result":"%s","last_message":"%s","message":"%s","sources":[' \
+		"$(jesc "$(st_get last_time)")" "$(jesc "$(st_get last_result)")" "$(jesc "$(st_get last_message)")" "$(jesc "$MESSAGE")"
+	sep=
+	for u in $(sources); do
+		k=$(key_of "$u")
+		printf '%s{"url":"%s","count":%s,"time":"%s","error":"%s"}' "$sep" "$(jesc "$u")" "$(count "$DATA/cache/$k.list")" \
+			"$(jesc "$(st_get "src_${k}_time")")" "$(jesc "$(st_get "src_${k}_error")")"
+		sep=,
+	done
+	printf ']}\n'
+}
+
+case "${1:-}" in
+	status) status ;;
+	enable|disable)
+		installed; lock_apply
+		if [ "$1" = enable ]; then cfg_set enabled 1; else cfg_set enabled 0; fi
+		apply; status ;;
+	sub)
+		case "${2:-}" in on|off) ;; *) echo "用法：$0 sub on|off" >&2; exit 1 ;; esac
+		installed; lock_apply
+		if [ "$2" = on ]; then cfg_set subscription 1; else cfg_set subscription 0; fi
+		apply; status ;;
+	auto)
+		case "${2:-}" in on|off) ;; *) echo "用法：$0 auto on|off [0-23]" >&2; exit 1 ;; esac
+		case "${3:-}" in ''|[0-9]|1[0-9]|2[0-3]) ;; *) echo "小时必须是 0-23：$3" >&2; exit 1 ;; esac
+		installed; lock_apply
+		[ -n "${3:-}" ] && cfg_set update_hour "$3"
+		if [ "$2" = on ]; then cfg_set auto_update 1; else cfg_set auto_update 0; fi
+		cron_sync; status ;;
+	update) update; rc=$?; echo "$MESSAGE"; exit "$rc" ;;
+	update-bg)
+		installed; mkdir -p "$RUN"
+		setsid "$SELF" update < /dev/null > /dev/null 2>&1 &
+		sleep 1; status ;;
+	apply) installed; lock_apply; apply; rc=$?; [ -n "$MESSAGE" ] && echo "$MESSAGE" >&2; exit "$rc" ;;
+	build) installed; lock_apply; build ;;
+	normalize) normalize ;;
+	prune) prune "${2:-}" ;;
+	*) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 1 ;;
+esac
