@@ -7,10 +7,12 @@
 //
 // 用法：
 //   r3mini-traffic run [--data-dir D] [--run-dir R] [--no-mount-check] [--duration S] [--socks-port P:label,..]
-//   r3mini-traffic report [--date YYYY-MM-DD] [--from H] [--to H] [--by device|target|exit|hour|kind[,..]]
-//                         [--device S] [--target S] [--kind K] [--proxy] [--top N] [--sort up|down|total] [--tsv]
-//                         [--data-dir D] [--nodes-file F]
-//   r3mini-traffic status
+//   r3mini-traffic report [--date YYYY-MM-DD[..YYYY-MM-DD]] [--from H] [--to H] [--by device|target|exit|date|hour|kind[,..]]
+//                         [--device S] [--exit S] [--target S] [--kind K] [--proxy] [--top N]
+//                         [--sort up|down|total|conns|key] [--tsv|--json] [--data-dir D] [--nodes-file F]
+//                         过滤值按显示出来的取值匹配：默认不分大小写的子串，写成 =值 时整串相等
+//   r3mini-traffic status [--json]
+//   r3mini-traffic web report|status [参数]       LuCI 页面专用：只读、只输出 JSON，不接受路径类参数
 //   r3mini-traffic maintain                       压缩过完的日子、按保留策略清理
 //   r3mini-traffic replay INPUT OUTDIR [--fold N] [--socks-port P:label,..] [--ct-warmup N]   离线对照测试
 //   测试用：--clock-skew S（run，墙钟偏移秒）、--now EPOCH（maintain）、--retention-days N、--max-mb N
@@ -24,12 +26,12 @@
 import * as fs from 'fs';
 import { cursor } from 'uci';
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const DATE_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
 const PART_RE = /^[0-9]{2}(\.[0-9a-f]{8}\.[0-9]+)?\.tsv$/;
 const GZ_RE = /^([0-9]{4}-[0-9]{2}-[0-9]{2})(\.[0-9a-f]{8}-[0-9]+)?\.tsv\.gz$/;
 const SAFE_PATH = /^\/[A-Za-z0-9_\/.-]+$/;
-const FLAGS = { 'no-mount-check': true, proxy: true, tsv: true };
+const FLAGS = { 'no-mount-check': true, proxy: true, tsv: true, json: true };
 const NONPROXY = { DIRECT: true, REJECT: true, 'REJECT-DROP': true, PASS: true };
 // 处于硬件/软件卸载（[HW_OFFLOAD]/[OFFLOAD]）的条目不打印超时与 TCP 状态两列
 const CT_HEAD = /^ipv4 +[0-9]+ +([a-z]+) +[0-9]+ +([0-9]+ +)?([A-Z_]+ +)?/;
@@ -39,6 +41,8 @@ const CT_HDR = { tcp: 52, udp: 28 };
 const LINE_RATE = 125000000;   // 1 Gbit/s：首次读到的流若累计字节超过「运行时长 × 线速」，必然早于记录器存在
 const MAX_ROWS = 5000;
 const OVERFLOW_FOLD = 65536;
+// popen 走 /bin/sh：显式给 PATH，调用方（如经 rpcd 的 file exec）传进来的 PATH 不影响找到的 gzip/ip
+const SH_PATH = 'PATH=/usr/sbin:/usr/bin:/sbin:/bin ';
 
 let opt = {};
 let cfg = null;
@@ -69,6 +73,12 @@ function bounded(key, v, d, lo, hi) {
 
 function clean(s) {
 	return replace('' + s, /[\t\n\r]/g, ' ');
+}
+
+// 参数与查询范围错误：只打印一行原因（die() 会附带调用栈，页面上不好读），退出码 2
+function arg_fail(msg) {
+	warn(msg);
+	exit(2);
 }
 
 function hs(n) {
@@ -213,7 +223,7 @@ function load_config() {
 
 // 本机地址 → 网卡名（forward 的出口按 SNAT 地址标成 DIRECT@网卡）
 function load_local_ips() {
-	let s = { '127.0.0.1': 'lo' }, p = fs.popen('ip -4 -o addr show 2>/dev/null', 'r');
+	let s = { '127.0.0.1': 'lo' }, p = fs.popen(SH_PATH + 'ip -4 -o addr show 2>/dev/null', 'r');
 	if (!p)
 		return s;
 	for (let line = p.read('line'); line != null && line != ''; line = p.read('line')) {
@@ -992,29 +1002,23 @@ function cmd_maintain() {
 }
 
 // ---- 查询 ----
-function read_rows_file(path, cb) {
-	let f = match(path, /\.gz$/) ? fs.popen('gzip -dc ' + path, 'r') : fs.open(path, 'r');
+function read_lines(path) {
+	let f = match(path, /\.gz$/) ? fs.popen(SH_PATH + 'gzip -dc ' + path, 'r') : fs.open(path, 'r');
 	if (!f)
-		return false;
-	for (let line = f.read('line'); line != null && line != ''; line = f.read('line')) {
-		let x = split(rtrim(line, '\n'), '\t');
-		if (length(x) == 9)
-			cb(int(x[0]), x[1], x[2], x[3], x[4], x[5], int(x[6]), int(x[7]), int(x[8]));
-	}
+		return [];
+	let s = f.read('all') || '';
 	f.close();
-	return true;
+	return split(s, '\n');
 }
 
-// 一天的数据 = 当天全部 gz + 目录里全部会话文件，求和
-function load_day(date) {
-	let out = [], dir = cfg.data_dir + '/' + date, x = day_entries()[date];
-	let cb = (h, src, mac, kind, ex, target, up, down, n) => push(out, { h: h, src: src, mac: mac, kind: kind, exit: ex,
-		target: target, up: up, down: down, n: n });
+// 一天的数据 = 当天全部 gz + 目录里全部会话文件，查询时求和（x 是 day_entries() 里该日的条目）
+function day_files(date, x) {
+	let dir = cfg.data_dir + '/' + date, out = [];
 	for (let g in sort(x ? x.gz : []))
-		read_rows_file(cfg.data_dir + '/' + g, cb);
+		push(out, cfg.data_dir + '/' + g);
 	for (let e in sort(fs.lsdir(dir) || []))
 		if (match(e, PART_RE))
-			read_rows_file(dir + '/' + e, cb);
+			push(out, dir + '/' + e);
 	return out;
 }
 
@@ -1045,66 +1049,245 @@ function device_label(src, mac) {
 	return s;
 }
 
+// 「YYYY-MM-DD」→ 当天正午的时间戳；不存在的日期（如 02-30）返回 null
+function parse_day(s) {
+	let m = match(s, /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/);
+	if (!m)
+		return null;
+	let x = localtime(time());
+	x.year = int(m[1]);
+	x.mon = int(m[2]);
+	x.mday = int(m[3]);
+	x.hour = 12;
+	x.min = 0;
+	x.sec = 0;
+	let t = timelocal(x);
+	return (t != null && day_of(t) == s) ? t : null;
+}
+
+// --date 取「YYYY-MM-DD」或「YYYY-MM-DD..YYYY-MM-DD」，含两端，起不晚于止
+function parse_range(spec) {
+	let p = split('' + spec, '..');
+	let a = parse_day(p[0]), b = length(p) == 2 ? parse_day(p[1]) : (length(p) == 1 ? a : null);
+	if (a == null || b == null || b < a)
+		return null;
+	return { from: p[0], to: p[length(p) - 1], days: int((b - a + 43200) / 86400) + 1 };
+}
+
+function hour_opt(k, d) {
+	let v = opt[k];
+	if (v == null)
+		return d;
+	if (!match('' + v, /^[0-9]{1,2}$/) || int(v) > 24)
+		arg_fail(sprintf('--%s 须为 0-24 的整点\n', k));
+	return int(v);
+}
+
+// 过滤值按显示出来的取值匹配：默认不分大小写的子串；以 = 开头时整串相等（页面下钻用）
+function want(f, v) {
+	if (f == null || f === '')
+		return true;
+	return substr(f, 0, 1) == '=' ? v == substr(f, 1) : index(lc(v), lc(f)) >= 0;
+}
+
+function tally(m, k, up, down, n) {
+	let g = m[k];
+	if (!g)
+		m[k] = g = [0, 0, 0];
+	g[0] += up;
+	g[1] += down;
+	g[2] += n;
+}
+
+// ucode 带比较函数的 sort 每次比较约 15 µs（2 万组要 4.5 秒）。拼成「补零的反向指标 \t 名称」交给原生字符串排序，
+// 次序不变（指标降序、同值按名称的字节序升序），快约 10 倍。名称里没有制表符（采集时已替换成空格）
+const BIG = 9223372036854775807;
+function rank(m, metric) {
+	let tagged = [];
+	for (let k in m)
+		push(tagged, sprintf('%019d\t%s', BIG - metric(m[k]), k));
+	return map(sort(tagged), (s) => substr(s, 20));
+}
+
+// 下拉候选：按合计取前 n 项；页面当前精确选中的那一项（pin = "=值"）即使排在 n 名之后也带上
+function top_list(m, n, pin) {
+	let ks = rank(m, (g) => g[0] + g[1]), out = [];
+	if (length(ks) > n) {
+		let p = (type(pin) == 'string' && substr(pin, 0, 1) == '=') ? substr(pin, 1) : null;
+		ks = slice(ks, 0, n);
+		if (p != null && m[p] && index(ks, p) < 0)
+			push(ks, p);
+	}
+	for (let k in ks)
+		push(out, { k: k, up: m[k][0], down: m[k][1], conns: m[k][2] });
+	return out;
+}
+
+// rpcd 的 file exec 只收 256 KiB 标准输出，超出时整个调用失败：留出余量，超了先逐次减半明细行，
+// 明细减完再减半下拉候选，并标 clipped
+const JSON_CAP = 240000;
+function emit_json(out) {
+	let s = sprintf('%J', out);
+	while (length(s) > JSON_CAP) {
+		let f = out.facets;
+		if (type(out.rows) == 'array' && length(out.rows))
+			out.rows = slice(out.rows, 0, int(length(out.rows) / 2));
+		else if (type(f) == 'object' && (length(f.device) || length(f.exit))) {
+			f.device = slice(f.device, 0, int(length(f.device) / 2));
+			f.exit = slice(f.exit, 0, int(length(f.exit) / 2));
+		} else
+			break;
+		out.clipped = true;
+		s = sprintf('%J', out);
+	}
+	print(s, '\n');
+}
+
+function data_summary(entries) {
+	let ds = sort(keys(entries)), bytes = 0;
+	for (let d in ds)
+		bytes += entry_size(d, entries[d]);
+	return { first: ds[0], last: length(ds) ? ds[length(ds) - 1] : null, count: length(ds), bytes: bytes,
+		retention_days: cfg.retention_days, max_bytes: cfg.max_bytes, mount_ok: mount_ok() };
+}
+
+const DIMS = { device: true, target: true, exit: true, date: true, hour: true, kind: true };
+const SORTS = { up: 0, down: 1, conns: 2, total: 3, key: 4 };
+const KINDS = { clash: true, socks: true, forward: true };
+// 页面查询的读盘预算：LuCI 的 RPC 默认 20 秒超时（rpcd 30 秒杀进程），超出前给出能看懂的错误
+let budget_ms = null;
+
 function cmd_report() {
+	let t0 = clock(true);
 	cfg = load_config();
 	local_ips = load_local_ips();
-	let nodes = load_node_servers();
-	let date = opt.date || day_of(wall());
-	if (!match(date, DATE_RE))
-		die('--date 需要 YYYY-MM-DD\n');
-	let from = num(opt.from, 0), to = num(opt.to, 24), top = num(opt.top, 20);
-	let dims = split(opt.by || 'device', ','), sortkey = opt.sort || 'up';
-	let groups = {}, tot = [0, 0, 0], un = [0, 0], matched = 0;
-	for (let r in load_day(date)) {
-		let hr = localtime(r.h).hour;
-		if (hr < from || hr >= to)
-			continue;
-		if (r.kind == 'unattributed') {
-			un[0] += r.up;
-			un[1] += r.down;
+	let nodes = load_node_servers(), today = day_of(wall());
+	let range = parse_range(opt.date || today);
+	if (!range)
+		arg_fail('--date 需要 YYYY-MM-DD 或 YYYY-MM-DD..YYYY-MM-DD（日期须存在，起不晚于止）\n');
+	let from = hour_opt('from', 0), to = hour_opt('to', 24);
+	if (from >= to)
+		arg_fail('--from 须早于 --to\n');
+	let top = num(opt.top, opt.json ? 100 : 20);
+	let dims = split(opt.by || 'device', ','), sortkey = opt.sort || 'up', si = SORTS[sortkey];
+	for (let d in dims)
+		if (!DIMS[d])
+			arg_fail('--by 只支持 device,target,exit,date,hour,kind\n');
+	if (si == null)
+		arg_fail('--sort 只支持 up,down,total,conns,key\n');
+	if (opt.kind && !KINDS[opt.kind])
+		arg_fail('--kind 只支持 clash,socks,forward\n');
+	let entries = day_entries(), dates = filter(sort(keys(entries)), (d) => d >= range.from && d <= range.to);
+	// 第一遍只按原始列求和：同一（源, MAC, 类型, 出口, 目标）跨小时、跨日并成一条，需要时再带上日期或小时。
+	// 贴标签、节点标注、过滤这些逐条开销大的步骤只对合并后的键各做一次（每行开销约减半）
+	let by_date = index(dims, 'date') >= 0, by_hour = index(dims, 'hour') >= 0;
+	let hours = {}, raw = {}, matched = 0;
+	for (let d in dates) {
+		for (let path in day_files(d, entries[d])) {
+			if (budget_ms && elapsed_ms(t0) > budget_ms)
+				arg_fail(sprintf('查询超过 %d 秒仍未读完（读到 %s），请缩小日期范围\n', budget_ms / 1000, d));
+			for (let line in read_lines(path)) {
+				let x = split(line, '\t');
+				if (length(x) != 9)
+					continue;
+				let hc = hours[x[0]];
+				if (!hc) {
+					let t = localtime(int(x[0]));
+					hours[x[0]] = hc = [t.hour, sprintf('%04d-%02d-%02d', t.year, t.mon, t.mday)];
+				}
+				if (hc[0] < from || hc[0] >= to)
+					continue;
+				let k = x[1] + '\t' + x[2] + '\t' + x[3] + '\t' + x[4] + '\t' + x[5];
+				if (by_date)
+					k += '\t' + hc[1];
+				if (by_hour)
+					k += '\t' + hc[0];
+				let r = raw[k];
+				if (!r)
+					raw[k] = r = [0, 0, 0, x[1], x[2], x[3], x[4], x[5], hc[1], hc[0], 0];
+				r[0] += int(x[6]);
+				r[1] += int(x[7]);
+				r[2] += int(x[8]);
+				r[10]++;
+			}
+		}
+	}
+	let groups = {}, tot = [0, 0, 0], un = [0, 0], fdev = {}, fexit = {}, labels = {}, isnode = {}, seen = 0;
+	let over = (what) => arg_fail(sprintf('查询超过 %d 秒仍未完成（%s），请缩小日期范围或加过滤\n', budget_ms / 1000, what));
+	for (let rk in raw) {
+		if (budget_ms && !(++seen % 2048) && elapsed_ms(t0) > budget_ms)
+			over('汇总到第 ' + seen + ' 项');
+		let r = raw[rk], up = r[0], down = r[1], n = r[2], src = r[3], mac = r[4], kind = r[5], ex = r[6], target = r[7];
+		if (kind == 'unattributed') {
+			un[0] += up;
+			un[1] += down;
 			continue;
 		}
-		let label = device_label(r.src, r.mac);
-		if (opt.device && index(lc(label), lc(opt.device)) < 0)
+		if (opt.kind && kind != opt.kind)
 			continue;
-		if (opt.target && index(lc(r.target), lc(opt.target)) < 0)
-			continue;
-		if (opt.kind && r.kind != opt.kind)
-			continue;
-		let direct = (r.kind == 'forward' || (r.kind == 'clash' && NONPROXY[r.exit]));
-		let node = nodes[lc(target_host(r.target))];
+		let node = isnode[target];
+		if (node == null)
+			isnode[target] = node = !!nodes[lc(target_host(target))];
+		let direct = (kind == 'forward' || (kind == 'clash' && NONPROXY[ex]));
 		if (opt.proxy && direct && !node)
 			continue;
+		let dk = src + ' ' + mac, label = labels[dk];
+		if (label == null)
+			labels[dk] = label = device_label(src, mac);
+		let tg = node ? target + ' [订阅节点]' : target;
+		let xl = (node && direct) ? '订阅节点直连(' + ex + ')' : (kind == 'clash' ? ex : kind + ':' + ex);
+		// 下拉框候选项：每个维度不受自己的过滤约束，但受其余过滤约束
+		let wd = want(opt.device, label), wx = want(opt.exit, xl), wt = want(opt.target, tg);
+		if (wx && wt)
+			tally(fdev, label, up, down, n);
+		if (wd && wt)
+			tally(fexit, xl, up, down, n);
+		if (!wd || !wx || !wt)
+			continue;
 		let parts = [];
-		for (let d in dims) {
-			if (d == 'device') push(parts, label);
-			else if (d == 'target') push(parts, node ? r.target + ' [订阅节点]' : r.target);
-			else if (d == 'exit') push(parts, (node && direct) ? '订阅节点直连(' + r.exit + ')' :
-				(r.kind == 'clash' ? r.exit : r.kind + ':' + r.exit));
-			else if (d == 'hour') push(parts, sprintf('%02d:00', hr));
-			else if (d == 'kind') push(parts, r.kind);
-			else die('--by 只支持 device,target,exit,hour,kind\n');
-		}
+		for (let d in dims)
+			push(parts, d == 'device' ? label : d == 'target' ? tg : d == 'exit' ? xl :
+				d == 'date' ? r[8] : d == 'hour' ? sprintf('%02d:00', r[9]) : kind);
 		let k = join('  |  ', parts), g = groups[k];
 		if (!g)
-			groups[k] = g = [0, 0, 0];
-		g[0] += r.up;
-		g[1] += r.down;
-		g[2] += r.n;
-		tot[0] += r.up;
-		tot[1] += r.down;
-		tot[2] += r.n;
-		matched++;
+			groups[k] = g = [0, 0, 0, parts];
+		g[0] += up;
+		g[1] += down;
+		g[2] += n;
+		tot[0] += up;
+		tot[1] += down;
+		tot[2] += n;
+		matched += r[10];
 	}
-	let val = (g) => sortkey == 'down' ? g[1] : (sortkey == 'total' ? g[0] + g[1] : g[0]);
-	let ks = sort(keys(groups), (a, b) => val(groups[b]) - val(groups[a]));
+	// 排序约 0.03 毫秒一组（10 万组 2.7 秒）：按这个估算，排不完就别排
+	if (budget_ms && elapsed_ms(t0) + int(length(groups) * 3 / 100) > budget_ms)
+		over(length(groups) + ' 组待排序');
+	let ks = si == 4 ? sort(keys(groups)) : rank(groups, si == 3 ? ((g) => g[0] + g[1]) : ((g) => g[si]));
+	let span = range.from == range.to ? range.from : range.from + '..' + range.to;
+	if (opt.json) {
+		let rows = [], all = sort(keys(entries));
+		for (let i = 0; i < length(ks) && i < top; i++) {
+			let g = groups[ks[i]];
+			push(rows, { k: g[3], up: g[0], down: g[1], conns: g[2] });
+		}
+		emit_json({ version: VERSION, today: today, from: range.from, to: range.to, days: range.days, hours: [from, to],
+			by: dims, sort: sortkey, proxy: !!opt.proxy,
+			filters: { device: opt.device, exit: opt.exit, target: opt.target, kind: opt.kind },
+			dates: dates, available: { first: all[0], last: length(all) ? all[length(all) - 1] : null, count: length(all) },
+			mount_ok: mount_ok(), groups: length(ks), rows: rows,
+			total: { up: tot[0], down: tot[1], conns: tot[2], rows: matched },
+			unattributed: { up: un[0], down: un[1] },
+			facets: { device: top_list(fdev, 100, opt.device), exit: top_list(fexit, 100, opt.exit) },
+			elapsed_ms: elapsed_ms(t0) });
+		return 0;
+	}
 	if (opt.tsv) {
 		for (let k in ks)
 			printf('%s\t%d\t%d\t%d\n', k, groups[k][0], groups[k][1], groups[k][2]);
 		printf('(合计)\t%d\t%d\t%d\n(未归因)\t%d\t%d\t0\n', tot[0], tot[1], tot[2], un[0], un[1]);
 		return 0;
 	}
-	printf('%s %02d:00-%02d:00  按 %s%s  （%d 行明细）\n', date, from, to, join(',', dims), opt.proxy ? '  仅代理' : '', matched);
+	printf('%s %02d:00-%02d:00  按 %s%s  （%d 行明细）\n', span, from, to, join(',', dims), opt.proxy ? '  仅代理' : '', matched);
 	printf('%12s %12s %7s  %s\n', '上传', '下载', '连接', join(' | ', dims));
 	for (let i = 0; i < length(ks) && i < top; i++) {
 		let g = groups[ks[i]];
@@ -1120,16 +1303,30 @@ function cmd_report() {
 
 function cmd_status() {
 	cfg = load_config();
-	let raw = fs.readfile(cfg.run_dir + '/status.json');
+	let raw = fs.readfile(cfg.run_dir + '/status.json'), now = wall();
 	if (!raw) {
-		print('NOT_RUNNING 未找到 ' + cfg.run_dir + '/status.json\n');
+		if (opt.json)
+			emit_json({ state: 'NOT_RUNNING', problems: ['NOT_RUNNING'], version_cli: VERSION, today: day_of(now),
+				now: now, data: data_summary(day_entries()) });
+		else
+			print('NOT_RUNNING 未找到 ' + cfg.run_dir + '/status.json\n');
 		return 1;
 	}
-	let st = json(raw), age = wall() - st.now;
+	let st = json(raw), age = now - st.now;
 	// 状态文件约每 10 秒刷新一次，轮询间隔最长 10 秒
 	let problems = st.problems || [];
 	if (age > 40)
 		unshift(problems, 'STALE');
+	if (opt.json) {
+		st.state = length(problems) ? 'STATUS_DEGRADED' : 'STATUS_OK';
+		st.problems = problems;
+		st.age = age;
+		st.version_cli = VERSION;
+		st.today = day_of(now);
+		st.data = data_summary(day_entries());
+		emit_json(st);
+		return length(problems) ? 1 : 0;
+	}
 	printf('%s 版本 %s pid %d run_id %s 已运行 %d 秒，状态更新于 %d 秒前，当前轮询间隔 %.1f 秒\n',
 		length(problems) ? 'STATUS_DEGRADED problems=' + join(',', problems) : 'STATUS_OK',
 		st.version, st.pid, st.run_id, st.now - st.started, age, st.poll_ms / 1000.0);
@@ -1140,6 +1337,32 @@ function cmd_status() {
 		st.rows, st.hour_polls_ok, st.hour_polls_failed, hs(st.hour_att_up), hs(st.hour_un_up), st.pending_retry);
 	printf('数据目录 %s（分区%s），日志 %s\n', st.data_dir, st.mount_ok ? '已挂载' : '未挂载', st.log || '-');
 	return length(problems) ? 1 : 0;
+}
+
+// LuCI 页面的入口，ACL 只放行「r3mini-traffic web *」：只读、只输出 JSON，拒绝数据目录、节点文件等路径参数；
+// 记录器状态不正常时也返回 0，由页面按 state 显示
+const WEB_OPTS = {
+	report: { date: true, from: true, to: true, by: true, device: true, exit: true, target: true, kind: true,
+		proxy: true, top: true, sort: true },
+	status: {},
+};
+
+function cmd_web(sub) {
+	let allowed = WEB_OPTS[sub];
+	if (!allowed)
+		arg_fail('用法: r3mini-traffic web report|status [参数]\n');
+	for (let k in opt)
+		if (!allowed[k])
+			arg_fail(sprintf('web %s 不接受 --%s\n', sub, k));
+	opt.json = true;
+	if (sub == 'status') {
+		cmd_status();
+		return 0;
+	}
+	if (opt.top != null && (!match('' + opt.top, /^[0-9]{1,3}$/) || int(opt.top) < 1 || int(opt.top) > 500))
+		arg_fail('--top 须为 1-500\n');
+	budget_ms = 14000;
+	return cmd_report();
 }
 
 // ---- 入口 ----
@@ -1170,11 +1393,13 @@ else if (cmd == 'report')
 	exit(cmd_report());
 else if (cmd == 'status')
 	exit(cmd_status());
+else if (cmd == 'web' && length(pos) == 1)
+	exit(cmd_web(pos[0]));
 else if (cmd == 'maintain')
 	exit(cmd_maintain());
 else if (cmd == 'version')
 	print(VERSION + '\n');
 else {
-	warn('用法: r3mini-traffic run|report|status|maintain|replay INPUT OUTDIR|version（详见脚本开头注释）\n');
+	warn('用法: r3mini-traffic run|report|status|web report|status|maintain|replay INPUT OUTDIR|version（详见脚本开头注释）\n');
 	exit(2);
 }

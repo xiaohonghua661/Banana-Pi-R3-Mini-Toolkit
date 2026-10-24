@@ -350,6 +350,154 @@ EXPECTED_FILES = ["2026-10-23/21.00000000.1.tsv", "2026-10-23/22.00000000.2.tsv"
                   "2026-10-24/00.00000000.4.tsv"]
 
 
+# ---- 查询（report）的参照实现与构造数据 ----
+# 与 ucode 版同一规则：每小时按设备时区取小时与日期；未归因只按时段累计；--kind 先于 --proxy；
+# 目标去掉端口后命中订阅节点服务器时，直连行计入 --proxy 并改标签；设备、出口、目标的过滤按显示出来的取值匹配
+# （默认不分大小写的子串，「=值」整串相等）；下拉候选 facets 不受本维度过滤约束、受其余过滤约束。
+def target_host(t: str) -> str:
+    i = t.rfind(":")
+    return t[:i] if i > 0 and re.fullmatch(r"[0-9]+", t[i + 1:]) else t
+
+
+def device_label(src: str, mac: str, names: dict, local_ips) -> str:
+    s = src + (" " + mac if mac and mac != "-" else "")
+    if names.get(mac):
+        return s + f" ({names[mac]})"
+    return s + (" (路由器本机)" if src in local_ips else "")
+
+
+ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def want(f: str | None, v: str) -> bool:
+    """ucode 的 lc() 只转 ASCII 字母，参照实现也只转 ASCII（str.lower() 会连 É 一起转）。"""
+    if not f:
+        return True
+    return v == f[1:] if f.startswith("=") else f.translate(ASCII_LOWER) in v.translate(ASCII_LOWER)
+
+
+def report(rows, by, *, h0=0, h1=24, proxy=False, device=None, exit_=None, target=None, kind=None,
+           nodes=frozenset(), names=None, local_ips=("127.0.0.1",)) -> dict:
+    names = names or {}
+    groups, fdev, fexit, tot, un, matched = {}, {}, {}, [0, 0, 0], [0, 0], 0
+
+    def add(m, k, up, down, n):
+        g = m.setdefault(k, [0, 0, 0])
+        g[0] += up
+        g[1] += down
+        g[2] += n
+    for line in rows:
+        h, src, mac, k, ex, tg, up, down, n = line.split("\t")
+        t = datetime.fromtimestamp(int(h), TZ)
+        if not h0 <= t.hour < h1:
+            continue
+        up, down, n = int(up), int(down), int(n)
+        if k == "unattributed":
+            un[0] += up
+            un[1] += down
+            continue
+        if kind and k != kind:
+            continue
+        node = target_host(tg).translate(ASCII_LOWER) in nodes
+        direct = k == "forward" or (k == "clash" and ex in NONPROXY)
+        if proxy and direct and not node:
+            continue
+        label = device_label(src, mac, names, local_ips)
+        tgl = tg + " [订阅节点]" if node else tg
+        exl = f"订阅节点直连({ex})" if node and direct else (ex if k == "clash" else f"{k}:{ex}")
+        wd, wx, wt = want(device, label), want(exit_, exl), want(target, tgl)
+        if wx and wt:
+            add(fdev, label, up, down, n)
+        if wd and wt:
+            add(fexit, exl, up, down, n)
+        if not (wd and wx and wt):
+            continue
+        vals = {"device": label, "target": tgl, "exit": exl, "date": t.strftime("%Y-%m-%d"),
+                "hour": f"{t.hour:02d}:00", "kind": k}
+        add(groups, "  |  ".join(vals[d] for d in by), up, down, n)
+        tot[0] += up
+        tot[1] += down
+        tot[2] += n
+        matched += 1
+    return {"groups": groups, "total": tot, "unattributed": un, "rows": matched,
+            "facets": {"device": fdev, "exit": fexit}}
+
+
+def report_order(groups: dict, sort: str) -> list[str]:
+    """ucode 版的排序：key 按名称升序；其余按指标降序，同值按名称升序（UTF-8 字节序与码点序一致）。"""
+    if sort == "key":
+        return sorted(groups)
+    idx = {"up": 0, "down": 1, "conns": 2}
+    metric = (lambda g: g[0] + g[1]) if sort == "total" else (lambda g: g[idx[sort]])
+    return sorted(groups, key=lambda k: (-metric(groups[k]), k))
+
+
+def _ep(day: int, hour: int) -> int:
+    return int(datetime(2026, 10, day, hour, tzinfo=TZ).timestamp())
+
+
+M1 = "02:00:00:00:00:01"
+# 数据目录里的文件 → 行。10-20 同一小时两段会话求和；10-21 是压缩过的 gz；10-22 没有数据；10-23 只有一个会话文件
+REPORT_FILES = {
+    "2026-10-20/02.aaaaaaaa.1.tsv": [
+        (_ep(20, 2), "10.0.0.1", M1, "clash", "节点A < 组", "a.example", 1000, 10, 2),
+        (_ep(20, 2), "10.0.0.10", "-", "clash", "DIRECT", "b.example:8443", 500, 50, 1),
+        (_ep(20, 2), "10.0.0.1", M1, "clash", "DIRECT", "node.example", 700, 7, 1),
+        (_ep(20, 2), "-", "-", "unattributed", "-", "-", 33, 44, 0),
+    ],
+    "2026-10-20/03.aaaaaaaa.2.tsv": [
+        (_ep(20, 3), "10.0.0.1", M1, "clash", "节点A < 组", "a.example", 2000, 20, 1),
+        (_ep(20, 3), "10.0.0.10", "-", "socks", "ph-socks", "(SOCKS :10810)", 300, 30, 1),
+    ],
+    "2026-10-20/03.bbbbbbbb.1.tsv": [
+        (_ep(20, 3), "10.0.0.1", M1, "clash", "节点A < 组", "a.example", 5, 5, 0),
+        (_ep(20, 3), "127.0.0.1", "-", "clash", "节点B < 组", "c.example", 9, 9, 1),
+    ],
+    "2026-10-21.cccccccc-1.tsv.gz": [
+        (_ep(21, 10), "10.0.0.10", "-", "forward", "DIRECT@eth1", "198.51.100.7:443", 4000, 400, 0),
+        (_ep(21, 10), "10.0.0.1", M1, "clash", "节点A < 组", "a.example", 100, 1, 1),
+        (_ep(21, 23), "-", "-", "unattributed", "-", "-", 5, 6, 0),
+    ],
+    "2026-10-23/23.dddddddd.1.tsv": [
+        (_ep(23, 23), "10.0.0.1", M1, "clash", "REJECT", "ads.example", 0, 0, 3),
+        (_ep(23, 23), "10.0.0.10", "-", "clash", "节点A < 组", "A.Example", 50, 5, 1),
+        # 与 A.Example 上传并列：排序要按名称的字节序决出先后
+        (_ep(23, 23), "10.0.0.10", "-", "clash", "节点A < 组", "b2.example", 50, 6, 1),
+        (_ep(23, 23), "10.0.0.10", "-", "clash", "节点A < 组", "Café.example", 1, 1, 1),
+    ],
+}
+REPORT_NODES = "proxies:\n  - {name: n1, server: node.example, port: 443}\n"
+RANGE = "2026-10-20..2026-10-23"
+# (名称, 设备上的 report 参数, 参照实现参数)
+REPORT_QUERIES = [
+    ("one-day", ["--date", "2026-10-20", "--by", "device"], {"by": ["device"], "days": ["2026-10-20"]}),
+    ("range-by-date", ["--date", RANGE, "--by", "date", "--sort", "key"], {"by": ["date"], "sort": "key"}),
+    ("proxy-exit-target", ["--date", RANGE, "--by", "exit,target", "--proxy"], {"by": ["exit", "target"], "proxy": True}),
+    ("hours", ["--date", RANGE, "--by", "hour", "--from", "3", "--to", "11", "--sort", "key"],
+     {"by": ["hour"], "h0": 3, "h1": 11, "sort": "key"}),
+    ("device-exact", ["--date", RANGE, "--by", "target", "--device", "=10.0.0.1 " + M1],
+     {"by": ["target"], "device": "=10.0.0.1 " + M1}),
+    ("device-substr", ["--date", RANGE, "--by", "device", "--device", "10.0.0.1"], {"by": ["device"], "device": "10.0.0.1"}),
+    ("exit-substr", ["--date", RANGE, "--by", "kind", "--exit", "direct"], {"by": ["kind"], "exit_": "direct"}),
+    ("target-exact-node", ["--date", RANGE, "--by", "device", "--target", "=node.example [订阅节点]"],
+     {"by": ["device"], "target": "=node.example [订阅节点]"}),
+    ("kind-socks", ["--date", RANGE, "--by", "device", "--kind", "socks", "--sort", "total"],
+     {"by": ["device"], "kind": "socks", "sort": "total"}),
+    ("target-case", ["--date", RANGE, "--by", "target", "--target", "a.EXAMPLE", "--sort", "conns"],
+     {"by": ["target"], "target": "a.EXAMPLE", "sort": "conns"}),
+    ("ties", ["--date", "2026-10-23", "--by", "target"], {"by": ["target"], "days": ["2026-10-23"]}),
+    ("non-ascii-case", ["--date", "2026-10-23", "--by", "target", "--target", "CAFÉ"],
+     {"by": ["target"], "days": ["2026-10-23"], "target": "CAFÉ"}),
+    ("non-ascii-ascii-part", ["--date", "2026-10-23", "--by", "target", "--target", "CAFé"],
+     {"by": ["target"], "days": ["2026-10-23"], "target": "CAFé"}),
+]
+
+
+def report_rows(days=None) -> list[str]:
+    return ["\t".join(str(x) for x in r) for path, rows in REPORT_FILES.items()
+            if days is None or path[:10] in days for r in rows]
+
+
 def self_check(path) -> None:
     o = Oracle()
     got = {}
@@ -364,6 +512,34 @@ def self_check(path) -> None:
     print(f"ORACLE_SELF_CHECK_OK rows={len(got)} files={len(EXPECTED_FILES)}")
 
 
+def report_self_check() -> None:
+    """手算的几项，先确认参照实现本身没写错，再拿它去比设备上的输出。"""
+    nodes = frozenset(["node.example"])
+    one = report(report_rows(["2026-10-20"]), ["device"], nodes=nodes)
+    px = report(report_rows(), ["exit", "target"], proxy=True, nodes=nodes)
+    ex = report(report_rows(), ["kind"], exit_="direct", nodes=nodes)
+    tc = report(report_rows(), ["target"], target="a.EXAMPLE", nodes=nodes)
+    want_one = {"10.0.0.1 " + M1: [3705, 42, 4], "10.0.0.10": [800, 80, 2], "127.0.0.1 (路由器本机)": [9, 9, 1]}
+    want_px = {"订阅节点直连(DIRECT)  |  node.example [订阅节点]": [700, 7, 1], "节点A < 组  |  a.example": [3105, 36, 4],
+               "节点A < 组  |  A.Example": [50, 5, 1], "节点A < 组  |  b2.example": [50, 6, 1],
+               "节点A < 组  |  Café.example": [1, 1, 1], "节点B < 组  |  c.example": [9, 9, 1],
+               "socks:ph-socks  |  (SOCKS :10810)": [300, 30, 1]}
+    day23 = report(report_rows(["2026-10-23"]), ["target"], nodes=nodes)
+    up_case = report(report_rows(["2026-10-23"]), ["target"], target="CAFÉ", nodes=nodes)
+    low_case = report(report_rows(["2026-10-23"]), ["target"], target="CAFé", nodes=nodes)
+    bad = [name for name, got, want in [
+        ("one_day", one["groups"], want_one), ("one_day_unattributed", one["unattributed"], [33, 44]),
+        ("one_day_rows", one["rows"], 7),
+        ("proxy", px["groups"], want_px), ("exit_substr", ex["groups"], {"clash": [1200, 57, 2], "forward": [4000, 400, 0]}),
+        ("target_case", sorted(tc["groups"]), ["A.Example", "a.example"]),
+        ("ties", report_order(day23["groups"], "up"), ["A.Example", "b2.example", "Café.example", "ads.example"]),
+        ("non_ascii_not_folded", list(up_case["groups"]), []), ("non_ascii_ascii_part", list(low_case["groups"]), ["Café.example"]),
+    ] if got != want]
+    if bad:
+        raise SystemExit(f"REPORT_ORACLE_SELF_CHECK_FAILED {bad}")
+    print(f"REPORT_ORACLE_SELF_CHECK_OK queries={len(REPORT_QUERIES)}")
+
+
 if __name__ == "__main__":
     import pathlib
     import sys
@@ -372,3 +548,4 @@ if __name__ == "__main__":
     out.parent.mkdir(parents=True, exist_ok=True)
     make_synthetic(out)
     self_check(out)
+    report_self_check()

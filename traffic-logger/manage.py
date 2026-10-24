@@ -1,20 +1,24 @@
 """r3mini-traffic 记录器的本机侧管理脚本（可一次对多台路由器执行）。
 
   python traffic-logger/manage.py backup    HOST...            改前备份（DPAPI 加密）+ 改前快照清单
-  python traffic-logger/manage.py selftest  HOST               设备 /tmp 里重放录制快照，与 Python 参照实现逐行比对
+  python traffic-logger/manage.py selftest  HOST               设备 /tmp 里重放、查询、页面接口测试，与 Python 参照实现比对
   python traffic-logger/manage.py dryrun    HOST [SECONDS]     不安装，从 /tmp 试跑：覆盖率、CPU、内存、SIGTERM
-  python traffic-logger/manage.py install   HOST...            核对身份与改前快照 → 安装 → 原有功能与快照验收
-  python traffic-logger/manage.py verify    HOST...            运行状态、数据落盘、原有功能、快照差异
-  python traffic-logger/manage.py upgrade   HOST...            已安装时替换脚本与服务定义（保留配置与数据）并重启、验收
-  python traffic-logger/manage.py uninstall HOST... [--purge-data]   卸载并证明快照回到改前
+  python traffic-logger/manage.py install   HOST...            核对身份与改前快照 → 安装 → 原有功能、LuCI 页面与快照验收
+  python traffic-logger/manage.py verify    HOST...            运行状态、数据落盘、LuCI 页面、原有功能、快照差异
+  python traffic-logger/manage.py upgrade   HOST...            已安装时替换脚本、服务定义与 LuCI 页面（保留配置与数据）并重启、验收
+  python traffic-logger/manage.py rollback  HOST...            按最新备份把本模块恢复成改前原样（数据不动），快照须与备份逐项相等
+  python traffic-logger/manage.py uninstall HOST... [--purge-data]   卸载并证明本模块以外的快照不变
   python traffic-logger/manage.py status    HOST
   python traffic-logger/manage.py report    HOST [report 参数...]
   python traffic-logger/manage.py check-backup BACKUP.tar.gz.dpapi [--extract DIR]   解密核对备份；--extract 才写出明文
 
 每台的改前基线 = backups/router/ 下该主机最新的 *-before-traffic-logger.manifest.json。
+快照比对分两部分：本模块的路径（脚本、服务、配置、开机链接、LuCI 菜单/ACL/页面、数据目录）按期望状态逐项核对，
+其余路径必须与基线逐项相等。
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import io
 import json
@@ -39,25 +43,37 @@ BACKUP_DIR = ROOT / "backups" / "router"
 WORK = ROOT / "tmp" / "traffic-logger-test"
 TZ = timezone(timedelta(hours=8))
 
-FILES = [
-    ("router/usr/sbin/r3mini-traffic", "/usr/sbin/r3mini-traffic", "755"),
+SCRIPT = "router/usr/sbin/r3mini-traffic"
+CORE_FILES = [
+    (SCRIPT, "/usr/sbin/r3mini-traffic", "755"),
     ("router/etc/init.d/r3mini-traffic", "/etc/init.d/r3mini-traffic", "755"),
-    ("router/etc/config/r3mini_traffic", "/etc/config/r3mini_traffic", "644"),
 ]
+CONFIG_FILE = ("router/etc/config/r3mini_traffic", "/etc/config/r3mini_traffic", "644")
+MENU = ("router/usr/share/luci/menu.d/luci-app-r3mini-traffic.json", "/usr/share/luci/menu.d/luci-app-r3mini-traffic.json")
+ACL = ("router/usr/share/rpcd/acl.d/luci-app-r3mini-traffic.json", "/usr/share/rpcd/acl.d/luci-app-r3mini-traffic.json")
+VIEW_SRC = "router/www/luci-static/resources/view/status/r3mini-traffic.js"
+VIEW_DIR = "/www/luci-static/resources/view/status"
+VIEW_RE = re.compile(re.escape(VIEW_DIR) + r"/r3mini-traffic(-[0-9a-f]{10})?\.js")
+MENU_PATH = '"path": "status/r3mini-traffic"'
+ACL_GROUP = "luci-app-r3mini-traffic"
+RC_LINKS = {"/etc/rc.d/S99r3mini-traffic": "../init.d/r3mini-traffic",
+            "/etc/rc.d/K10r3mini-traffic": "../init.d/r3mini-traffic"}
 DATA_DIR = "/mnt/mmcblk0p6/r3mini-traffic"
-EXPECTED_ADDED = {dst for _, dst, _ in FILES} | {"/etc/rc.d/S99r3mini-traffic", "/etc/rc.d/K10r3mini-traffic", DATA_DIR}
+MODULE_PATHS = {dst for _, dst, _ in CORE_FILES} | {CONFIG_FILE[1], MENU[1], ACL[1], DATA_DIR} | set(RC_LINKS)
 
 BACKUP_PATHS = ["/etc", "/usr/share/openclash", "/usr/lib/opkg/status",
                 "/usr/lib/lua/luci/controller/openclash.lua", "/usr/lib/lua/luci/view/openclash"]
 BACKUP_GLOBS = ["/usr/sbin/r3mini-*", "/usr/sbin/adspower-ph-*", "/usr/share/luci/menu.d/*r3mini*",
                 "/usr/share/rpcd/acl.d/*r3mini*", "/www/luci-static/resources/view/system/r3mini-*",
-                "/www/luci-static/resources/view/network/r3mini-*"]
+                "/www/luci-static/resources/view/network/r3mini-*", VIEW_DIR + "/r3mini-*"]
 REQUIRED_MEMBERS = ["etc/openclash/core/clash_meta", "etc/init.d/openclash", "etc/rc.d", "etc/config/openclash"]
 
-# 改前/卸载后要逐项相等的状态：文件记 sha256，符号链接记目标，数据分区记一级目录
+# 改前/改后要逐项核对的状态：文件记 sha256，符号链接记目标，数据分区记一级目录
+SNAPSHOT_DIRS = ["/etc/config", "/etc/init.d", "/etc/rc.d", "/usr/sbin", "/etc/crontabs",
+                 "/usr/share/luci/menu.d", "/usr/share/rpcd/acl.d", VIEW_DIR]
 SNAPSHOT_SCRIPT = r"""
 set -u
-for d in /etc/config /etc/init.d /etc/rc.d /usr/sbin /etc/crontabs; do
+for d in """ + " ".join(SNAPSHOT_DIRS) + r"""; do
   for p in "$d"/* ; do
     [ -e "$p" ] || [ -L "$p" ] || continue
     if [ -L "$p" ]; then printf 'L\t%s\t%s\n' "$p" "$(readlink "$p")";
@@ -124,8 +140,11 @@ def api(client: paramiko.SSHClient, path: str) -> dict:
     return json.loads(text(client, "sh -s " + shlex.quote(path), data=API_SCRIPT.encode()))
 
 
+TMP_SUFFIX = ".r3t-new"
+
+
 def upload(client: paramiko.SSHClient, data: bytes, remote: str, mode: str) -> None:
-    tmp = remote + ".r3t-new"
+    tmp = remote + TMP_SUFFIX
     run(client, f"cat > {shlex.quote(tmp)} && chmod {mode} {shlex.quote(tmp)} && mv {shlex.quote(tmp)} {shlex.quote(remote)}",
         data=data, timeout=180)
 
@@ -137,6 +156,39 @@ def local_file(rel: str) -> bytes:
     return data
 
 
+def view_fingerprint() -> str:
+    return digest(local_file(VIEW_SRC))[:10]
+
+
+def deploy_files(with_config: bool) -> list[tuple[str, bytes, str]]:
+    """(远端路径, 内容, 权限)。LuCI 视图按内容指纹改名、菜单里的路径同步改写：浏览器按 URL 缓存视图，
+    换了文件名才会取新版（与风扇页 system/r3mini-fan-<指纹> 同一做法，这里由部署时生成）。"""
+    fp = view_fingerprint()
+    menu = local_file(MENU[0]).decode()
+    if menu.count(MENU_PATH) != 1:
+        raise SystemExit(f"MENU_PATH_PLACEHOLDER_MISSING {MENU[0]} 须含一处 {MENU_PATH}")
+    out = [(dst, local_file(rel), mode) for rel, dst, mode in CORE_FILES]
+    if with_config:
+        out.append((CONFIG_FILE[1], local_file(CONFIG_FILE[0]), CONFIG_FILE[2]))
+    # 菜单最后写：中途断开时菜单仍指向旧的（还在的）视图，不会指向不存在的文件
+    out += [(ACL[1], local_file(ACL[0]), "644"),
+            (f"{VIEW_DIR}/r3mini-traffic-{fp}.js", local_file(VIEW_SRC), "644"),
+            (MENU[1], menu.replace(MENU_PATH, MENU_PATH[:-1] + f'-{fp}"').encode(), "644")]
+    return out
+
+
+def is_module(path: str) -> bool:
+    """本模块的路径，含上传中断留下的 <路径>.r3t-new（否则它会被当成外部改动，挡住之后所有命令）。"""
+    if path.endswith(TMP_SUFFIX):
+        path = path[:-len(TMP_SUFFIX)]
+    return path in MODULE_PATHS or VIEW_RE.fullmatch(path) is not None
+
+
+def leftovers(snap: dict, keep: set) -> list[str]:
+    """该清掉的本模块残留：上传临时文件，以及不在 keep 里的旧指纹视图。"""
+    return sorted(p for p in snap if is_module(p) and (p.endswith(TMP_SUFFIX) or (VIEW_RE.fullmatch(p) and p not in keep)))
+
+
 def snapshot(client: paramiko.SSHClient) -> dict[str, list[str]]:
     lines = text(client, "sh -s", data=SNAPSHOT_SCRIPT.encode()).splitlines()
     return {line.split("\t")[1]: line.split("\t") for line in lines if line.count("\t") == 2}
@@ -144,6 +196,38 @@ def snapshot(client: paramiko.SSHClient) -> dict[str, list[str]]:
 
 def diff_snapshot(base: dict, now: dict) -> tuple[set, set, set]:
     return (set(now) - set(base), set(base) - set(now), {p for p in set(base) & set(now) if base[p] != now[p]})
+
+
+def check_outside(base: dict, now: dict, code: str) -> None:
+    """本模块以外的路径必须与基线逐项相等。"""
+    keep = lambda s: {p: v for p, v in s.items() if not is_module(p)}  # noqa: E731
+    added, removed, changed = diff_snapshot(keep(base["snapshot"]), keep(now))
+    if added or removed or changed:
+        raise SystemExit(f"{code} added={sorted(added)} removed={sorted(removed)} changed={sorted(changed)}")
+
+
+def module_state(snap: dict) -> dict[str, list[str]]:
+    return {p: v for p, v in snap.items() if is_module(p)}
+
+
+def expect_installed(now: dict) -> list[str]:
+    """已安装状态：代码与 LuCI 文件与本地这一版逐字节相同；配置存在（内容归用户）；开机链接与数据目录在；
+    没有旧指纹的视图残留。返回不符项。"""
+    want = {dst: digest(data) for dst, data, _ in deploy_files(False)}
+    bad = []
+    for dst, h in want.items():
+        v = now.get(dst)
+        if not v or v[0] != "F" or v[2] != h:
+            bad.append(f"{dst}:{v[2][:12] if v else 'missing'}!={h[:12]}")
+    if (now.get(CONFIG_FILE[1]) or ["?"])[0] != "F":
+        bad.append(CONFIG_FILE[1] + ":missing")
+    for link, target in RC_LINKS.items():
+        if now.get(link) != ["L", link, target]:
+            bad.append(f"{link}:{now.get(link)}")
+    if DATA_DIR not in now:
+        bad.append(DATA_DIR + ":missing")
+    bad += [f"{p}:leftover" for p in leftovers(now, set(want))]
+    return bad
 
 
 def identity(client: paramiko.SSHClient) -> dict:
@@ -154,11 +238,22 @@ def identity(client: paramiko.SSHClient) -> dict:
     ]}
 
 
+def check_identity(client: paramiko.SSHClient, base: dict) -> None:
+    ident = identity(client)
+    expect = {k: base["identity"][k] for k in ("hostname", "lan_ip", "eth0_mac")}
+    if ident != expect:
+        raise SystemExit(f"IDENTITY_MISMATCH expect={expect} got={ident}")
+
+
 def latest_manifest(host: str) -> dict:
     found = sorted(BACKUP_DIR.glob(f"router-backup-*-{host}-before-traffic-logger.manifest.json"))
     if not found:
         raise SystemExit(f"NO_BASELINE_BACKUP host={host}：先运行 backup")
-    return json.loads(found[-1].read_text(encoding="utf-8"))
+    m = json.loads(found[-1].read_text(encoding="utf-8"))
+    if m.get("snapshot_dirs") != SNAPSHOT_DIRS:
+        raise SystemExit(f"BASELINE_OUTDATED {found[-1].name} 的快照不含 {sorted(set(SNAPSHOT_DIRS) - set(m.get('snapshot_dirs') or []))}"
+                         "：先重新 backup")
+    return m
 
 
 def pc_checks() -> dict:
@@ -178,7 +273,7 @@ def pc_checks() -> dict:
 
 
 def health(client: paramiko.SSHClient) -> dict:
-    """#BAK 原有功能清单：安装前、安装后、卸载后、重装后各取一次并比对。"""
+    """#BAK 原有功能清单：改动前、改动后、回滚后、卸载后各取一次并比对。"""
     h = {"openclash_pid": text(client, "pidof clash", check=False).strip(),
          "openclash_status": text(client, "/etc/init.d/openclash status", check=False).strip()}
     svc = json.loads(text(client, "ubus call service list"))
@@ -228,6 +323,135 @@ def health_file(host: str) -> pathlib.Path:
     return WORK / f"{host}-health-before-install.json"
 
 
+def health_gate(client: paramiko.SSHClient, host: str, label: str, strict: bool = True) -> None:
+    before = json.loads(health_file(host).read_text(encoding="utf-8")) if health_file(host).exists() else None
+    after = health(client)
+    print(f"HEALTH_{label} " + json.dumps(after, ensure_ascii=False))
+    # 没有改前基线（新检出、tmp/ 被清过）时没法比相等，节点延迟与本机外网仍必须通
+    bad = compare_health(before, after, strict) if before else compare_health(after, after, False)
+    if bad:
+        raise SystemExit("HEALTH_REGRESSION " + "; ".join(bad))
+
+
+def save_health(client: paramiko.SSHClient, host: str) -> None:
+    before = health(client)
+    WORK.mkdir(parents=True, exist_ok=True)
+    health_file(host).write_text(json.dumps(before, ensure_ascii=False, indent=1), encoding="utf-8")
+    print("HEALTH_BEFORE " + json.dumps(before, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------- LuCI 验收
+LUCI_SCRIPT = r"""
+set -u
+v="$1"
+o=/tmp/r3t-view.$$
+printf 'VIEW_HTTP=%s\n' "$(curl -s -o "$o" -w '%{http_code}' "http://127.0.0.1${v#/www}")"
+printf 'VIEW_SHA=%s\n' "$(sha256sum "$o" 2>/dev/null | cut -d' ' -f1)"
+rm -f "$o"
+curl -s -o /dev/null http://127.0.0.1/cgi-bin/luci/
+for f in /tmp/luci-indexcache.*.json; do [ -f "$f" ] && { echo "@@INDEX $f"; cat "$f"; echo; }; done
+"""
+
+
+def menu_node(index_text: str) -> dict | None:
+    """LuCI 按 menu.d 建好的菜单树（/tmp/luci-indexcache.<文件列表哈希>.json）里本页的节点。"""
+    for block in index_text.split("@@INDEX ")[1:]:
+        body = block.split("\n", 1)[1]
+        try:
+            tree = json.loads(body)
+        except ValueError:
+            continue
+        node = tree.get("children", {}).get("admin", {}).get("children", {}).get("status", {}).get(
+            "children", {}).get("r3mini-traffic")
+        if node:
+            return node
+    return None
+
+
+def acl_session_script(calls: list[tuple[str, str, list[str]]]) -> str:
+    """建一个临时 rpcd 会话，按 ACL 文件的内容逐条授权（rpcd 在 root 登录时对每个 ACL 组做的就是这件事），
+    再经 uhttpd 的 /ubus 走浏览器同一条路调 file exec。会话号只在设备上的 shell 变量里，结束即销毁。"""
+    acl = json.loads(local_file(ACL[0]))
+    grants = []
+    for group, spec in acl.items():
+        for mode in ("read", "write"):
+            sec = spec.get(mode)
+            if not sec:
+                continue
+            grants.append(("access-group", [[group, mode]]))
+            for scope, objs in sec.items():
+                if scope == "uci":
+                    grants.append(("uci", [[o, mode] for o in objs]))
+                else:
+                    grants.append((scope, [[o, f] for o, fns in objs.items() for f in fns]))
+    lines = ["set -u",
+             "sid=$(ubus call session create '{\"timeout\":120}' | jsonfilter -e '@.ubus_rpc_session')",
+             "[ -n \"$sid\" ] || { echo SESSION_CREATE_FAILED; exit 1; }",
+             "trap 'ubus call session destroy \"{\\\"ubus_rpc_session\\\":\\\"$sid\\\"}\" >/dev/null 2>&1' EXIT"]
+    for scope, objs in grants:
+        lines.append(f"ubus call session grant \"{{\\\"ubus_rpc_session\\\":\\\"$sid\\\",\\\"scope\\\":\\\"{scope}\\\","
+                     f"\\\"objects\\\":$(printf %s {shlex.quote(json.dumps(objs, ensure_ascii=False))})}}\" >/dev/null")
+    for name, cmd, params in calls:
+        body = json.dumps({"command": cmd, "params": params}, ensure_ascii=False)
+        lines.append(f"printf '@@CALL {name}\\n'; curl -s http://127.0.0.1/ubus -H 'Content-Type: application/json' "
+                     f"-d \"{{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"method\\\":\\\"call\\\",\\\"params\\\":"
+                     f"[\\\"$sid\\\",\\\"file\\\",\\\"exec\\\",$(printf %s {shlex.quote(body)})]}}\"; echo")
+    return "\n".join(lines) + "\n"
+
+
+def parse_calls(out: str) -> dict[str, dict]:
+    res = {}
+    for block in out.split("@@CALL ")[1:]:
+        name, _, body = block.partition("\n")
+        try:
+            res[name] = json.loads(body.strip() or "{}")
+        except ValueError:
+            res[name] = {"raw": body.strip()[:200]}
+    return res
+
+
+def luci_checks(client: paramiko.SSHClient) -> list[str]:
+    """页面三件套：视图静态文件可取且与本地一致；菜单树里有本页且指向该视图；
+    按 ACL 授权的会话能调 web 接口、调不了别的命令。"""
+    bad = []
+    fp = view_fingerprint()
+    view = f"{VIEW_DIR}/r3mini-traffic-{fp}.js"
+    out = text(client, "sh -s " + shlex.quote(view), data=LUCI_SCRIPT.encode(), timeout=60)
+    http = re.search(r"VIEW_HTTP=(\d*)", out)[1]
+    sha = re.search(r"VIEW_SHA=([0-9a-f]*)", out)[1]
+    ok = http == "200" and sha == digest(local_file(VIEW_SRC))
+    print(f"LUCI_VIEW_{'OK' if ok else 'FAIL'} url={view[4:]} http={http} sha={sha[:12]}")
+    bad += [] if ok else ["view"]
+    node = menu_node(out)
+    ok = bool(node) and node.get("action", {}).get("path") == f"status/r3mini-traffic-{fp}" and \
+        ACL_GROUP in (node.get("depends", {}).get("acl") or [])
+    print(f"LUCI_MENU_{'OK' if ok else 'FAIL'} node={json.dumps(node, ensure_ascii=False)[:200]}")
+    bad += [] if ok else ["menu"]
+    cli = "/usr/sbin/r3mini-traffic"
+    calls = [("web_status", cli, ["web", "status"]), ("web_report", cli, ["web", "report", "--by", "device", "--proxy"]),
+             ("deny_report", cli, ["report", "--json"]), ("deny_run", cli, ["run"]), ("deny_web_bare", cli, ["web"]),
+             ("deny_other", "/bin/cat", ["/etc/shadow"])]
+    res = parse_calls(text(client, "sh -s", data=acl_session_script(calls).encode(), timeout=90))
+
+    def allowed(r: dict) -> dict | None:
+        result = r.get("result") or []
+        if len(result) == 2 and result[0] == 0 and result[1].get("code") == 0:
+            try:
+                return json.loads(result[1].get("stdout") or "")
+            except ValueError:
+                return None
+        return None
+    st, rep = allowed(res.get("web_status", {})), allowed(res.get("web_report", {}))
+    denied = {k: (res.get(k, {}).get("result") == [6] or "error" in res.get(k, {}))
+              for k in ("deny_report", "deny_run", "deny_web_bare", "deny_other")}
+    ok = bool(st) and st.get("version_cli") == local_version() and bool(rep) and rep.get("version") == local_version() \
+        and all(denied.values())
+    print(f"LUCI_ACL_{'OK' if ok else 'FAIL'} web_status={st and st.get('state')} web_report_groups={rep and rep.get('groups')} "
+          f"denied={denied}" + ("" if ok else f" raw={json.dumps(res, ensure_ascii=False)[:600]}"))
+    bad += [] if ok else ["acl"]
+    return bad
+
+
 # ---------------------------------------------------------------- backup
 def backup(host: str) -> None:
     stamp = datetime.now(TZ).strftime("%Y%m%d-%H%M%S")
@@ -246,6 +470,7 @@ def backup(host: str) -> None:
         if "running" not in meta["openclash_status"]:
             raise RuntimeError("BASELINE_OPENCLASH_NOT_RUNNING")
         ident = identity(client)
+        installed = text(client, "[ -x /usr/sbin/r3mini-traffic ] && /usr/sbin/r3mini-traffic version", check=False).strip()
         before = snapshot(client)
         paths = [p for p in BACKUP_PATHS if run(client, "[ -e " + shlex.quote(p) + " ]", check=False)[0] == 0]
         for pattern in BACKUP_GLOBS:
@@ -259,7 +484,9 @@ def backup(host: str) -> None:
             members = {m.name.lstrip("./"): m for m in tf.getmembers()}
             checked = 0
             for path, (kind, _, value) in before.items():
-                if kind != "F" or not any(path.startswith(p.rstrip("*")) for p in BACKUP_PATHS + BACKUP_GLOBS):
+                # 目录按前缀、通配按 fnmatch：rstrip("*") 只去掉末尾的 *，menu.d/*r3mini* 这类中间带 * 的会漏核
+                if kind != "F" or not (any(path == p or path.startswith(p + "/") for p in BACKUP_PATHS)
+                                       or any(fnmatch.fnmatchcase(path, g) for g in BACKUP_GLOBS)):
                     continue
                 member = members.get(path.lstrip("/"))
                 if member is None or digest(tf.extractfile(member).read()) != value:
@@ -268,6 +495,12 @@ def backup(host: str) -> None:
             for item in REQUIRED_MEMBERS:
                 if not any(n == item or n.startswith(item + "/") for n in members):
                     raise RuntimeError("BACKUP_INCOMPLETE " + item)
+            # 回滚只靠备份恢复本模块：快照里的每个本模块文件与链接都必须在归档里
+            for path, (kind, _, value) in before.items():
+                if is_module(path) and path != DATA_DIR:
+                    member = members.get(path.lstrip("/"))
+                    if member is None or (kind == "L" and member.linkname != value):
+                        raise RuntimeError("BACKUP_MODULE_MEMBER_MISSING " + path)
         name = f"router-backup-{stamp}-{host}-before-traffic-logger"
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         dest = BACKUP_DIR / (name + ".tar.gz.dpapi")
@@ -278,13 +511,15 @@ def backup(host: str) -> None:
             raise RuntimeError("BACKUP_DPAPI_VERIFY_FAILED")
         manifest = {"host": host, "stamp": stamp, "board": board,
                     "identity": dict(ident, openclash_pid=meta["openclash_pid"].strip()),
+                    "installed_version": installed or None,
                     "archive": dest.name, "archive_sha256": digest(archive), "cipher_sha256": digest(encrypted),
                     "archive_bytes": len(archive), "archive_entries": len(members), "paths": paths,
-                    "snapshot": before, "metadata": meta}
+                    "snapshot_dirs": SNAPSHOT_DIRS, "snapshot": before, "metadata": meta}
         (BACKUP_DIR / (name + ".manifest.json")).write_text(json.dumps(manifest, ensure_ascii=False, indent=1),
                                                             encoding="utf-8")
         print(f"BACKUP_OK host={host} hostname={ident['hostname']} entries={len(members)} bytes={len(archive)} "
-              f"member_hashes_checked={checked} snapshot_items={len(before)}")
+              f"member_hashes_checked={checked} snapshot_items={len(before)} installed={installed or '-'} "
+              f"module_items={sorted(module_state(before))}")
         print(f"BACKUP_SHA256={manifest['archive_sha256']}")
         print(f"BACKUP_PATH={dest}")
     finally:
@@ -314,12 +549,18 @@ printf '1792692000\t10.0.0.3\t-\tclash\tDIRECT\ttoday.com\t9\t9\t1\n' > $D/2026-
 printf 'x\n' | gzip -c > $D/2026-10-10.tsv.gz
 """
 
+# 输出截短：3000 个各约 230 字节的目标，JSON 远超 rpcd file exec 的 256 KiB 上限
+CAP_AWK = r"""BEGIN { p = sprintf("%0200d", 0); for (i = 0; i < 3000; i++)
+  printf "%d\t10.0.0.1\t-\tclash\tDIRECT\tt%d-%s.example\t%d\t1\t1\n", H, i, p, i + 1 }
+"""
+
 
 def selftest(host: str) -> None:
     WORK.mkdir(parents=True, exist_ok=True)
     synth = WORK / "synthetic.txt"
     test_replay.make_synthetic(synth)
     test_replay.self_check(synth)
+    test_replay.report_self_check()
     real = WORK / "real-stream.txt"
     real.write_bytes((ROOT / "tmp" / "traffic-20261023" / "router-stream.txt").read_bytes().replace(b"\r\n", b"\n"))
     base = "/tmp/r3t-selftest"
@@ -333,7 +574,7 @@ def selftest(host: str) -> None:
 
     try:
         run(client, f"rm -rf {base} && mkdir -p {base}")
-        upload(client, local_file(FILES[0][0]), base + "/r3mini-traffic", "755")
+        upload(client, local_file(SCRIPT), base + "/r3mini-traffic", "755")
         upload(client, real.read_bytes(), base + "/real.txt", "644")
         upload(client, synth.read_bytes(), base + "/synthetic.txt", "644")
         print("SYNTAX " + text(client, f"ucode -c -o /dev/null {base}/r3mini-traffic && echo OK", check=False).strip())
@@ -381,6 +622,86 @@ def selftest(host: str) -> None:
                 got_rep = {l.split("\t")[0].replace(" (路由器本机)", ""): [int(x) for x in l.split("\t")[1:]]
                            for l in rep if l and not l.startswith("(")}
                 check("REPORT", got_rep == dev, f"devices={len(got_rep)}")
+        # 查询口径：4 天构造数据（同小时两段会话、gz、缺一天），JSON 与 TSV 都要与 test_replay.report 逐组相等，
+        # 排序、合计、未归因、下拉候选（facets）、日期范围信息一并核对
+        rd = f"{base}/rep"
+        run(client, f"mkdir -p {rd}/data/2026-10-20 {rd}/data/2026-10-23")
+        for rel, rows in test_replay.REPORT_FILES.items():
+            body = "".join("\t".join(str(x) for x in r) + "\n" for r in rows).encode()
+            if rel.endswith(".gz"):
+                upload(client, body, f"{rd}/plain.tsv", "644")
+                run(client, f"gzip -c {rd}/plain.tsv > {rd}/data/{rel} && rm {rd}/plain.tsv")
+            else:
+                upload(client, body, f"{rd}/data/{rel}", "644")
+        upload(client, test_replay.REPORT_NODES.encode(), f"{rd}/nodes.yaml", "644")
+        common = (f"{base}/r3mini-traffic report --data-dir {rd}/data --no-mount-check --nodes-file {rd}/nodes.yaml "
+                  f"--top 1000 ")
+        for name, args, kw in test_replay.REPORT_QUERIES:
+            kw = dict(kw)
+            days, sort, by = kw.pop("days", None), kw.pop("sort", "up"), kw.pop("by")
+            want = test_replay.report(test_replay.report_rows(days), by, nodes=frozenset(["node.example"]), **kw)
+            q = " ".join(shlex.quote(a) for a in args)
+            rc, out, err = run(client, common + "--json " + q, check=False)
+            j = json.loads(out) if rc == 0 else {}
+            rows = {"  |  ".join(r["k"]): [r["up"], r["down"], r["conns"]] for r in j.get("rows", [])}
+            order = ["  |  ".join(r["k"]) for r in j.get("rows", [])]
+            facets = {d: {f["k"]: [f["up"], f["down"], f["conns"]] for f in j.get("facets", {}).get(d, [])}
+                      for d in ("device", "exit")}
+            tsv = text(client, common + "--tsv " + q, check=False).splitlines()
+            tsv_rows = {l.split("\t")[0]: [int(x) for x in l.split("\t")[1:]] for l in tsv if l and not l.startswith("(")}
+            ok = (rc == 0 and rows == want["groups"] and order == test_replay.report_order(want["groups"], sort)
+                  and j["total"] == dict(zip(("up", "down", "conns"), want["total"]), rows=want["rows"])
+                  and [j["unattributed"]["up"], j["unattributed"]["down"]] == want["unattributed"]
+                  and facets == want["facets"] and tsv_rows == want["groups"]
+                  and [l.split("\t")[0] for l in tsv if l and not l.startswith("(")] == order
+                  and "(合计)\t%d\t%d\t%d" % tuple(want["total"]) in tsv
+                  and "(未归因)\t%d\t%d\t0" % tuple(want["unattributed"]) in tsv)
+            check("REPORT_QUERY", ok, f"case={name} groups={len(rows)}" + ("" if ok else
+                  f" rc={rc} got={rows} want={want['groups']} order={order} facets={facets} err={err.decode()[:200]!r}"))
+        rc, out, _ = run(client, common + "--json --date 2026-10-20..2026-10-23 --by date", check=False)
+        j = json.loads(out) if rc == 0 else {}
+        check("REPORT_RANGE_META", j.get("days") == 4 and j.get("dates") == ["2026-10-20", "2026-10-21", "2026-10-23"]
+              and j.get("available") == {"first": "2026-10-20", "last": "2026-10-23", "count": 3},
+              f"days={j.get('days')} dates={j.get('dates')} available={j.get('available')}")
+        # 截短：JSON 超过 240000 字节时逐次减半明细行；截短后的输出能经 rpcd 的 file exec（256 KiB 上限）取回
+        cap = f"{base}/cap"
+        run(client, f"mkdir -p {cap}/2026-10-23")
+        upload(client, CAP_AWK.encode(), f"{cap}/gen.awk", "644")
+        h5 = int(datetime(2026, 10, 23, 5, tzinfo=TZ).timestamp())
+        run(client, f"awk -v H={h5} -f {cap}/gen.awk > {cap}/2026-10-23/05.tsv")
+        cap_args = ["report", "--data-dir", cap, "--no-mount-check", "--date", "2026-10-23", "--by", "target", "--json",
+                    "--top", "5000"]
+        rc, out, _ = run(client, f"{base}/r3mini-traffic " + " ".join(cap_args), check=False)
+        j = json.loads(out) if rc == 0 else {"rows": []}
+        rc2, out2, err2 = run(client, "ubus call file exec " + shlex.quote(json.dumps(
+            {"command": f"{base}/r3mini-traffic", "params": cap_args})), check=False, timeout=60)
+        via = json.loads(out2) if rc2 == 0 else {}
+        check("JSON_CAP", rc == 0 and len(out) <= 240001 and j.get("clipped") is True and j.get("groups") == 3000
+              and 0 < len(j["rows"]) < 3000 and via.get("code") == 0,
+              f"bytes={len(out)} rows={len(j['rows'])} groups={j.get('groups')} ubus_rc={rc2} ubus_code={via.get('code')}")
+        # 页面入口：拒绝路径类参数与非 web 子命令，错误只有一行原因；读真实数据目录（只读）
+        for cmd, msg in [("web report --data-dir /tmp", "不接受 --data-dir"),
+                         ("web report --nodes-file /etc/passwd", "不接受 --nodes-file"),
+                         ("web report --json", "不接受 --json"), ("web run", "用法"), ("web report --top 501", "--top"),
+                         ("web report --date 2026-02-30", "--date"), ("web report --sort x", "--sort"),
+                         ("web report --from 5 --to 5", "--from")]:
+            rc, _, err = run(client, f"{base}/r3mini-traffic {cmd}", check=False)
+            e = err.decode("utf-8", "replace")
+            check("WEB_GUARD", rc == 2 and msg in e and len(e.strip().splitlines()) == 1,
+                  f"cmd={cmd!r} rc={rc} err={e.strip()[:80]!r}")
+        rc, out, _ = run(client, f"{base}/r3mini-traffic web status", check=False)
+        st = json.loads(out) if rc == 0 else {}
+        check("WEB_STATUS", rc == 0 and st.get("state") in ("STATUS_OK", "STATUS_DEGRADED", "NOT_RUNNING")
+              and st.get("version_cli") == local_version(), f"rc={rc} state={st.get('state')} running={st.get('version')}")
+        today = st.get("today") or datetime.now(TZ).strftime("%Y-%m-%d")
+        first = (st.get("data") or {}).get("first") or today
+        rc, out, _ = run(client, f"{base}/r3mini-traffic web report --date {first}..{today} --by target --top 500",
+                         check=False, timeout=60)
+        rep = json.loads(out) if rc == 0 else {}
+        check("WEB_REPORT_REAL", rc == 0 and rep.get("version") == local_version() and "facets" in rep,
+              f"range={first}..{today} groups={rep.get('groups')} bytes={len(out)} elapsed_ms={rep.get('elapsed_ms')}")
+        rc, out, _ = run(client, f"{base}/r3mini-traffic status --json --run-dir {base}/none", check=False)
+        check("STATUS_JSON_NOT_RUNNING", rc == 1 and json.loads(out or b"{}").get("state") == "NOT_RUNNING", f"rc={rc}")
         # 维护：压缩、并存保留、空目录、按条数保留
         m = f"{base}/maint"
         run(client, f"sh -s {m}", data=MAINTAIN_SETUP.encode())
@@ -489,7 +810,7 @@ def dryrun(host: str, secs: int) -> None:
     client = connect(host)
     try:
         run(client, "rm -rf /tmp/r3t-dry && mkdir -p /tmp/r3t-dry")
-        upload(client, local_file(FILES[0][0]), "/tmp/r3t-dry/r3mini-traffic", "755")
+        upload(client, local_file(SCRIPT), "/tmp/r3t-dry/r3mini-traffic", "755")
         out = text(client, "sh -s", data=DRYRUN_SCRIPT.replace("{secs}", str(secs)).replace(
             "{mid}", str(max(secs - 10, 5))).encode(), timeout=secs + 180)
         rows = [l.split("\t") for l in text(client, "cat /tmp/r3t-dry/data/*/*.tsv", check=False).splitlines() if l]
@@ -524,7 +845,7 @@ def dryrun(host: str, secs: int) -> None:
     print("STATUS " + status.strip()[:700])
 
 
-# ---------------------------------------------------------------- install / verify / uninstall
+# ---------------------------------------------------------------- install / verify / upgrade / rollback / uninstall
 def wait_for(client: paramiko.SSHClient, cmd: str, pattern: str, seconds: int) -> str:
     deadline = time.time() + seconds
     last = ""
@@ -540,43 +861,35 @@ def install(host: str) -> None:
     base = latest_manifest(host)
     client = connect(host)
     try:
-        ident = identity(client)
-        expect = {k: base["identity"][k] for k in ("hostname", "lan_ip", "eth0_mac")}
-        if ident != expect:
-            raise SystemExit(f"IDENTITY_MISMATCH expect={expect} got={ident}")
-        added, removed, changed = diff_snapshot(base["snapshot"], snapshot(client))
-        if added or removed or changed:
-            raise SystemExit(f"BASELINE_DRIFT added={sorted(added)} removed={sorted(removed)} changed={sorted(changed)}"
-                             " —— 先重新 backup 再装")
-        for _, dst, _ in FILES:
-            if run(client, f"[ -e {dst} ]", check=False)[0] == 0:
-                raise SystemExit(f"TARGET_EXISTS {dst}")
+        check_identity(client, base)
+        now = snapshot(client)
+        check_outside(base, now, "BASELINE_DRIFT")
+        present = sorted(set(module_state(now)) - {DATA_DIR})
+        if present:
+            raise SystemExit(f"TARGET_EXISTS {present}：已经装过就用 upgrade；是残留就先 uninstall")
         if " /mnt/mmcblk0p6 ext4 " not in text(client, "cat /proc/mounts"):
             raise SystemExit("DATA_MOUNT_MISSING /mnt/mmcblk0p6")
         free_kb = int(text(client, "df -Pk /mnt/mmcblk0p6 | tail -1").split()[3])
         if free_kb < 500 * 1024:
             raise SystemExit(f"DATA_DISK_LOW free_kb={free_kb}")
-        before = health(client)
-        WORK.mkdir(parents=True, exist_ok=True)
-        health_file(host).write_text(json.dumps(before, ensure_ascii=False, indent=1), encoding="utf-8")
-        print("HEALTH_BEFORE " + json.dumps(before, ensure_ascii=False))
-        for rel, dst, mode in FILES:
-            upload(client, local_file(rel), dst, mode)
+        save_health(client, host)
+        files = deploy_files(True)
+        for dst, data, mode in files:
+            upload(client, data, dst, mode)
         run(client, "/etc/init.d/r3mini-traffic enable && /etc/init.d/r3mini-traffic start")
-        print("INSTALLED files=" + ",".join(dst for _, dst, _ in FILES))
+        print("INSTALLED files=" + ",".join(dst for dst, _, _ in files))
     finally:
         client.close()
     verify(host, wait_data=True)
 
 
 def local_version() -> str:
-    return re.search(r"const VERSION = '([0-9.]+)'", local_file(FILES[0][0]).decode())[1]
+    return re.search(r"const VERSION = '([0-9.]+)'", local_file(SCRIPT).decode())[1]
 
 
 def verify(host: str, wait_data: bool = False, old_run_id: str | None = None, strict: bool = True) -> None:
     """status 必须来自本地这一版脚本；upgrade 时还要求 run_id 已换成新进程的，防止拿旧进程的状态判通过。"""
     base = latest_manifest(host)
-    before = json.loads(health_file(host).read_text(encoding="utf-8")) if health_file(host).exists() else None
     client = connect(host)
     try:
         fresh = rf"(?!{re.escape(old_run_id)} )" if old_run_id else ""
@@ -592,68 +905,142 @@ def verify(host: str, wait_data: bool = False, old_run_id: str | None = None, st
         svc = text(client, "/etc/init.d/r3mini-traffic status; /etc/init.d/r3mini-traffic enabled && echo ENABLED")
         if "running" not in svc or "ENABLED" not in svc:
             raise SystemExit("SERVICE_NOT_RUNNING_OR_NOT_ENABLED " + svc)
-        added, removed, changed = diff_snapshot(base["snapshot"], snapshot(client))
-        if added != EXPECTED_ADDED or removed or changed:
-            raise SystemExit(f"UNEXPECTED_CHANGES added={sorted(added)} removed={sorted(removed)} changed={sorted(changed)}")
-        print(f"SNAPSHOT_DIFF_OK added={sorted(added)}")
-        after = health(client)
-        print("HEALTH_AFTER " + json.dumps(after, ensure_ascii=False))
-        bad = compare_health(before, after, strict) if before else []
+        now = snapshot(client)
+        check_outside(base, now, "UNEXPECTED_CHANGES")
+        bad = expect_installed(now)
         if bad:
-            raise SystemExit("HEALTH_REGRESSION " + "; ".join(bad))
+            raise SystemExit("MODULE_NOT_AS_EXPECTED " + "; ".join(bad))
+        print(f"SNAPSHOT_DIFF_OK outside_items={sum(1 for p in now if not is_module(p))} module={sorted(module_state(now))}")
+        if luci_checks(client):
+            raise SystemExit("LUCI_CHECK_FAILED")
+        health_gate(client, host, "AFTER", strict)
         print(f"VERIFY_OK host={host}")
     finally:
         client.close()
 
 
 def upgrade(host: str) -> None:
-    """已安装时替换脚本与服务定义（保留用户配置与数据），重启后按安装同一套标准验收。"""
+    """已安装时替换脚本、服务定义与 LuCI 文件（保留用户配置与数据），重启后按安装同一套标准验收。"""
     base = latest_manifest(host)
     client = connect(host)
     try:
-        ident = identity(client)
-        expect = {k: base["identity"][k] for k in ("hostname", "lan_ip", "eth0_mac")}
-        if ident != expect:
-            raise SystemExit(f"IDENTITY_MISMATCH expect={expect} got={ident}")
-        added, removed, changed = diff_snapshot(base["snapshot"], snapshot(client))
-        if added != EXPECTED_ADDED or removed or changed:
-            raise SystemExit(f"NOT_IN_INSTALLED_STATE added={sorted(added)} removed={sorted(removed)} changed={sorted(changed)}")
+        check_identity(client, base)
+        now = snapshot(client)
+        check_outside(base, now, "NOT_IN_INSTALLED_STATE")
+        core = [dst for _, dst, _ in CORE_FILES] + [CONFIG_FILE[1]] + list(RC_LINKS)
+        missing = [p for p in core if p not in now]
+        if missing:
+            raise SystemExit(f"NOT_IN_INSTALLED_STATE missing={missing}：没装过就用 install")
         old = text(client, "/usr/sbin/r3mini-traffic version", check=False).strip()
         m = re.search(r"run_id ([0-9a-f]{8})", text(client, "/usr/sbin/r3mini-traffic status", check=False))
         # 原有功能基线在升级前现取，而不是沿用安装时那份（OpenClash 期间重启过进程号就会不同）
-        before = health(client)
-        health_file(host).write_text(json.dumps(before, ensure_ascii=False, indent=1), encoding="utf-8")
-        for rel, dst, mode in FILES[:2]:
-            upload(client, local_file(rel), dst, mode)
+        save_health(client, host)
+        files = deploy_files(False)
+        for dst, data, mode in files:
+            upload(client, data, dst, mode)
+        stale = leftovers(now, {dst for dst, _, _ in files})
+        if stale:
+            run(client, "rm -f " + " ".join(shlex.quote(p) for p in stale))
         run(client, "/etc/init.d/r3mini-traffic restart")
-        print(f"UPGRADED from={old} to={text(client, '/usr/sbin/r3mini-traffic version').strip()}")
+        print(f"UPGRADED from={old} to={text(client, '/usr/sbin/r3mini-traffic version').strip()} "
+              f"files={','.join(dst for dst, _, _ in files)} removed_stale={stale}")
     finally:
         client.close()
     verify(host, old_run_id=m[1] if m else None)
 
 
-def uninstall(host: str, purge: bool) -> None:
+def rollback(host: str) -> None:
+    """恢复演练：把本模块的文件与开机链接恢复成最新备份里的样子（备份里没有的删掉），按备份时是否在运行决定启停。
+    通过条件：整份快照（数据目录除外）与备份清单逐项相等，原有功能与改动前一致。数据目录与历史记录不动。"""
     base = latest_manifest(host)
-    before = json.loads(health_file(host).read_text(encoding="utf-8")) if health_file(host).exists() else None
+    plain = win32crypt.CryptUnprotectData((BACKUP_DIR / base["archive"]).read_bytes(), None, None, None, 0)[1]
+    if digest(plain) != base["archive_sha256"]:
+        raise SystemExit(f"BACKUP_SHA256_MISMATCH expect={base['archive_sha256']} got={digest(plain)}")
+    restore: dict[str, tuple] = {}
+    with tarfile.open(fileobj=io.BytesIO(plain), mode="r:gz") as tf:
+        for member in tf.getmembers():
+            path = "/" + member.name.lstrip("./")
+            if path == DATA_DIR or not is_module(path):
+                continue
+            if member.issym():
+                restore[path] = ("L", member.linkname)
+            elif member.isfile():
+                restore[path] = ("F", tf.extractfile(member).read(), f"{member.mode & 0o7777:o}")
+    want_snap = {p: v for p, v in base["snapshot"].items() if p != DATA_DIR}
+    missing = sorted(p for p in module_state(want_snap) if p not in restore)
+    if missing:
+        raise SystemExit(f"BACKUP_MODULE_MEMBER_MISSING {missing}")
+    was_running = "r3mini-traffic:1" in base["metadata"].get("services", [])
     client = connect(host)
     try:
+        check_identity(client, base)
+        now = snapshot(client)
+        check_outside(base, now, "NOT_ROLLBACKABLE")
+        # 原有功能沿用最近一次 install/upgrade 前取的基线，不在回滚前重取：真出事时回滚前的状态本身就是坏的，
+        # 拿它当基线会让仍然坏着的项通过、修好的项反而报差异。期间 OpenClash 自己重启过时进程号会报差异，人工核对即可
+        m = re.search(r"run_id ([0-9a-f]{8})", text(client, "/usr/sbin/r3mini-traffic status", check=False))
+        # 停掉后删掉旧进程留下的 status.json，等到的状态才一定来自恢复出来的那一版
+        run(client, "[ -x /etc/init.d/r3mini-traffic ] && /etc/init.d/r3mini-traffic stop; "
+                    "rm -f /var/run/r3mini-traffic/status.json; true")
+        if not was_running:
+            run(client, "rm -rf /var/run/r3mini-traffic")
+        extra = sorted(p for p in module_state(now) if p != DATA_DIR and p not in restore)
+        if extra:
+            run(client, "rm -f " + " ".join(shlex.quote(p) for p in extra))
+        for path, item in sorted(restore.items()):
+            if item[0] == "F":
+                upload(client, item[1], path, item[2])
+            else:
+                run(client, f"ln -sfn {shlex.quote(item[1])} {shlex.quote(path)}")
+        if was_running:
+            run(client, "/etc/init.d/r3mini-traffic start")
+        after = {p: v for p, v in snapshot(client).items() if p != DATA_DIR}
+        added, removed, changed = diff_snapshot(want_snap, after)
+        if added or removed or changed:
+            raise SystemExit(f"ROLLBACK_MISMATCH added={sorted(added)} removed={sorted(removed)} changed={sorted(changed)}")
+        print(f"SNAPSHOT_EQUALS_BACKUP items={len(after)} backup={base['archive']} restored={sorted(restore)} "
+              f"removed={extra}")
+        if was_running and base.get("installed_version"):
+            fresh = rf"(?!{re.escape(m[1])} )" if m else ""
+            print(wait_for(client, "/usr/sbin/r3mini-traffic status",
+                           rf"STATUS_OK 版本 {re.escape(base['installed_version'])} pid \d+ run_id {fresh}[0-9a-f]{{8}} ",
+                           60).strip())
+        elif run(client, "pgrep -f '[r]3mini-traffic run'", check=False)[0] == 0:
+            raise SystemExit("PROCESS_STILL_RUNNING")
+        if MENU[1] not in restore:
+            gone = menu_node(text(client, "sh -s /nonexistent", data=LUCI_SCRIPT.encode(), timeout=60)) is None
+            print(f"LUCI_MENU_REMOVED_{'OK' if gone else 'FAIL'}")
+            if not gone:
+                raise SystemExit("LUCI_MENU_STILL_PRESENT")
+        health_gate(client, host, "AFTER_ROLLBACK")
+        print(f"ROLLBACK_OK host={host} running={was_running} version={base.get('installed_version') or '-'}")
+    finally:
+        client.close()
+
+
+def uninstall(host: str, purge: bool) -> None:
+    base = latest_manifest(host)
+    client = connect(host)
+    try:
+        now = snapshot(client)
+        files = sorted(p for p in module_state(now) if p != DATA_DIR and p not in RC_LINKS)
         cmd = ("[ -x /etc/init.d/r3mini-traffic ] && { /etc/init.d/r3mini-traffic stop; "
-               "/etc/init.d/r3mini-traffic disable; }; rm -f " + " ".join(dst for _, dst, _ in FILES) +
-               "; rm -rf /var/run/r3mini-traffic" + (f" {DATA_DIR}" if purge else "") + "; true")
+               "/etc/init.d/r3mini-traffic disable; }; rm -f " + " ".join(shlex.quote(p) for p in files or ["/nonexistent"]) +
+               " " + " ".join(RC_LINKS) + "; rm -rf /var/run/r3mini-traffic" + (f" {DATA_DIR}" if purge else "") + "; true")
         run(client, cmd)
         # [r] 让正则不匹配执行本命令的 shell 自身的命令行
         if run(client, "pgrep -f '[r]3mini-traffic run'", check=False)[0] == 0:
             raise SystemExit("PROCESS_STILL_RUNNING")
-        added, removed, changed = diff_snapshot(base["snapshot"], snapshot(client))
-        allowed = set() if purge else {DATA_DIR}
-        if added - allowed or removed or changed:
-            raise SystemExit(f"NOT_RESTORED added={sorted(added)} removed={sorted(removed)} changed={sorted(changed)}")
-        print(f"SNAPSHOT_RESTORED items={len(base['snapshot'])} leftover={sorted(added)}")
-        after = health(client)
-        print("HEALTH_AFTER_UNINSTALL " + json.dumps(after, ensure_ascii=False))
-        bad = compare_health(before, after) if before else []
-        if bad:
-            raise SystemExit("HEALTH_REGRESSION " + "; ".join(bad))
+        after = snapshot(client)
+        check_outside(base, after, "NOT_RESTORED")
+        left = sorted(module_state(after))
+        if left != ([] if purge else [DATA_DIR]) and left != []:
+            raise SystemExit(f"NOT_RESTORED module_left={left}")
+        gone = menu_node(text(client, "sh -s /nonexistent", data=LUCI_SCRIPT.encode(), timeout=60)) is None
+        if not gone:
+            raise SystemExit("LUCI_MENU_STILL_PRESENT")
+        print(f"SNAPSHOT_RESTORED outside_items={sum(1 for p in after if not is_module(p))} removed={files} leftover={left}")
+        health_gate(client, host, "AFTER_UNINSTALL")
         print(f"UNINSTALL_OK host={host} purge={purge}")
     finally:
         client.close()
@@ -713,6 +1100,9 @@ def main(argv: list[str]) -> int:
     elif cmd == "upgrade":
         for h in hosts:
             upgrade(h)
+    elif cmd == "rollback":
+        for h in hosts:
+            rollback(h)
     elif cmd == "uninstall":
         for h in hosts:
             uninstall(h, "--purge-data" in rest)

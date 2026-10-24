@@ -1,0 +1,13 @@
+{
+	"luci-app-r3mini-traffic": {
+		"description": "允许查看 r3mini-traffic 记录的流量（只读）",
+		"read": {
+			"file": {
+				"/usr/sbin/r3mini-traffic web *": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}
