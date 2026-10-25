@@ -1,0 +1,28 @@
+{
+	"luci-app-r3mini-chatgpt": {
+		"description": "查看、管理及恢复自定义网站分流",
+		"read": {
+			"file": {
+				"/usr/sbin/r3mini-chatgpt status": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt benchmark-status *": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt status *": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/r3mini-chatgpt apply *": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt benchmark *": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt save *": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt remove *": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt set-enabled *": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt disable": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}
