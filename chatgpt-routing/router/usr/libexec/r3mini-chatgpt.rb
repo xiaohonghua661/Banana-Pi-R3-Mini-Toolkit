@@ -740,7 +740,8 @@ module R3MiniChatGPT
       fail!('CORE_MISSING') unless core
       pid = Process.spawn({'SAFE_PATHS' => '/usr/share/openclash:/etc/ssl'},
                           core, '-t', '-d', @base, '-f', candidate, gid: core_gid, out: '/dev/null', err: '/dev/null')
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 7
+      # 2026-10-26 measured 5.3/7.0/5.7 s for a 440 KB runtime; 7 s rejected saves under light load.
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 20
       loop do
         finished = Process.waitpid2(pid, Process::WNOHANG)
         if finished

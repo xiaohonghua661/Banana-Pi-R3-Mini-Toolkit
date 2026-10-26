@@ -807,8 +807,8 @@ class BackendTest(unittest.TestCase):
         response = self.command("apply", "lian_li.yaml", node_id(self.nodes[0]["name"]), ok=False)
         elapsed = time.monotonic() - started
         self.assertEqual(response["error"], "CONFIG_TEST_FAILED")
-        self.assertGreaterEqual(elapsed, 7)
-        self.assertLess(elapsed, 8.5)
+        self.assertGreaterEqual(elapsed, 20)
+        self.assertLess(elapsed, 21.5)
         self.assertEqual(self.runtime.read_bytes(), before)
         self.assertFalse(self.settings.exists())
         pid = int((self.root / "core-test-pid").read_text())

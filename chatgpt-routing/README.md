@@ -49,7 +49,7 @@ python chatgpt-routing/manage.py rollback HOST_A HOST_B
 
 2026-10-25 实机验收：刷新 `lian_li.yaml` 后对 56 个条目完成三轮测试，36 个通过。最低延迟节点为「新加坡高速05」，真实出口 SG，三次首字节时间 306.549 / 285.575 / 291.032 ms，中位数 291.032 ms。LuCI 保存启用后，从 Mihomo 连接链观察到专用 `R3Site-` 组及选定节点，ChatGPT trace 返回 200 / SG，未带密钥的 OpenAI API 探测返回正常的 401。实际执行「恢复原分流」后，运行 YAML 与安装前备份的语义完全一致；再次启用并重启 OpenClash 后，专用分流自动恢复，其他运行规则、DNS、覆写脚本和服务保持一致。这是当轮实测结果，后续可在页面重新测速。
 
-核心候选校验与生产进程使用相同的 `nogroup` GID，并设置生产要求的 `SAFE_PATHS=/usr/share/openclash:/etc/ssl`；校验看门狗为 7 秒。设备 Ruby 不依赖 `json`、`fileutils`、`net/http` 等可选库。当前离线验收包括后端 41 项、测速助手 11 项、部署器 15 项、页面 36 项。
+核心候选校验与生产进程使用相同的 `nogroup` GID，并设置生产要求的 `SAFE_PATHS=/usr/share/openclash:/etc/ssl`；校验看门狗为 20 秒（2026-10-26 实测 440 KB 的 MESL 运行配置校验要 5.3 / 7.0 / 5.7 秒，原 7 秒上限在轻微负载下就以 `CONFIG_TEST_FAILED` 拒绝保存）。校验慢时，经 LuCI 保存可能先显示请求超时，设备上仍会完成，刷新页面即可看到结果。设备 Ruby 不依赖 `json`、`fileutils`、`net/http` 等可选库。当前离线验收包括后端 41 项、测速助手 11 项、部署器 15 项、页面 36 项。
 
 同日 19:30 修复：源配置只写 `default-nameserver`、不写 `proxy-server-nameserver` 时（如 `MESL_yue.yaml`），测速助手原先拿不到 bootstrap 解析器，隔离核心只能用路由器的解析器，在 fake-ip 模式下拿到 198.18.x.x，172 个节点全部 `TLS_FAILED`。现在缺 `proxy-server-nameserver` 时改用该源的 `default-nameserver`，新增回归测试覆盖。复测后该源 172 个节点中 119 个通过，台湾 9 个全部通过（真实出口 TW）；未通过的 53 个里 45 个是 `UNSUPPORTED_REGION`（如香港），另有 6 个 `TLS_FAILED`、2 个 `TRACE_FAILED`。ChatGPT 规则随即改为该源「台湾 01 [0.3X]」，同区备用为台湾 02、台湾 03，三者都是 AnyTLS（TCP）。此前选用的 `peiqian_lv.yaml` 台湾节点是 Hysteria2（UDP），晚高峰成批拨号超时：19:14–19:24 这 10 分钟里 Codex 有 62 次请求失败、39 次成功。切换后 Codex 连续 43 次请求成功、0 次失败，Mihomo 没有 chatgpt 拨号错误。
 
