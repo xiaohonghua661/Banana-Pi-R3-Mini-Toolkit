@@ -1,0 +1,5 @@
+#!/bin/sh
+# Sandbox routing is available only when invoking the Ruby file directly.
+unset R3MINI_CHATGPT_ROOT RUBYOPT RUBYLIB
+umask 077
+exec /usr/bin/ruby /usr/libexec/r3mini-chatgpt.rb "$@"

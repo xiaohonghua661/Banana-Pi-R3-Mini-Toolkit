@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>网站分流 · 离线页面验收</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 sans-serif; color: #222; background: #f5f5f5; }
+  .preview-tools { padding: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; background: #fff; border-bottom: 1px solid #ddd; }
+  .preview-tools label { display: flex; align-items: center; gap: 5px; }
+  .preview-tools select { min-height: 36px; max-width: 100%; }
+  .preview-note { margin: 0; font-size: 12px; color: #666; }
+  iframe { display: block; height: 1300px; border: 1px solid #bbb; margin: 16px auto; background: #fff; max-width: 100%; }
+  .frame-body { padding: 12px; background: #fff; }
+  .cbi-button { border: 1px solid #bbb; border-radius: 4px; padding: 8px 14px; font: inherit; cursor: pointer; color: inherit; background: #fff; }
+  .cbi-button-apply { background: #2673b6; border-color: #2673b6; color: #fff; }
+  input, textarea, select { border: 1px solid #aaa; border-radius: 4px; padding: 7px; background: #fff; color: inherit; }
+  h2 { font-size: 1.5em; }
+</style>
+<body>
+<script>
+// 合成规则和本地模拟接口，实际执行 router/ 中的 LuCI 页面源码，不连接路由器。
+(async function() {
+  const query = new URLSearchParams(location.search);
+  if (!query.has('frame')) {
+    document.body.innerHTML = '<div class="preview-tools">' +
+      '<label>视口 <select id="width"><option>320</option><option>700</option><option selected>1024</option></select></label>' +
+      '<label>文字大小 <select id="zoom"><option value="1">100%</option><option value="2">200%</option></select></label>' +
+      '<label>状态 <select id="mode"><option value="rules">网站列表</option><option value="custom">添加自定义网站</option>' +
+      '<option value="preset">ChatGPT 预设</option><option value="edit">编辑网站</option><option value="disabled">全部停用</option>' +
+      '<option value="empty">空节点</option><option value="fault">规则异常</option><option value="failure">保存失败</option>' +
+      '<option value="loading">正在加载</option><option value="long">长文本</option><option value="pending">等待 OpenClash 启动</option>' +
+      '<option value="unavailable">源配置读取失败</option><option value="untested">未测速</option>' +
+      '<option value="benchmarking">3轮测速进行中</option><option value="benchfailed">测速失败</option></select></label>' +
+      '<p class="preview-note">离线模拟主题；用于布局与交互验收。真实 LuCI 主题和权限仍须另验。</p></div><iframe title="网站分流页面"></iframe>';
+    const width = document.getElementById('width'), zoom = document.getElementById('zoom'), mode = document.getElementById('mode');
+    const update = function() {
+      const frame = document.querySelector('iframe');
+      frame.style.width = width.value + 'px';
+      frame.src = location.pathname + '?frame=1&mode=' + mode.value + '&zoom=' + zoom.value;
+    };
+    [width, zoom, mode].forEach(control => control.addEventListener('change', update));
+    update();
+    return;
+  }
+  document.body.className = 'frame-body';
+  document.body.style.fontSize = (16 * Number(query.get('zoom') || 1)) + 'px';
+  const mode = query.get('mode') || 'rules';
+  const n1 = { id: '1111111111111111', name: '演示节点 · 一', type: 'ss', country: 'JP', samples_ms: [90, 85, 95], median_ms: 90, eligible: true };
+  const n2 = { id: '2222222222222222', name: mode === 'long' ? '用于测试长文本与放大后换行的合成节点名称'.repeat(5) : '<img src=x onerror=alert(1)> 合成文本节点', type: 'trojan', country: 'US', samples_ms: [60, 55, 65], median_ms: 60, eligible: true };
+  const n3 = { id: '3333333333333333', name: '另一源配置 · 演示节点', type: 'ss', country: 'SG', samples_ms: [120, 125, 130], median_ms: 125, eligible: true };
+  const n4 = { id: '4444444444444444', name: '地区不支持的演示节点', type: 'ss', country: 'HK', samples_ms: [], median_ms: null, eligible: false, error: 'UNSUPPORTED_REGION' };
+  const jobs = Object.create(null);
+  if (mode === 'benchmarking') jobs['lian_li.yaml'] = { started: Date.now() - 1100 };
+  function telemetry(source) {
+    source = source || 'lian_li.yaml';
+    const list = source === 'other.yaml' ? [n3] : [n1, n2, n4], job = jobs[source];
+    const total = list.length, done = job ? Math.min(total, Math.floor((Date.now() - job.started) / 1000)) :
+      ['untested', 'benchfailed'].includes(mode) ? 0 : total;
+    const results = list.slice(0, done), best = done === total ? (source === 'other.yaml' ? n3.id : n2.id) : null;
+    const nodes = list.map(node => results.some(r => r.id === node.id) ? node : Object.assign({}, node,
+      { country: null, samples_ms: [], median_ms: null, eligible: false, error: null }));
+    return { nodes, benchmark: { ok: true, source, source_hash: 'a'.repeat(64), running: !!job && done < total,
+      done, total: done || job ? total : 0, results, best, error: mode === 'benchfailed' ? 'CORE_MISSING' : null } };
+  }
+  const inactive = mode === 'disabled' || mode === 'pending';
+  let reads = 0, nextId = 2;
+  let rules = [{
+    id: 'aaaaaaaaaaaa', label: mode === 'long' ? '用于检查手机端与200%文字的长网站名称'.repeat(5) : 'ChatGPT',
+    domains: ['chatgpt.com', 'openai.com', 'oaistatic.com', 'oaiusercontent.com', 'chatgpt.livekit.cloud'],
+    source: 'lian_li.yaml', selected: mode === 'long' ? n2.id : n1.id,
+    selected_name: mode === 'long' ? n2.name : n1.name, enabled: !inactive, applied: !inactive && mode !== 'fault',
+    error: mode === 'fault' ? 'NODE_MISSING' : '', preset: 'chatgpt'
+  }, {
+    id: 'bbbbbbbbbbbb', label: '自定义演示网站', domains: ['example.org'], source: 'other.yaml',
+    selected: n3.id, selected_name: n3.name, enabled: false, applied: false, error: '', preset: ''
+  }];
+  const result = (data, code) => ({ code: code || 0, stdout: JSON.stringify(data), stderr: '' });
+  const state = function(source) {
+    const measured = telemetry(source);
+    return { ok: true, enabled: rules.some(r => r.enabled), applied: rules.some(r => r.applied), source: 'lian_li.yaml',
+      sources: ['lian_li.yaml', 'other.yaml'], nodes: mode === 'empty' ? [] : measured.nodes, benchmark: measured.benchmark,
+      site_rules: rules, pending_restart: mode === 'pending', source_error: '', error: mode === 'fault' ? 'RUNTIME_GROUP_MISSING' : '' };
+  };
+  const fs = { exec: async function(cli, args) {
+    if (cli !== '/usr/sbin/r3mini-chatgpt') throw new Error('离线预览仅模拟本模块');
+    if (args[0] === 'benchmark-status') return result(telemetry(args[1]).benchmark);
+    if (args[0] === 'benchmark') {
+      jobs[args[1]] = { started: Date.now() };
+      return result({ ok: true, running: true });
+    }
+    if (args[0] === 'status') {
+      reads++;
+      if (mode === 'loading' && reads > 1) return new Promise(function() {});
+      if (mode === 'unavailable' && reads > 1 && args[1] === 'other.yaml')
+        return result({ ok: false, message: '源配置已不存在。' }, 1);
+      return result(state(args[1]));
+    }
+    await new Promise(resolve => setTimeout(resolve, 450));
+    if (mode === 'failure') return result({ ok: false, message: '此域名与已有网站规则冲突。' }, 1);
+    if (args[0] === 'save') {
+      const payload = JSON.parse(args[1]), id = payload.id || nextId.toString(16).padStart(12, '0');
+      nextId++;
+      const node = telemetry(payload.source).nodes.find(n => n.id === payload.selected);
+      if (!node || !node.eligible) return result({ ok: false, message: '请先选择通过地区验证与 3 轮测速的节点。' }, 1);
+      const domains = payload.domains.map(d => new URL(d.includes('://') ? d : 'https://' + d).hostname.toLowerCase());
+      rules = rules.filter(r => r.id !== id).concat([Object.assign(payload, { id, domains, selected_name: node.name,
+        enabled: true, applied: mode !== 'pending', error: '', preset: payload.preset || '' })]);
+      return result(Object.assign(state(payload.source), { id }));
+    }
+    if (args[0] === 'remove') rules = rules.filter(r => r.id !== args[1]);
+    else if (args[0] === 'set-enabled') rules.forEach(r => { if (r.id === args[1]) { r.enabled = args[2] === '1'; r.applied = r.enabled && mode !== 'pending'; } });
+    else if (args[0] === 'disable') rules.forEach(r => { r.enabled = false; r.applied = false; });
+    else throw new Error('离线预览不支持此操作');
+    return result(state());
+  } };
+  const source = await (await fetch('router/www/luci-static/resources/view/services/r3mini-chatgpt.js')).text();
+  const view = new Function('view', 'fs', 'poll', 'document', source)({ extend: value => value }, fs,
+    { add: function(fn, seconds) { setInterval(fn, seconds * 1000); } }, document);
+  document.body.appendChild(view.render(await view.load()));
+  if (['custom', 'empty', 'loading', 'untested', 'benchmarking', 'benchfailed'].includes(mode)) view.openForm(null, false);
+  if (mode === 'preset') view.openForm(null, true);
+  if (['edit', 'long', 'failure', 'unavailable'].includes(mode)) view.openForm(rules[0], false);
+  if (mode === 'unavailable') {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    view.sourceSelect.value = 'other.yaml';
+    view.sourceSelect.dispatchEvent(new Event('change'));
+  }
+  document.title = '离线预览 · ' + mode;
+})().catch(function(error) { document.body.textContent = '预览加载失败：' + error.message; });
+</script>
+</body>
+</html>
