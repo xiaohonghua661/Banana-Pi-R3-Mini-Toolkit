@@ -47,6 +47,10 @@ HEADER_TIMEOUT = 45         # 同期 MESL 31 个大请求都在 7–21 秒内拿
 FAIL_LIMIT, FAIL_WINDOW = 2, 600
 GRACE = 30                  # 切换并断开旧连接后，正在飞的请求会失败一次，不算
 PROBE_EVERY, MARKER_EVERY, TICK = 300, 60, 10
+# 模块保存前用核心校验候选配置。MESL 配置实测校验要 5.3–7.0 秒，原 7 秒上限曾在 2026-10-26 夜里连续以
+# CONFIG_TEST_FAILED 拒绝恢复（现已放宽到 20 秒）。这类偶发失败隔 30 秒重试；缺测速证明重试也没用，改去测速。
+TRIES, RETRY_WAIT = 3, 30
+PROOF_ERRORS = ("BENCHMARK_REQUIRED", "NODE_CHANGED")
 TASKS = {"r3mini-gpt-night": ("00:00", "night", 9), "r3mini-gpt-day": ("07:30", "day", 1)}
 
 # 断开规则域名上不走当前分流的旧连接（路由切换只影响新连接，Codex 会长时间复用旧连接）：
@@ -193,6 +197,25 @@ def applied(result: dict | None) -> bool:
     return bool(result and result.get("ok") and live(find_rule(result)))
 
 
+def disabled(result: dict | None) -> bool:
+    rule = find_rule(result)
+    return bool(result and result.get("ok") and rule and not rule.get("enabled"))
+
+
+def change(router, clock, what: str, done, *args: str) -> dict:
+    """调用模块的 save / set-enabled，done(结果) 判断成功；每次失败记下模块错误码，偶发失败隔 RETRY_WAIT 秒重试。"""
+    for attempt in range(1, TRIES + 1):
+        r = router.cli(*args)
+        if done(r):
+            return r
+        r["error"] = r.get("error") or (find_rule(r) or {}).get("error") or "NOT_APPLIED"
+        router.log(f"{what}: {args[0]} 第 {attempt} 次失败 {r['error']}")
+        if r["error"] in PROOF_ERRORS or attempt == TRIES:
+            return r
+        clock.sleep(RETRY_WAIT)
+    raise AssertionError("unreachable")
+
+
 def in_window(t: dtime) -> bool:
     return t >= WINDOW_START or t < WINDOW_END
 
@@ -221,11 +244,13 @@ def run_benchmark(router, clock, source: str, minutes: int) -> dict | None:
 
 def restore(router, clock, before: dict) -> bool:
     """把规则恢复为 before。模块要求所选节点有测速证明：先直接保存，缺证明就测速后再存；仍失败则停用规则回原分流。"""
-    if applied(router.cli("save", payload(before))):
+    r = change(router, clock, "restore", applied, "save", payload(before))
+    if applied(r):
         return True
-    if run_benchmark(router, clock, before["source"], 20) and applied(router.cli("save", payload(before))):
+    if r["error"] in PROOF_ERRORS and run_benchmark(router, clock, before["source"], 20) and \
+            applied(change(router, clock, "restore", applied, "save", payload(before))):
         return True
-    router.cli("set-enabled", RULE_ID, "0")
+    change(router, clock, "restore", disabled, "set-enabled", RULE_ID, "0")
     return False
 
 
@@ -292,11 +317,11 @@ def rollback(router, clock, reason: str) -> str:
         log_local(f"rollback: 不在夜间模式（标记 {m and m.get('mode')}），不动规则")
         return "NOT_IN_NIGHT_MODE"
     before = m["before"]
-    r = router.cli("set-enabled", RULE_ID, "0")   # 立刻回原分流 🤖 AI，不等测速
+    r = change(router, clock, "rollback", disabled, "set-enabled", RULE_ID, "0")   # 立刻回原分流 🤖 AI，不等测速
     closed = router.close_stale(before["domains"])
     m.update(mode="rolled_back", reason=reason, at=clock.epoch())
     router.put_marker(m)
-    router.log(f"rollback: {reason}；停用规则回原分流 ok={bool(r.get('ok'))}，断开旧连接 {closed} 条")
+    router.log(f"rollback: {reason}；停用规则回原分流 ok={disabled(r)}，断开旧连接 {closed} 条")
     if not restore(router, clock, before):
         router.log(f"rollback: 恢复 {before['source']}:{before['selected_name']} 失败，保持原分流，等白天任务再试")
         return "ROLLED_BACK"
@@ -371,9 +396,9 @@ def night(router, clock, logs: pathlib.Path | None = None, trial_minutes: int | 
     marker = {"mode": "night", "rule": RULE_ID, "since": clock.epoch(), "before": before,
               "night": {"source": NIGHT_SOURCE, "selected": node, "name": NIGHT_NODES[node]}}
     router.put_marker(marker)   # 先写标记：保存中途出错时，兜底脚本与白天任务仍知道原规则
-    result = router.cli("save", payload(before, NIGHT_SOURCE, node))
+    result = change(router, clock, "night", applied, "save", payload(before, NIGHT_SOURCE, node))
     if not applied(result):
-        error = result.get("error") or (find_rule(result) or {}).get("error")
+        error = result["error"]
         cur = find_rule(router.cli("status")) or {}
         if (cur.get("source"), cur.get("selected")) == (before["source"], before["selected"]) and live(cur) or restore(router, clock, before):
             router.remove_marker()

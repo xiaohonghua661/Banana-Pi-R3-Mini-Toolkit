@@ -31,6 +31,7 @@ class FakeRouter:
         self.calls, self.logs, self.closes = [], [], []
         self.probe_ok = True
         self.save_error = None
+        self.flaky = {}     # 命令 → 依次返回的偶发错误码，如 {"save": ["CONFIG_TEST_FAILED"]}
 
     def view(self):
         return {"ok": True, "site_rules": [dict(self.rule)]}
@@ -38,6 +39,8 @@ class FakeRouter:
     def cli(self, *args):
         self.calls.append(args)
         cmd = args[0]
+        if self.flaky.get(cmd):
+            return {"ok": False, "error": self.flaky[cmd].pop(0)}
         if cmd == "status":
             src = args[1] if len(args) > 1 else self.rule["source"]
             ids = [TOKYO07, TOKYO08] if src == NIGHT else [TW01]
@@ -200,6 +203,12 @@ class Night(Base):
         self.assertEqual(self.night(), "RULE_NOT_ACTIVE")
         self.assertFalse(any(c[0] in ("benchmark", "save") for c in self.r.calls))
 
+    def test_night_switch_retries_transient_failure(self):
+        self.r.flaky["save"] = ["CONFIG_TEST_FAILED"]
+        self.c.at(200, lambda: self.r.mark.update(mode="restored"))
+        self.assertEqual(self.night(), "MARKER_CHANGED")
+        self.assertEqual(self.r.where(), (NIGHT, TOKYO07, True))
+
     def test_save_failure_removes_marker_and_keeps_rule(self):
         self.r.save_error = "CORE_CHECK_FAILED"
         self.assertEqual(self.night(), "SAVE_FAILED")
@@ -296,6 +305,28 @@ class Guard(Base):
         self.c.at(100, lambda: self.db.big(self.c))
         self.assert_restored(self.night())
         self.assertIn(("benchmark", MESL), self.r.calls)
+
+    def test_core_check_timeouts_are_retried_without_benchmark(self):
+        """2026-10-26 00:09：模块核心校验超时（CONFIG_TEST_FAILED），恢复不该去测速，也不该放弃。"""
+        self.c.at(100, lambda: self.db.big(self.c))
+        self.c.at(101, lambda: self.r.flaky.update({"save": ["CONFIG_TEST_FAILED", "CONFIG_TEST_FAILED"]}))
+        self.assert_restored(self.night())
+        self.assertNotIn(("benchmark", MESL), self.r.calls)
+        self.assertTrue(any("CONFIG_TEST_FAILED" in line for line in self.r.logs))
+
+    def test_disable_is_retried_when_core_check_times_out(self):
+        self.c.at(100, lambda: self.db.big(self.c))
+        self.c.at(101, lambda: self.r.flaky.update({"set-enabled": ["CONFIG_TEST_FAILED"]}))
+        self.assert_restored(self.night())
+        self.assertIn("ok=True", next(line for line in self.r.logs if "停用规则回原分流" in line))
+
+    def test_missing_proof_is_not_retried(self):
+        self.c.at(50, lambda: self.r.proof.discard((MESL, TW01)))
+        self.c.at(100, lambda: self.db.big(self.c))
+        self.assert_restored(self.night())
+        calls = [c[0] for c in self.r.calls]
+        bench = calls.index("benchmark", calls.index("set-enabled"))
+        self.assertEqual(calls[calls.index("set-enabled"):bench].count("save"), 1)
 
     def test_restore_failure_leaves_rule_disabled(self):
         def break_mesl():
