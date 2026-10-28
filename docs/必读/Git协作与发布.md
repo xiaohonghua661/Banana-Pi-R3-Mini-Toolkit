@@ -24,7 +24,7 @@ git fetch origin
 git worktree add ..\Banana_Pi_r3mini-<topic> -b agent/<topic> origin/main
 ```
 
-`<topic>` 使用简短英文任务名，每个 Agent 必须唯一。无法使用独立 worktree 时，只允许主线收口 Agent 在共享目录提交，并严格限定暂存路径。
+`<topic>` 使用简短英文任务名，每个 Agent 必须唯一。无法使用独立 worktree 时，只允许主线收口 Agent 在共享目录提交，并严格限定暂存路径。工作区只在任务进行中保留，推送后按「提交与上传闸门」第 7 步删除。
 
 遇到脏工作树时：
 
@@ -73,7 +73,15 @@ git worktree add ..\Banana_Pi_r3mini-<topic> -b agent/<topic> origin/main
    ```
 
    主线推送前再次确认 `git branch --show-current`、`git status --short` 和 `git log --oneline origin/main..HEAD`；不能证明提交范围时停止。
-7. 交付时报告提交哈希、远端分支或提交 URL、实际测试输出和仍未验证的项目。
+7. 用独立 worktree 的任务，推送后删除该工作区，只保留分支。在共享目录执行，并先关掉停在该目录里的终端和编辑器，否则 Windows 删不掉目录；会话本身就开在该工作区里时删不掉，交付时报告，由用户或共享目录里的会话删除：
+
+   ```powershell
+   git -C ..\Banana_Pi_r3mini-<topic> status --short --branch --ignored
+   git worktree remove ..\Banana_Pi_r3mini-<topic>
+   ```
+
+   第一行要是 `## agent/<topic>...origin/agent/<topic>` 且没有 `[ahead`，否则还有提交没推送（或推送时没带 `-u`），先按第 6 步推送。`git worktree remove` 遇到未提交或未跟踪的文件（` M`、`??` 行）会拒绝：不要加 `--force`，属于本任务的就提交，拿不准的保留工作区并在交付时报告。`!!` 行是被忽略的文件（`tmp/`、`__pycache__/` 等），会随目录一起删掉，要留的先移到共享目录的同名位置。目录被占用时报 `failed to delete ...: Permission denied`：这时 Git 已注销该工作区，目录里可能还剩部分文件，都是已提交的内容或上面看过的被忽略文件。关掉占用的程序，确认 `git worktree list` 里已经没有它，再用 `Remove-Item -Recurse -Force ..\Banana_Pi_r3mini-<topic>` 删掉整个目录；不要重跑 `git worktree remove`（会报 `is not a working tree`）。以后要再改这个分支时重建：`git worktree add ..\Banana_Pi_r3mini-<topic> agent/<topic>`。
+8. 交付时报告提交哈希、远端分支或提交 URL、实际测试输出和仍未验证的项目。
 
 ## 禁止公开的内容
 
