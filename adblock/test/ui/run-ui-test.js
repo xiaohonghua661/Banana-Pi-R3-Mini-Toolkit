@@ -1,7 +1,8 @@
 'use strict';
 // run-ui-test.js —— 离线验收 LuCI 广告过滤页：用无头 Chrome 渲染 view 文件（LuCI 运行时用替身），
 // 走一遍开关 / 改时间 / 立即更新 / 出错路径，并截桌面、手机宽度、OpenClash 未运行三张图。
-// 用法：node run-ui-test.js（需要本机 Chrome 或 Edge；截图与临时页面写到 R3AB_UI_OUT，默认系统临时目录下 r3mini-adblock-ui-test）
+// 用法：node run-ui-test.js（需要 Chrome，默认安装位置找不到时用 R3AB_BROWSER 指定可执行文件；Edge 截图后进程不退出，不能用；
+// 截图与临时页面写到 R3AB_UI_OUT，默认系统临时目录下的 r3mini-adblock-ui-test）
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -13,8 +14,12 @@ const view = fs.readFileSync(path.join(here, '../../router/www/luci-static/resou
 const base = JSON.parse(fs.readFileSync(path.join(here, 'status-sample.json'), 'utf8'));
 const out = process.env.R3AB_UI_OUT || path.join(os.tmpdir(), 'r3mini-adblock-ui-test');
 fs.mkdirSync(out, { recursive: true });
-const chrome = ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe']
-	.find(p => fs.existsSync(p));
+const chrome = process.env.R3AB_BROWSER || ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome',
+	'/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(p => fs.existsSync(p));
+if (!chrome || !fs.existsSync(chrome)) {  // R3AB_BROWSER 写错时报错，不悄悄换别的浏览器
+	console.error(chrome ? 'R3AB_BROWSER 指向的文件不存在：' + chrome : '找不到 Chrome：用环境变量 R3AB_BROWSER 指定 Chrome 可执行文件的完整路径');
+	process.exit(1);
+}
 
 function page(scenario) {
 	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

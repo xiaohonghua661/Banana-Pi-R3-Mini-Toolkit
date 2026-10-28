@@ -1,14 +1,17 @@
 #!/bin/sh
 # install.sh —— 在 R3 Mini（ImmortalWrt + OpenClash Meta）上安装 / 卸载「广告过滤」（r3mini-adblock）
 #
-# 用法：把整个包目录（含 router/、dnsmasq-remove.list、本脚本）传到 /tmp/r3mini-adblock-pkg/，后台执行（SSH 断开不中断）：
-#   setsid sh /tmp/r3mini-adblock-pkg/install.sh install   </dev/null >/dev/null 2>&1 &
-#   setsid sh /tmp/r3mini-adblock-pkg/install.sh uninstall </dev/null >/dev/null 2>&1 &
-# 结果看 /tmp/r3mini-adblock-install.log 最后一行：
+# 用法（必须带参数；不带参数只打印用法，不会安装）：先把整个包目录（含 router/、dnsmasq-remove.list、本脚本）传到
+# /tmp/r3mini-adblock-pkg/，然后：
+#   sh /tmp/r3mini-adblock-pkg/install.sh check      只读预检，逐项打印 [通过]/[不通过]/[提醒]，末行 CHECK_OK 或 CHECK_FAIL <原因>
+#   sh /tmp/r3mini-adblock-pkg/install.sh dry-run [文件 [安装结果另存为]]
+#                                                    只读预演：打印自定义规则文件（默认设备上那份）安装 / 卸载后的受管段和核对结果
+#   setsid sh /tmp/r3mini-adblock-pkg/install.sh install   </dev/null >/dev/null 2>&1 &   后台安装（SSH 断开不中断）
+#   setsid sh /tmp/r3mini-adblock-pkg/install.sh uninstall </dev/null >/dev/null 2>&1 &   后台卸载
+# 安装 / 卸载的结果看 /tmp/r3mini-adblock-install.log 最后一行：
 #   INSTALL_OK [UPDATE_FAILED <原因> | SUBSCRIPTION_DISABLED <原因>] / UNINSTALL_OK
 #   ROLLED_BACK_OK <原因> / ROLLED_BACK_BUT_UNHEALTHY <原因> / ABORT <原因>（ABORT 时设备没被改动）
-# 预演（只读，直接在终端输出）：sh install.sh dry-run [文件 [安装结果另存为]]
-#   打印自定义规则文件（默认设备上那份）安装 / 卸载后会变成什么，以及核对结果
+# 已有一个安装 / 卸载在跑时，第二次启动直接退出，不写日志。
 #
 # 安装做的事（改前把涉及的文件逐个备份并核对到 /etc/r3mini-adblock-backup-<时间>/，备份失败就 ABORT）：
 #   1. 装 /usr/sbin/r3mini-adblock、/etc/r3mini-adblock/ 规则数据、LuCI 页面（服务 → 广告过滤）；
@@ -23,7 +26,7 @@
 # 安装 / 卸载期间持有 r3mini-adblock 的 update 与 apply 锁：先等正在跑的订阅更新结束，再挡住开关和定时更新。
 set -u
 PKG=$(cd "$(dirname "$0")" && pwd)
-MODE=${1:-install}
+MODE=${1:-}
 TS=$(date +%Y%m%d-%H%M%S)
 BK=/etc/r3mini-adblock-backup-$TS
 LOG=/tmp/r3mini-adblock-install.log
@@ -178,48 +181,99 @@ rollback() {
 
 bk() { cp -p "$1" "$2" && cmp -s "$1" "$2" || { say "ABORT 备份失败：$1 -> $2（设备没被改动）"; exit 1; }; }
 
-if [ "$MODE" = dry-run ]; then
-	F=${2:-$RULES}; D=$(mktemp -d /tmp/r3ab-dry.XXXXXX)
-	markers_ok "$F" || { echo "MARKERS_BAD 受管段开始 / 结束标记不成对"; rm -rf "$D"; exit 1; }
-	for m in install uninstall; do
-		edit_custom "$m" "$F" "$D/$m.out" "$D"; rc=$?
-		echo "== $m: awk_rc=$rc $(custom_check "$F" "$D/$m.out")"
-		awk -v b="$B" -v e="$E" '$0 == b { p = 1 } p { print NR ": " $0 } $0 == e { p = 0 }' "$D/$m.out"
-	done
-	echo "== 期望 install 核对结果：$CHECK_INSTALL"
-	[ -n "${3:-}" ] && cp "$D/install.out" "$3"
-	rm -rf "$D"; exit 0
-fi
-case "$MODE" in install|uninstall) ;; *) echo "用法：install.sh install|uninstall|dry-run [文件]" >&2; exit 1 ;; esac
-exec > "$LOG" 2>&1
-say "START mode=$MODE pkg=$PKG backup=$BK"
+# 前置检查：每项打印一行「[通过] / [不通过] / [提醒] 名称：说明」，不改设备。参数：install | uninstall
+# 第一项不通过写进 FIRST_FAIL；install / uninstall 据此 ABORT，check 模式全部打印完再给结论。[提醒] 不挡安装。
+FIRST_FAIL=
+item() {
+	echo "  [$1] $2${3:+：$3}"
+	[ "$1" = 不通过 ] && [ -z "$FIRST_FAIL" ] && FIRST_FAIL="$2：$3"
+	return 0
+}
+preflight() {
+	if [ "$1" = install ]; then
+		miss=
+		for f in $SYS_FILES etc/config/r3mini_adblock etc/r3mini-adblock/core.rules etc/r3mini-adblock/domains.list; do
+			[ -s "$PKG/router/$f" ] || miss="$miss router/$f"
+		done
+		[ -s "$PKG/dnsmasq-remove.list" ] || miss="$miss dnsmasq-remove.list"
+		if [ -n "$miss" ]; then item 不通过 安装包 "包里缺$miss，重新完整上传 adblock/"; else item 通过 安装包; fi
+	fi
+	miss=
+	for c in ruby curl jsonfilter flock setsid md5sum cmp tar opkg; do command -v "$c" > /dev/null || miss="$miss $c"; done
+	if [ -n "$miss" ]; then item 不通过 命令 "缺$miss"; else item 通过 命令 "ruby curl jsonfilter flock setsid md5sum cmp tar 都在"; fi
+	v=$(opkg list-installed 2>/dev/null | sed -n 's/^luci-app-openclash - //p')
+	case "$v" in
+		'') item 不通过 OpenClash版本 "没装 luci-app-openclash" ;;
+		0.47.*|0.4[89].*|0.[5-9]*|[1-9]*) item 通过 OpenClash版本 "$v" ;;
+		*) item 提醒 OpenClash版本 "$v，只在 0.47.156 上验证过；太旧的版本不合并自定义规则集，安装器会在重启后发现并自动回滚" ;;
+	esac
+	if [ "$(/etc/init.d/openclash status 2>/dev/null)" = running ]; then item 通过 OpenClash运行; else item 不通过 OpenClash运行 "没在运行"; fi
+	if [ "$1" = install ]; then
+		if [ "$(uci -q get openclash.config.enable_custom_clash_rules)" = 1 ]; then item 通过 自定义规则开关
+		else item 不通过 自定义规则开关 "enable_custom_clash_rules 不是 1，规则集不会被加载"; fi
+	fi
+	if [ "$(uci -q get openclash.config.enable_meta_sniffer)" = 1 ] && [ "$(uci -q get openclash.config.enable_meta_sniffer_pure_ip)" = 1 ]; then item 通过 流量嗅探
+	else item 提醒 流量嗅探 "嗅探或嗅探纯 IP 没开，App 绕过 DNS 直连 IP 的广告拦不住"; fi
+	case "$(uci -q get openclash.config.china_ip_route)" in
+		''|0) item 通过 大陆IP绕过 "关" ;;
+		*) item 提醒 大陆IP绕过 "开着，直连国内 IP 的流量不经过 OpenClash，App 绕过 DNS 直连 IP 的广告拦不住" ;;
+	esac
+	if [ ! -f "$RULES" ]; then item 不通过 自定义规则文件 "$RULES 不存在"
+	elif ! grep -q '^rules:[[:space:]]*$' "$RULES"; then item 不通过 自定义规则文件 "没有单独成行的顶层 rules:"
+	elif grep -q '^rule-providers:' "$RULES" && ! grep -q '^rule-providers:[[:space:]]*$' "$RULES"; then item 不通过 自定义规则文件 "rule-providers: 写成了行内值，不自动改"
+	elif ! markers_ok "$RULES"; then item 不通过 自定义规则文件 "受管段开始 / 结束标记不成对，请人工检查"
+	else item 通过 自定义规则文件 "$RULES"; fi
+	y=$(run_yaml)
+	if [ ! -f "$y" ]; then item 不通过 运行配置 "$y 不存在"
+	elif [ "$RULES" -nt "$y" ]; then item 不通过 运行配置 "自定义规则改过但 OpenClash 还没重启（$y 比它旧），先重启 OpenClash"
+	else item 通过 运行配置 "$y"; fi
+	if [ "$1" = install ]; then
+		if [ -z "$(uci changes dhcp)" ]; then item 通过 dhcp暂存改动 "无"
+		else item 不通过 dhcp暂存改动 "有没提交的改动（LuCI 里没点保存并应用？）"; fi
+	fi
+	free=$(df -k /overlay 2>/dev/null | awk 'NR == 2 { print $4 }')
+	if [ "${free:-0}" -ge 2048 ]; then item 通过 剩余空间 "/overlay 剩 $((free / 1024)) MB"
+	else item 不通过 剩余空间 "/overlay 剩 ${free:-?} KB，不足 2 MB"; fi
+	NEED_OVERSEAS=0; http_ok https://api.anthropic.com/ && NEED_OVERSEAS=1
+	if healthy; then item 通过 网络 "本机 DNS 与国内站正常；海外站 api.anthropic.com $([ "$NEED_OVERSEAS" = 1 ] && echo '能访问，改动后也必须能访问' || echo '访问不了，不作要求')"
+	else item 不通过 网络 "OpenClash、本机 DNS、国内站 www.baidu.com 至少一项不正常"; fi
+	[ -z "$FIRST_FAIL" ]
+}
 
-# 锁：安装器单实例；等正在跑的订阅更新结束，并在整个过程中挡住开关与定时更新
+usage() { echo "用法：sh install.sh check | dry-run [文件 [安装结果另存为]] | install | uninstall（必须带参数）" >&2; }
+
+case "$MODE" in
+	check)
+		echo "只读预检（不改设备）："
+		if preflight install; then echo "CHECK_OK 可以安装"; exit 0; else echo "CHECK_FAIL $FIRST_FAIL"; exit 1; fi ;;
+	dry-run)
+		F=${2:-$RULES}; D=$(mktemp -d /tmp/r3ab-dry.XXXXXX)
+		markers_ok "$F" || { echo "MARKERS_BAD 受管段开始 / 结束标记不成对"; rm -rf "$D"; exit 1; }
+		for m in install uninstall; do
+			edit_custom "$m" "$F" "$D/$m.out" "$D"; rc=$?
+			echo "== $m: awk_rc=$rc $(custom_check "$F" "$D/$m.out")"
+			awk -v b="$B" -v e="$E" '$0 == b { p = 1 } p { print NR ": " $0 } $0 == e { p = 0 }' "$D/$m.out"
+		done
+		echo "== 期望 install 核对结果：$CHECK_INSTALL"
+		[ -n "${3:-}" ] && cp "$D/install.out" "$3"
+		rm -rf "$D"; exit 0 ;;
+	install|uninstall) ;;
+	*) usage; exit 1 ;;
+esac
+
+# 锁：安装器单实例（第二个实例直接退出，不碰正在跑那次的日志）；等正在跑的订阅更新结束，并在整个过程中挡住开关与定时更新
+command -v flock > /dev/null || { echo "$(date +%T) ABORT 命令：缺 flock（设备没被改动）" > "$LOG"; exit 1; }
 mkdir -p /var/lock /var/run/r3mini-adblock
 exec 6> /var/lock/r3mini-adblock-install.lock
-flock -n 6 || { say "ABORT 已有一个安装/卸载在跑"; exit 1; }
+flock -n 6 || { echo "已有一个安装 / 卸载在跑，看 $LOG" >&2; exit 1; }
+exec > "$LOG" 2>&1
+say "START mode=$MODE pkg=$PKG backup=$BK"
 exec 5> /var/run/r3mini-adblock/update.lock; flock 5
 exec 4> /var/run/r3mini-adblock/apply.lock; flock 4
 export R3AB_LOCKED=1
 
-# 前置检查（都不改设备）
-if [ "$MODE" = install ]; then
-	for f in $SYS_FILES etc/config/r3mini_adblock etc/r3mini-adblock/core.rules etc/r3mini-adblock/domains.list; do
-		[ -s "$PKG/router/$f" ] || { say "ABORT 包里缺 router/$f"; exit 1; }
-	done
-	[ -s "$PKG/dnsmasq-remove.list" ] || { say "ABORT 包里缺 dnsmasq-remove.list"; exit 1; }
-fi
-for c in ruby curl jsonfilter flock setsid md5sum cmp tar; do command -v "$c" > /dev/null || { say "ABORT 缺命令 $c"; exit 1; }; done
-[ "$(uci -q get openclash.config.enable_custom_clash_rules)" = 1 ] || { say "ABORT OpenClash 自定义规则没开（enable_custom_clash_rules!=1），规则集不会被加载"; exit 1; }
-grep -q '^rules:[[:space:]]*$' "$RULES" || { say "ABORT $RULES 里没有单独成行的顶层 rules:"; exit 1; }
-grep -q '^rule-providers:' "$RULES" && ! grep -q '^rule-providers:[[:space:]]*$' "$RULES" &&
-	{ say "ABORT $RULES 里的 rule-providers: 不是单独成行（写成了行内值），不自动改"; exit 1; }
-markers_ok "$RULES" || { say "ABORT $RULES 里的受管段开始 / 结束标记不成对，不自动改，请人工检查"; exit 1; }
-[ "$RULES" -nt "$(run_yaml)" ] && { say "ABORT 自定义规则改过但 OpenClash 还没重启（运行配置比它旧）；先重启 OpenClash 再装"; exit 1; }
-[ -z "$(uci changes dhcp)" ] || { say "ABORT dhcp 有没提交的改动（LuCI 里没点保存并应用？），先处理掉再装"; exit 1; }
-http_ok https://api.anthropic.com/ && NEED_OVERSEAS=1
-say "外网检查：国内站必须能访问；海外站 api.anthropic.com 改动前$([ "$NEED_OVERSEAS" = 1 ] && echo '能访问，改动后也必须能访问' || echo '访问不了，不作要求')"
-healthy || { say "ABORT 改动前就不健康（OpenClash/DNS/国内外网），不动设备"; exit 1; }
+say "前置检查："
+preflight "$MODE" || { say "ABORT $FIRST_FAIL（设备没被改动）"; exit 1; }
 
 # 备份（逐个核对）
 mkdir -p "$BK/files" || { say "ABORT 建不了备份目录 $BK"; exit 1; }
