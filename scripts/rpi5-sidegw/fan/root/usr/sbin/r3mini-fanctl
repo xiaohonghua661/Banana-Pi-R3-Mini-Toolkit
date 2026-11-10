@@ -1,0 +1,320 @@
+#!/bin/sh
+
+TAG="r3mini-fan"
+cfg() { uci -q get "r3mini_fan.main.$1"; }
+
+SENSOR="$(cfg sensor)"; [ -n "$SENSOR" ] || SENSOR="/sys/class/thermal/thermal_zone0/temp"
+MODE="$(cfg mode)"; [ -n "$MODE" ] || MODE="/sys/class/thermal/thermal_zone0/mode"
+PWM="$(cfg pwm)"; [ -n "$PWM" ] || PWM="/sys/class/hwmon/hwmon1/pwm1"
+PWM_ENABLE="$(cfg pwm_enable)"; [ -n "$PWM_ENABLE" ] || PWM_ENABLE="/sys/class/hwmon/hwmon1/pwm1_enable"
+# 树莓派 5：hwmon 序号随驱动加载顺序变化，按名字 pwmfan 找风扇接口，找到就覆盖上面的值。
+for h in /sys/class/hwmon/hwmon*; do [ "$(cat "$h/name" 2>/dev/null)" = pwmfan ] && { PWM="$h/pwm1"; PWM_ENABLE="$h/pwm1_enable"; break; }; done
+# 配置只有 3 个开启温度 + 1 个回差；停转/降档三条线一律由回差算出来，不再单独配置。
+# 这样"用户设的那个数"就是该档真正开启的温度，字面成立；旧模型里 6 个独立阈值
+# 有一半是回差机械件，设拧了守护进程直接拒启，是个纯粹自己造出来的故障面。
+# 这四个回退值必须与随包 /etc/config/r3mini_fan、r3mini-fan-web 的 cfg_celsius 回退、
+# deploy-router.sh 的体检默认逐个相同。此前这里是 38/40/44 而另两处是 35/38/40：UCI 段一旦
+# 缺失或改名，守护进程按一套跑、页面按另一套显示，两边对不上且没有任何告警。
+# test_night_window.sh 的 check_defaults_aligned 会扫这四个文件比对，改一处不改另一处就红。
+START_TEMP="$(cfg start_temp)"; [ -n "$START_TEMP" ] || START_TEMP=35000
+MEDIUM_UP="$(cfg medium_up)"; [ -n "$MEDIUM_UP" ] || MEDIUM_UP=38000
+HIGH_UP="$(cfg high_up)"; [ -n "$HIGH_UP" ] || HIGH_UP=40000
+HYSTERESIS="$(cfg hysteresis)"; [ -n "$HYSTERESIS" ] || HYSTERESIS=3000
+INTERVAL="$(cfg interval)"; [ -n "$INTERVAL" ] || INTERVAL=5
+night_override_bad_logged=0
+NIGHT_STATE=/var/run/r3mini-fan-night
+# 落 /root（overlay 持久层），不落 /var 或 /tmp——那是 tmpfs，且 syslog 环形缓冲
+# 在本机被模组日志一秒刷空，等于没记。只在状态变化时写，写入频次低，不会磨损闪存。
+LOGFILE=/root/r3mini-fan.log
+LOG_MAX_BYTES=65536
+
+# 只认十进制，拒前导零。`$(( ))` 按 C 常量约定把 0 开头当八进制，而 `[ -lt ]` 按十进制比，
+# 两者不同基：'030000' 能以 30000 的身份过闸门，却被算成 12288。derive_thresholds 是本脚本
+# 里唯一对配置值做算术的地方，一旦踩中就推出负数停转温度，主循环 [ temp -le STOP_TEMP ]
+# 永假 —— 风扇进了低速再也回不到停转（2026-08-20 真机 busybox ash 实测 STOP_TEMP=-7712）。
+# hhmm_to_min 早就为同一个坑逐位裁前导零，这里补上另一半。单独一个 '0' 合法（真值就是零）。
+is_num() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+		0) return 0 ;;
+		0*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+# <ISO8601> <level> <event> <msg> k=v...；同时进 syslog 供 logread 即时查看
+log_event() {
+	local level="$1" event="$2"
+	shift 2
+	# 每次写日志前查一次轮转：修复"重启不清回差"后进程可长年不重启，
+	# 只在启动时轮转等于没有上限，overlay 闪存会被 /root 下的日志慢慢吃掉。
+	log_rotate
+	printf '%s %s %s %s
+' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$level" "$event" "$*" >> "$LOGFILE" 2>/dev/null
+	logger -t "$TAG" "$level $event $*"
+}
+
+log_rotate() {
+	local bytes
+	bytes="$(wc -c < "$LOGFILE" 2>/dev/null)" || return 0
+	is_num "$bytes" || return 0
+	[ "$bytes" -gt "$LOG_MAX_BYTES" ] || return 0
+	tail -n 400 "$LOGFILE" > "$LOGFILE.trim" 2>/dev/null && mv "$LOGFILE.trim" "$LOGFILE"
+}
+for value in "$START_TEMP" "$MEDIUM_UP" "$HIGH_UP" "$HYSTERESIS" "$INTERVAL"; do
+	is_num "$value" || { log_event ERROR fan.config "配置含非数字，拒绝启动" reason=not_a_number got="$value" impact="风扇不受控，内核温控接管"; exit 1; }
+done
+# 三条降档线由回差算出来。这是本次重构的全部技术含量所在：旧模型要人肉维护 7 条
+# 大小关系（stop<start<=medium_up<high_up、stop<medium_down<medium_up、
+# medium_down<high_down<high_up），而它们**全部**是下面两条的推论——
+#   start<medium_up  ⇒  stop<medium_down（两边同减 h）
+#   medium_up<high_up ⇒  medium_down<high_down（同上）
+#   h>0             ⇒  三条 down<对应 up
+# 所以"配置顺序拧了导致守护进程拒启"这类故障在新模型里结构上不可能发生，剩下的
+# 闸门只是防手改 UCI 写出负数停转温度。
+# 包成函数是为了 test_night_window.sh 能按现有 sed 抽取模式直接测到闸门与推导本身。
+# 取值范围与 r3mini-fan-web / LuCI 视图逐条相同（温度 20–80°C、回差 1–10°C），
+# 这样"三层同一条链"才是真的。第一版只写了 hysteresis>=1000 且 <start_temp，比 web 宽得多：
+# 手改 UCI 设 hysteresis=34000 能过闸门，推出降中速线 6°C —— 冷机 25°C 开机就满速且此后
+# 永不降档（2026-08-20 真机复现）。回差上界不是洁癖，是防风扇被焊死在某一档。
+# 有了 h<=10000 与 start>=20000，停转温度 = start-h >= 10000 恒为正，不必再抄一条
+# hysteresis<start_temp——那条在此范围下永远为真，抄了就是对外声称一种造不出来的错误。
+thresholds_ok() {
+	[ "$HYSTERESIS" -ge 1000 ] &&
+	[ "$HYSTERESIS" -le 10000 ] &&
+	[ "$START_TEMP" -ge 20000 ] &&
+	[ "$START_TEMP" -lt "$MEDIUM_UP" ] &&
+	[ "$MEDIUM_UP" -lt "$HIGH_UP" ] &&
+	[ "$HIGH_UP" -le 80000 ]
+}
+# 采样周期也要闸门。此前只查了它是不是数字：写 0 会让主循环退化成 `sleep 0` 的忙等把
+# CPU 打满——而 CPU 满载正好推高温度，这是个自激的坑；写成几小时则温控形同虚设。
+# 页面根本不写这个键（apply 只写 4 个参数），所以只有手改 UCI 能命中，但一命中就很难查。
+interval_ok() {
+	[ "$INTERVAL" -ge 1 ] && [ "$INTERVAL" -le 60 ]
+}
+derive_thresholds() {
+	STOP_TEMP=$((START_TEMP - HYSTERESIS))
+	MEDIUM_DOWN=$((MEDIUM_UP - HYSTERESIS))
+	HIGH_DOWN=$((HIGH_UP - HYSTERESIS))
+}
+if ! interval_ok; then
+	log_event ERROR fan.config "采样周期非法，拒绝启动" reason=bad_interval expect="1<=interval<=60（秒）" got="$INTERVAL" impact="风扇不受控；interval=0 会让控制器忙等占满 CPU 反而推高温度"
+	exit 1
+fi
+if ! thresholds_ok; then
+	log_event ERROR fan.config "阈值大小关系非法，拒绝启动" reason=bad_ordering expect="1000<=hysteresis<=10000, 20000<=start_temp<medium_up<high_up<=80000, 且四者均为无前导零的十进制" got="start=$START_TEMP medium_up=$MEDIUM_UP high_up=$HIGH_UP hysteresis=$HYSTERESIS" impact="风扇不受控"
+	exit 1
+fi
+derive_thresholds
+[ -w "$MODE" ] && [ -w "$PWM" ] && [ -w "$PWM_ENABLE" ] || { log_event ERROR fan.iface "风扇控制接口不可写，拒绝启动" reason=iface_unwritable mode="$MODE" pwm="$PWM" pwm_enable="$PWM_ENABLE" impact="风扇不受控"; exit 1; }
+
+# "HH:MM" -> 当天分钟数。逐位裁前导零，不用 $((10#$x))：那是 bash 扩展，
+# busybox ash 会把 08/09 当非法八进制直接报错。
+hhmm_to_min() {
+	local raw="$1" h m
+	case "$raw" in
+		[0-9][0-9]:[0-9][0-9]) ;;
+		*) return 1 ;;
+	esac
+	h="${raw%%:*}"; m="${raw##*:}"
+	h="${h#0}"; m="${m#0}"
+	h="${h:-0}"; m="${m:-0}"
+	[ "$h" -le 23 ] && [ "$m" -le 59 ] || return 1
+	printf '%s' $((h * 60 + m))
+}
+
+# 夜间配置每轮重读，不在启动时缓存：切换开关不该重启服务，
+# 因为重启会走 set_stage 3 满速初始化，半夜切开关等于先吼一嗓子。
+in_night_window() {
+	local start end h m
+	NIGHT_REASON=''; NIGHT_NOW=''; NIGHT_START_MIN=''; NIGHT_END_MIN=''; NIGHT_WRAP=''
+	NIGHT_START_RAW="$(cfg night_start)"; NIGHT_END_RAW="$(cfg night_end)"
+	[ "$(cfg night_enabled)" = 1 ] || { NIGHT_REASON=disabled; return 1; }
+	start="$(hhmm_to_min "$NIGHT_START_RAW")" || { NIGHT_REASON=bad_start; return 1; }
+	end="$(hhmm_to_min "$NIGHT_END_RAW")" || { NIGHT_REASON=bad_end; return 1; }
+	[ "$start" != "$end" ] || { NIGHT_REASON=start_equals_end; return 1; }
+	h="$(date +%H)"; m="$(date +%M)"
+	h="${h#0}"; m="${m#0}"
+	NIGHT_NOW=$(( ${h:-0} * 60 + ${m:-0} ))
+	NIGHT_START_MIN="$start"; NIGHT_END_MIN="$end"
+	if [ "$start" -lt "$end" ]; then
+		NIGHT_WRAP=0
+		if [ "$NIGHT_NOW" -ge "$start" ] && [ "$NIGHT_NOW" -lt "$end" ]; then NIGHT_REASON=in_window; return 0; fi
+	else
+		# 跨零点窗口，例如 23:00 -> 07:00
+		NIGHT_WRAP=1
+		if [ "$NIGHT_NOW" -ge "$start" ] || [ "$NIGHT_NOW" -lt "$end" ]; then NIGHT_REASON=in_window; return 0; fi
+	fi
+	NIGHT_REASON=out_of_window
+	return 1
+}
+
+# 结果放全局 NIGHT_OVERRIDE，不用 printf + $(...) 回传：命令替换开子 shell，
+# 里面设的"已记录"标志出不来，非法值就会每轮刷一条日志。阈值遇到非法值是拒启+ERROR，
+# 这里只能降级——夜间限速失效不该让整机没风扇——但必须留痕，否则页面显示 55°C、
+# 实际按内建 55°C 跑还好，页面显示别的值时两边对不上却查不出原因。
+night_override_temp() {
+	NIGHT_OVERRIDE="$(cfg night_override)"
+	if is_num "$NIGHT_OVERRIDE"; then
+		night_override_bad_logged=0
+		return 0
+	fi
+	[ "$night_override_bad_logged" = 1 ] || {
+		log_event WARN night.override "夜间解除限速温度非法，按内建默认 55°C 运行" reason=not_a_number got="${NIGHT_OVERRIDE:-empty}" fallback=55000 impact="夜间限速的解除点以 55°C 为准，与页面显示可能不一致"
+		night_override_bad_logged=1
+	}
+	NIGHT_OVERRIDE=55000
+}
+
+publish_night() {
+	printf '%s' "$1" > "$NIGHT_STATE" 2>/dev/null || true
+}
+
+# 当前温度"应得"的档位 = 按降档阈值分类出的最大稳态档：结果代回回差状态机一轮不变
+# （不动点，首轮零伪切换），且永远不低于重启前的真实档位（真实档位必是稳态之一，这里取最大）。
+# 用途：启动初始化、夜间窗口结束时的重算。禁止改回升档阈值分类——那会让 39–45°C 的重启
+# 绕过 high_down 门槛把高速归成中速（2026-08-13 持久化日志里 11 次伪降档全是这么来的）。
+# 边界必须用 -gt：写成 -ge 后 temp==high_down 判 3，下一轮立刻被 <= 降回 2，凭空多一次切换。
+classify_stage() {
+	local t="$1"
+	if ! is_num "$t"; then
+		printf 3
+	elif [ "$t" -gt "$HIGH_DOWN" ]; then
+		printf 3
+	elif [ "$t" -gt "$MEDIUM_DOWN" ]; then
+		printf 2
+	elif [ "$t" -gt "$STOP_TEMP" ]; then
+		printf 1
+	else
+		printf 0
+	fi
+}
+
+set_stage() {
+	local pwm
+	case "$1" in
+		# 树莓派 5 是正相驱动：pwm1 越大风扇越快，0 就是停转（与 R3 Mini 相反）。
+		# 75/150/255 对应低/中/满速（实测 75 约 2000 rpm）。
+		0) pwm=0   ;; # stop
+		1) pwm=75  ;; # low
+		2) pwm=150 ;; # medium
+		3) pwm=255 ;; # high
+		*) pwm=255 ;; # 兜底取满速
+	esac
+	echo 1 > "$PWM_ENABLE" && echo "$pwm" > "$PWM" || return 1
+	[ "$(cat "$PWM" 2>/dev/null)" = "$pwm" ]
+}
+
+restore_kernel() {
+	echo enabled > "$MODE" 2>/dev/null || return 1
+	[ "$(cat "$MODE" 2>/dev/null)" = enabled ]
+}
+
+echo disabled > "$MODE" || exit 1
+cleanup() {
+	rm -f "$NIGHT_STATE" 2>/dev/null || true
+	restore_kernel || log_event ERROR fan.shutdown "退出时回写内核温控失败" reason=restore_failed mode_file="$MODE" impact="内核温控可能仍处于 disabled，风扇无人接管"
+}
+trap 'cleanup; exit 0' INT TERM
+
+# 启动档位 = classify_stage 的最大稳态，不再无条件先满速：旧行为（先满速 + 首轮按升档
+# 阈值分类）让每次部署/保存配置的重启先吼一嗓子，再把 39–45°C 区间的高速绕过 high_down
+# 归成中速——用户在 41.8°C 看到"中速"、日志里 11 次重启后秒降档，全是这条路径造成的。
+temp="$(cat "$SENSOR" 2>/dev/null)"
+stage="$(classify_stage "$temp")"
+night_now=0
+in_night_window && night_now=1
+if [ "$night_now" = 1 ] && [ "$stage" -gt 2 ]; then
+	# 夜里重启也不许吼：封顶与主循环同一套规则（含安全阀）。is_num 守卫照抄主循环——
+	# 空温度直接进 [ ] 会往 stderr 喷错，procd 又把 stderr 转进 syslog。
+	night_override_temp
+	if is_num "$temp" && [ "$temp" -lt "$NIGHT_OVERRIDE" ]; then
+		stage=2
+	fi
+fi
+if ! set_stage "$stage"; then
+	# 失败链与主循环对齐：先抢满速，满速也失败再回落内核温控
+	if [ "$stage" != 3 ] && set_stage 3; then
+		log_event ERROR fan.init "初始档位写入失败，已确认切到满速" reason=pwm_write_failed target="$stage" fallback=full_speed_confirmed impact="控制器退出，档位固定满速"
+	elif restore_kernel; then
+		log_event ERROR fan.init "初始档位写入失败，已确认回落内核温控" reason=pwm_write_failed target="$stage" fallback=kernel_confirmed impact="用户态温控未启动"
+	else
+		log_event ERROR fan.init "初始档位与满速、内核回落均失败" reason=pwm_write_failed target="$stage" fallback=unconfirmed impact="风扇可能完全无人接管，需现场检查"
+	fi
+	exit 1
+fi
+# 无条件求一次：fan.start 那行要如实记录本次运行采用的解除限速温度。改成全局变量后
+# 它只在"夜间窗口内且档位>中速"的分支里被调用，夜间关闭时就没人赋值，日志里会留下
+# 空的 night_override=（2026-08-20 实测踩过）。顺带把非法值的 WARN 提前到启动时暴露，
+# 不必等到某个半夜才发现页面上那个数根本没生效。
+night_override_temp
+log_event INFO fan.start "控制器启动" temp="${temp:-na}" stage="$stage" night="$night_now" log="$LOGFILE" interval="$INTERVAL" start="$START_TEMP" medium_up="$MEDIUM_UP" high_up="$HIGH_UP" hysteresis="$HYSTERESIS" derived_stop="$STOP_TEMP" derived_medium_down="$MEDIUM_DOWN" derived_high_down="$HIGH_DOWN" night_enabled="$(cfg night_enabled)" night_start="$(cfg night_start)" night_end="$(cfg night_end)" night_override="$NIGHT_OVERRIDE" state_file="$NIGHT_STATE"
+
+# night_active 刻意留空：首轮循环必产生一条 night.window 日志，把窗口判定现场留档
+night_active=''
+night_override_logged=0
+publish_night "$night_now"
+while :; do
+	temp="$(cat "$SENSOR" 2>/dev/null)"
+	if ! is_num "$temp"; then
+		new=3
+	else
+		new="$stage"
+		case "$stage" in
+			0) if [ "$temp" -ge "$HIGH_UP" ]; then new=3; elif [ "$temp" -ge "$MEDIUM_UP" ]; then new=2; elif [ "$temp" -ge "$START_TEMP" ]; then new=1; fi ;;
+			1) if [ "$temp" -ge "$HIGH_UP" ]; then new=3; elif [ "$temp" -ge "$MEDIUM_UP" ]; then new=2; elif [ "$temp" -le "$STOP_TEMP" ]; then new=0; fi ;;
+			2) if [ "$temp" -ge "$HIGH_UP" ]; then new=3; elif [ "$temp" -le "$MEDIUM_DOWN" ]; then new=1; fi ;;
+			3) if [ "$temp" -le "$HIGH_DOWN" ]; then new=2; fi ;;
+			*) new=3 ;;
+		esac
+	fi
+	# 夜间限速：叠在自动回差之上，最高只到中速(2)。
+	# 两种情况不压制：传感器读数无效（上面已按 new=3 保护），或温度已越过安全阀。
+	night_now=0
+	in_night_window && night_now=1
+	if [ "$night_now" = 1 ] && [ "$new" -gt 2 ]; then
+		night_override_temp
+		if is_num "$temp" && [ "$temp" -lt "$NIGHT_OVERRIDE" ]; then
+			new=2
+			night_override_logged=0
+		elif [ "$night_override_logged" = 0 ]; then
+			log_event WARN night.bypass "温度越过安全阀，夜间限速让路" expect="temp < $NIGHT_OVERRIDE" got="${temp:-na}" matched=false impact="本轮允许升到高速"
+			night_override_logged=1
+		fi
+	else
+		night_override_logged=0
+	fi
+	if [ "$night_now" != "$night_active" ]; then
+		# 窗口下降沿必须重算档位：封顶留下的中速在回差状态机里是合法稳态，不重算就会
+		# 锁在中速直到摸 high_up（07:00 后 43°C 仍中速一整天）。
+		# 启动首轮的 ''->0 也会走这里（night_active 初值刻意留空，为的是首轮必留一条
+		# night.window 日志）。此前这行注释写的是"重算结果 == 原值，无副作用"——**那是错的**，
+		# 2026-08-20 黑盒验收实测 6 组里 3 组不等：classify 取的是最大稳态，step 走的是
+		# 单步迁移，只要启动读数与首轮读数跨了边界两者就会分叉（例：30°C 启动、首轮读到
+		# 39°C，step 给中速、classify 给高速）。方向恒为"不低于"，属于本函数"永不低估档位"
+		# 的既定语义，安全；但它确实每次启动都可能改写一次首轮档位，不是无副作用。
+		[ "$night_now" = 0 ] && new="$(classify_stage "$temp")"
+		log_event INFO night.window "夜间窗口状态变化" matched="$night_now" reason="$NIGHT_REASON" clock="$(date '+%H:%M')" now_min="${NIGHT_NOW:-na}" start_min="${NIGHT_START_MIN:-na}" end_min="${NIGHT_END_MIN:-na}" wrap="${NIGHT_WRAP:-na}" cfg_start="${NIGHT_START_RAW:-na}" cfg_end="${NIGHT_END_RAW:-na}" temp="${temp:-na}" stage="$stage" impact="$([ "$night_now" = 1 ] && printf %s '档位上限=中速' || printf %s '档位上限=解除')"
+		night_active="$night_now"
+		publish_night "$night_now"
+	fi
+	if [ "$new" != "$stage" ]; then
+		if set_stage "$new"; then
+			log_event INFO fan.stage "档位切换" temp="$temp" from="$stage" to="$new" night="$night_now" reason="${NIGHT_REASON:-na}"
+			stage="$new"
+		else
+			if set_stage 3; then
+				log_event ERROR fan.write "档位写入失败，已确认切到满速" reason=pwm_write_failed target="$new" fallback=full_speed_confirmed impact="控制器退出，档位固定满速"
+			else
+				if restore_kernel; then
+					log_event ERROR fan.write "档位与满速写入均失败，已确认回落内核温控" reason=pwm_write_failed target="$new" fallback=kernel_confirmed impact="控制器退出"
+				else
+					log_event ERROR fan.write "档位、满速、内核回落三者均失败" reason=pwm_write_failed target="$new" fallback=unconfirmed impact="风扇可能完全无人接管，需现场检查"
+				fi
+			fi
+			exit 1
+		fi
+	fi
+	sleep "$INTERVAL"
+done
