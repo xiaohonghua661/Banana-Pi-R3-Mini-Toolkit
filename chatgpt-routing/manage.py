@@ -641,7 +641,8 @@ for p in /tmp/luci-indexcache.*.json; do [ ! -f "$p" ] || { printf '@@INDEX\\n';
                 for scope, objects in spec.get(mode, {}).items():
                     pairs = [[p, f] for p, functions in objects.items() for f in functions]
                     ubus("grant", {"ubus_rpc_session": session, "scope": scope, "objects": pairs})
-        for command, allowed in ((CLI + " status", True), (CLI + " apply source.yaml " + "a" * 16, True),
+        for command, allowed in ((CLI + " summary", True), (CLI + " nodes source.yaml site:example.com", True),
+                                 (CLI + " status", True), (CLI + " apply source.yaml " + "a" * 16, True),
                                  (CLI + " benchmark source.yaml", True), (CLI + " benchmark-status source.yaml", True),
                                  (CLI + " save {}", True), (CLI + " remove " + "a" * 12, True),
                                  (CLI + " set-enabled " + "a" * 12 + " 0", True),
@@ -651,7 +652,8 @@ for p in /tmp/luci-indexcache.*.json; do [ ! -f "$p" ] || { printf '@@INDEX\\n';
             access = ubus("access", {"ubus_rpc_session": session, "scope": "file", "object": command, "function": "exec"})
             if bool(access.get("access")) != allowed:
                 fail("LUCI_ACL_SCOPE_MISMATCH")
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "call", "params": [session, "file", "exec", {"command": CLI, "params": ["status"]}]}
+        # The page's own first read, through rpcd with only the module's grants.
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "call", "params": [session, "file", "exec", {"command": CLI, "params": ["summary"]}]}
         result = json.loads(text(client, "curl -fsS --max-time 30 http://127.0.0.1/ubus -H 'Content-Type: application/json' --data-binary @-", data=json.dumps(payload).encode()))
         values = result.get("result", [])
         if len(values) != 2 or values[0] != 0 or values[1].get("code") != 0:

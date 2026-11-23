@@ -2,54 +2,54 @@
 'require view';
 'require fs';
 'require poll';
+'require ui';
 
 var CLI = '/usr/sbin/r3mini-chatgpt';
 var DEFAULT_SOURCE = 'lian_li.yaml';
 var CHATGPT_DOMAINS = ['chatgpt.com', 'openai.com', 'oaistatic.com', 'oaiusercontent.com', 'chatgpt.livekit.cloud'];
-var COUNTRY_NAMES = { JP: '日本', US: '美国', SG: '新加坡', TW: '台湾', HK: '香港', KR: '韩国', GB: '英国', DE: '德国',
-	FR: '法国', AU: '澳大利亚', CA: '加拿大', NL: '荷兰', IN: '印度', ES: '西班牙', IT: '意大利', CH: '瑞士',
-	SE: '瑞典', FI: '芬兰', IE: '爱尔兰', NO: '挪威', NZ: '新西兰', BR: '巴西' };
-var BENCH_ERRORS = { UNSUPPORTED_REGION: '地区不支持', REGION_CHANGED: '三轮地区不一致', SOURCE_CHANGED: '配置已更新，请重新测速',
-	BENCH_INTERRUPTED: '测速已中断，请重试', CORE_MISSING: '测速暂不可用', CORE_START_FAILED: '测速启动失败',
-	CORE_NOT_READY: '测速服务尚未就绪', TLS_FAILED: '连接失败', TRACE_FAILED: '地区验证失败', API_UNAVAILABLE: '服务连接失败',
-	PROBE_FAILED: '连接失败' };
+// The router adds these to every ChatGPT preset rule (DOMAINS in r3mini-chatgpt.rb); used for the overlap hint only.
+var PRESET_BUILTIN = CHATGPT_DOMAINS.concat(['openaiapi-site.azureedge.net', 'openaicom.imgix.net',
+	'chat.openai.com.cdn.cloudflare.net', 'openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net', 'openai-api.arkoselabs.com',
+	'production-openaicom-storage.azureedge.net']);
+// The page reads the light `summary` every 30 s while visible and idle; an open node picker
+// reads `nodes` every 3 s only while a benchmark runs. Nothing polls behind a hidden tab or a dialog.
+var IDLE_POLL = 30, FRESH_MS = 5000, BENCH_POLL_MS = 3000, TARGET_DELAY_MS = 600;
+// The backend accepts at most 64 node ids per run; a full sweep measured about 2.5 s per node.
+var BENCH_MAX_IDS = 64, SECONDS_PER_NODE = 2.5;
+// settings.json validation (and therefore rollback to an older backend) caps a name at 160 UTF-8 bytes.
+var LABEL_BYTES = 160;
+var REGION_NAMES = { HK: '香港', TW: '台湾', JP: '日本', SG: '新加坡', US: '美国', KR: '韩国', GB: '英国', DE: '德国',
+	FR: '法国', AU: '澳大利亚', CA: '加拿大', NL: '荷兰', IN: '印度', ES: '西班牙', IT: '意大利', CH: '瑞士', SE: '瑞典',
+	FI: '芬兰', IE: '爱尔兰', NO: '挪威', NZ: '新西兰', BR: '巴西', TR: '土耳其', RU: '俄罗斯', MY: '马来西亚', TH: '泰国',
+	VN: '越南', PH: '菲律宾', ID: '印尼', AR: '阿根廷', MO: '澳门', AE: '阿联酋', CN: '中国', '?': '其他' };
+// Words win over the flag: some subscriptions put another flag on Taiwan nodes. Longer words first.
+var REGION_WORDS = [['香港', 'HK'], ['台湾', 'TW'], ['臺灣', 'TW'], ['日本', 'JP'], ['东京', 'JP'], ['大阪', 'JP'],
+	['新加坡', 'SG'], ['狮城', 'SG'], ['美国', 'US'], ['洛杉矶', 'US'], ['硅谷', 'US'], ['韩国', 'KR'], ['首尔', 'KR'],
+	['英国', 'GB'], ['伦敦', 'GB'], ['德国', 'DE'], ['法国', 'FR'], ['加拿大', 'CA'], ['澳大利亚', 'AU'], ['澳洲', 'AU'],
+	['荷兰', 'NL'], ['印度尼西亚', 'ID'], ['印尼', 'ID'], ['印度', 'IN'], ['土耳其', 'TR'], ['俄罗斯', 'RU'],
+	['马来西亚', 'MY'], ['泰国', 'TH'], ['越南', 'VN'], ['菲律宾', 'PH'], ['阿根廷', 'AR'], ['澳门', 'MO']];
+// Verdicts about the node itself (VERDICT_ERRORS in the backend); other errors say nothing about it.
+var VERDICTS = ['UNSUPPORTED_REGION', 'REGION_CHANGED', 'TLS_FAILED', 'TRACE_FAILED', 'API_UNAVAILABLE', 'SITE_FAILED', 'NODE_DEPENDENCY'];
+var BENCH_ERRORS = { UNSUPPORTED_REGION: '地区不支持', REGION_CHANGED: '三轮地区不一致', SOURCE_CHANGED: '订阅已更新，请重新测速',
+	BENCH_INTERRUPTED: '测速中断，请重测', CORE_MISSING: '测速暂不可用', CORE_START_FAILED: '测速启动失败',
+	CORE_NOT_READY: '测速服务未就绪', TLS_FAILED: '连接失败', TRACE_FAILED: '地区验证失败', API_UNAVAILABLE: '服务连接失败',
+	SITE_FAILED: '网站打不开', PROBE_FAILED: '连接失败', NODE_DEPENDENCY: '依赖其他代理，不能单独使用',
+	BENCH_BUSY: '另一个测速正在进行，请稍后再试', NODE_MISSING: '节点已不在订阅里' };
+var RULE_ERRORS = { NODE_MISSING: '节点已不在订阅里，请换节点。', NODE_CHANGED: '节点参数变了，请重新测速或换节点。',
+	BENCHMARK_REQUIRED: '节点验证已失效，请重新测速或换节点。', NODE_DEPENDENCY: '节点依赖其他代理，请换节点。',
+	SOURCE_MISSING: '订阅文件不在了，请换节点。', SOURCE_INVALID: '订阅文件名无效，请换节点。',
+	SOURCE_YAML_INVALID: '订阅文件无法解析。', SOURCE_NODES_INVALID: '订阅里的节点列表无效。',
+	STATE_MISMATCH: '运行配置与设置不一致，可再保存一次或恢复原分流。',
+	CONTROLLER_UNAVAILABLE: '读不到 OpenClash 控制接口，OpenClash 可能没在运行。',
+	RUNTIME_MISSING: '没找到 OpenClash 运行配置。', ROUTING_MODE_UNSUPPORTED: 'OpenClash 不是规则模式，分流无法生效。' };
 var STEAM_HINT = 'Steam 联机（Valve 服务器和中继 IP）、登录接口、下载走直连，不经过代理节点；商店和社区网页不变。';
+var ORDER = { ok: 0, untested: 1, failed: 2, blocked: 3 };
 
-function steamOf(st) {
-	var steam = st && st.steam_direct;
-	return steam && typeof steam.enabled === 'boolean' && typeof steam.applied === 'boolean' ? steam : null;
+function has(map, key) {
+	return Object.prototype.hasOwnProperty.call(map, key);
 }
 
-function steamState(steam) {
-	if (!steam) return { text: '状态待确认', cls: 'bad' };
-	if (steam.enabled && steam.applied) return { text: '已生效', cls: 'ok' };
-	if (steam.enabled) return { text: '开启了但配置里没找到——重新打开一次', cls: 'bad' };
-	return { text: '未生效', cls: '' };
-}
-
-function countryName(country) {
-	return typeof country === 'string' && /^[A-Z]{2}$/.test(country) ? COUNTRY_NAMES[country] || country : '地区未确认';
-}
-
-function measured(node) {
-	return node && Array.isArray(node.samples_ms) && node.samples_ms.length === 3 && node.samples_ms.every(function(n) {
-		return typeof n === 'number' && isFinite(n) && n > 0;
-	}) && typeof node.median_ms === 'number' && isFinite(node.median_ms) && node.median_ms > 0 && /^[A-Z]{2}$/.test(node.country || '');
-}
-
-function eligible(node) {
-	return !!(node && node.eligible === true && measured(node));
-}
-
-function latency(ms) {
-	return typeof ms === 'number' && isFinite(ms) && ms > 0 ? Math.round(ms) + ' ms' : '—';
-}
-
-function benchmarkError(error) {
-	return Object.prototype.hasOwnProperty.call(BENCH_ERRORS, error) ? BENCH_ERRORS[error] : '测速未通过，请重试。';
-}
-
-// 网站名、节点名、域名都按文本插入，禁止作为 HTML 解释。
+// 网站名、节点名、域名都按文本插入，禁止作为 HTML 解释（LuCI 的 E() 会把字符串子节点当 HTML）。
 function el(tag, attrs, children) {
 	var node = document.createElement(tag);
 	Object.keys(attrs || {}).forEach(function(k) {
@@ -71,39 +71,55 @@ function clear(node) {
 	return node;
 }
 
+function setState(node, state) {
+	var cls = 'r3cg-state ' + state.cls;
+	if (node.textContent === state.text && node.className === cls) return;
+	clear(node).appendChild(el('span', { 'class': 'r3cg-dot', 'aria-hidden': 'true' }));
+	node.appendChild(document.createTextNode(state.text));
+	node.className = cls;
+}
+
 function parseResult(res) {
 	var data;
 	try { data = JSON.parse(res && res.stdout || ''); }
 	catch (e) {
 		throw new Error(res && res.code !== 0 ? '操作失败，请刷新后重试。' : '返回内容无法读取，请刷新后重试。');
 	}
-	if (!res || res.code !== 0 || !data || data.ok !== true)
-		throw new Error(data && typeof data.message === 'string' && data.message || '操作失败，请刷新后重试。');
+	if (!res || res.code !== 0 || !data || data.ok !== true) {
+		var error = new Error(data && typeof data.message === 'string' && data.message || '操作失败，请刷新后重试。');
+		error.token = data && typeof data.error === 'string' ? data.error : '';
+		throw error;
+	}
 	return data;
 }
 
+function permissionDenied(e) {
+	return /permission|access denied|拒绝/i.test(e && e.message || '');
+}
+
 function errorText(e) {
+	if (permissionDenied(e)) return '当前会话没有操作权限，请退出 LuCI 后重新登录。';
 	var msg = e && e.message || '';
-	if (/permission|access denied|拒绝/i.test(msg))
-		return '当前会话没有操作权限，请退出 LuCI 后重新登录。';
-	return /[\u3400-\u9fff]/.test(msg) ? msg : '无法读取路由器响应，请检查连接后刷新。';
+	return /[㐀-鿿]/.test(msg) ? msg : '无法读取路由器响应，请检查连接后刷新。';
 }
 
 function statusErrorText(st) {
 	if (!st || !st.error) return '';
-	if (typeof st.message === 'string' && /[\u3400-\u9fff]/.test(st.message)) return st.message;
-	if (typeof st.error === 'string' && /[\u3400-\u9fff]/.test(st.error)) return st.error;
+	if (has(RULE_ERRORS, st.error)) return RULE_ERRORS[st.error];
+	if (typeof st.message === 'string' && /[㐀-鿿]/.test(st.message)) return st.message;
 	return '分流状态异常，请刷新或恢复原分流。';
+}
+
+function ruleErrorText(token) {
+	return has(RULE_ERRORS, token) ? RULE_ERRORS[token] : '这条规则状态异常，请重新保存或换节点。';
+}
+
+function benchError(token) {
+	return has(BENCH_ERRORS, token) ? BENCH_ERRORS[token] : '测速未通过';
 }
 
 function isSource(s) {
 	return typeof s === 'string' && s.length > 0 && s.length <= 255 && !/[\/\\\x00-\x1f]/.test(s) && s !== '.' && s !== '..';
-}
-
-function nodesOf(nodes) {
-	return (Array.isArray(nodes) ? nodes : []).filter(function(n) {
-		return n && /^[a-f0-9]{16}$/.test(n.id) && typeof n.name === 'string' && n.name.length > 0;
-	});
 }
 
 function rulesOf(rules) {
@@ -112,65 +128,190 @@ function rulesOf(rules) {
 	});
 }
 
+function nodesOf(nodes) {
+	return (Array.isArray(nodes) ? nodes : []).filter(function(n) {
+		return n && /^[a-f0-9]{16}$/.test(n.id) && typeof n.name === 'string' && n.name.length > 0;
+	});
+}
+
 function titleOf(rule) {
 	return rule.label || rule.domains[0] || '未命名网站';
+}
+
+function shortDomains(domains) {
+	return domains.slice(0, 3).join('、') + (domains.length > 3 ? ' 等 ' + domains.length + ' 个' : '');
+}
+
+function utf8Length(text) {
+	var n = 0;
+	for (var i = 0; i < text.length; i++) {
+		var c = text.charCodeAt(i);
+		if (c < 0x80) n += 1;
+		else if (c < 0x800) n += 2;
+		else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+		else n += 3;
+	}
+	return n;
+}
+
+// Same rules as normalize_domain in r3mini-chatgpt.rb; the router stays authoritative.
+function normalizeDomain(value) {
+	if (typeof value !== 'string' || value.length > 2048) return null;
+	var v = value.trim().toLowerCase();
+	if (/^https?:\/\//.test(v)) v = v.replace(/^https?:\/\//, '').split(/[\/?#]/)[0];
+	v = v.replace(/^\*\./, '').replace(/\.$/, '');
+	var labels = v.split('.'), tld = labels[labels.length - 1];
+	if (v.length < 4 || v.length > 253 || labels.length < 2 || !/[a-z]/.test(tld) || tld.length < 2) return null;
+	return labels.every(function(l) { return l.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(l); }) ? v : null;
+}
+
+function flagCode(name) {
+	var cps = Array.from(String(name || '')).slice(0, 2).map(function(c) { return c.codePointAt(0); });
+	return cps.length === 2 && cps.every(function(c) { return c >= 0x1f1e6 && c <= 0x1f1ff; }) ?
+		String.fromCharCode(cps[0] - 0x1f1e6 + 65, cps[1] - 0x1f1e6 + 65) : '';
+}
+
+function regionOf(name) {
+	var text = String(name || '');
+	for (var i = 0; i < REGION_WORDS.length; i++)
+		if (text.indexOf(REGION_WORDS[i][0]) >= 0) return REGION_WORDS[i][1];
+	return flagCode(text);
+}
+
+// Windows draws a flag as two letters; the region tag already says where the node is.
+function displayName(name) {
+	var text = String(name || '');
+	return flagCode(text) ? Array.from(text).slice(2).join('').trim() || text : text;
+}
+
+function regionName(code) {
+	return has(REGION_NAMES, code) ? REGION_NAMES[code] : code || REGION_NAMES['?'];
+}
+
+function latency(ms) {
+	return typeof ms === 'number' && isFinite(ms) && ms > 0 ? Math.round(ms) + ' ms' : '';
+}
+
+function ago(iso, now) {
+	var seconds = (now - (typeof iso === 'string' ? Date.parse(iso) : NaN)) / 1000;
+	if (!isFinite(seconds)) return '';
+	if (seconds < 60) return '刚刚';
+	if (seconds < 3600) return Math.floor(seconds / 60) + ' 分钟前';
+	if (seconds < 86400) return Math.floor(seconds / 3600) + ' 小时前';
+	return Math.floor(seconds / 86400) + ' 天前';
+}
+
+function steamOf(st) {
+	var steam = st && st.steam_direct;
+	return steam && typeof steam.enabled === 'boolean' && typeof steam.applied === 'boolean' ? steam : null;
+}
+
+function steamState(steam) {
+	if (!steam) return { text: '状态待确认', cls: 'bad' };
+	if (steam.enabled && steam.applied) return { text: '已生效', cls: 'ok' };
+	if (steam.enabled) return { text: '开启了但配置里没找到——重新打开一次', cls: 'bad' };
+	return { text: '未生效', cls: '' };
 }
 
 function ruleState(rule, pending) {
 	if (pending) return { text: '待启动生效', cls: 'warn' };
 	if (rule.error || rule.enabled && !rule.applied || rule.applied && !rule.enabled) return { text: '异常', cls: 'bad' };
-	return rule.enabled ? { text: '已启用', cls: 'ok' } : { text: '已停用', cls: '' };
+	return rule.enabled ? { text: '已生效', cls: 'ok' } : { text: '已停用', cls: '' };
+}
+
+// ok: has current proof; untested: no verdict yet (or only an outdated one); failed: a verdict
+// against the node; blocked: the node cannot run alone (dialer-proxy).
+function nodeState(n) {
+	if (n.dependent || n.error === 'NODE_DEPENDENCY') return 'blocked';
+	if (n.eligible) return 'ok';
+	if (VERDICTS.indexOf(n.error) >= 0) return 'failed';
+	if (!n.error && !n.stale && n.samples_ms.length) return 'failed';
+	return 'untested';
+}
+
+function benchOf(b) {
+	b = b && typeof b === 'object' ? b : {};
+	return { running: b.running === true, done: Math.max(0, Number(b.done) || 0), total: Math.max(0, Number(b.total) || 0),
+		run_ids: Array.isArray(b.run_ids) ? b.run_ids : [], finished_at: b.finished_at,
+		error: typeof b.error === 'string' ? b.error : '' };
 }
 
 var CSS = [
-	'.r3cg{max-width:1080px;line-height:1.5}.r3cg *{box-sizing:border-box}',
-	'.r3cg-header,.r3cg-heading,.r3cg-actions{display:flex;align-items:center;flex-wrap:wrap;gap:.65rem}',
-	'.r3cg-header{justify-content:space-between;margin-bottom:1rem}.r3cg h2,.r3cg h3{margin:0}',
-	'.r3cg-intro{margin:0 0 1rem}.r3cg-state{display:inline-flex;align-items:center;gap:.4rem;font-size:.9em;font-weight:600}',
+	'.r3cg{max-width:1080px;line-height:1.5}.r3cg *,.r3cg-modal *{box-sizing:border-box}',
+	'.r3cg [hidden],.r3cg-modal [hidden]{display:none!important}',
+	'.r3cg-header,.r3cg-heading,.r3cg-actions,.r3cg-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem}',
+	'.r3cg-header{justify-content:space-between;margin-bottom:.75rem}.r3cg h2,.r3cg h3{margin:0}.r3cg-intro{margin:0 0 1rem}',
+	'.r3cg-state{display:inline-flex;align-items:center;gap:.4rem;font-size:.9em;font-weight:600}',
 	'.r3cg-dot{height:.6rem;width:.6rem;border-radius:50%;background:#707a83;flex:none}',
-	'.r3cg-state.ok .r3cg-dot{background:#24904e}.r3cg-state.bad .r3cg-dot{background:#c84343}',
-	'.r3cg-state.warn .r3cg-dot{background:#b07800}.r3cg-list{display:grid;gap:1rem;margin:1rem 0}',
-	'.r3cg-rule{border:1px solid #8885;border-radius:5px;padding:1rem;min-width:0}',
-	'.r3cg-rule-head{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:.5rem}',
-	'.r3cg-rule h3{font-size:1.05em;overflow-wrap:anywhere;min-width:0}',
-	'.r3cg-data,.r3cg-fields{display:grid;grid-template-columns:minmax(0,1fr);gap:1rem}',
-	'.r3cg-data{margin:.8rem 0}.r3cg-data dt{font-size:.9em;opacity:.75}',
-	'.r3cg-data dd{margin:.2rem 0 0;overflow-wrap:anywhere}.r3cg-field{min-width:0}',
-	'.r3cg-form{margin:1.25rem 0;padding:1rem;border:1px solid #8885;border-radius:5px}',
-	'.r3cg-form[hidden]{display:none}.r3cg-form h3{margin-bottom:1rem}',
-	'.r3cg-field label{display:block;font-weight:600;margin-bottom:.4rem}',
-	'.r3cg input,.r3cg textarea,.r3cg select{display:block;width:100%;max-width:100%;min-width:0;min-height:42px;font:inherit}',
-	'.r3cg textarea{resize:vertical;min-height:8rem}.r3cg-hint{font-size:.9em;opacity:.8;margin:.4rem 0 0;overflow-wrap:anywhere}',
-	'.r3cg-actions{margin-top:1rem}.r3cg button{min-height:42px;white-space:normal;max-width:100%}',
-	'.r3cg button:focus-visible,.r3cg input:focus-visible,.r3cg textarea:focus-visible,.r3cg select:focus-visible{outline:2px solid currentColor;outline-offset:3px}',
-	'.r3cg button:disabled,.r3cg input:disabled,.r3cg textarea:disabled,.r3cg select:disabled{cursor:default;opacity:.55}',
-	'.r3cg-message{margin:.8rem 0 0;padding:.7rem .85rem;border:1px solid #8885;border-radius:4px;overflow-wrap:anywhere}',
+	'.r3cg-state.ok .r3cg-dot{background:#24904e}.r3cg-state.bad .r3cg-dot{background:#c84343}.r3cg-state.warn .r3cg-dot{background:#b07800}',
+	'.r3cg-steam{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem 1rem;',
+	'border:1px solid #8885;border-radius:6px;padding:.75rem 1rem;margin:0 0 1rem}',
+	'.r3cg-steam-main{display:flex;align-items:center;gap:.75rem;min-width:0}.r3cg-steam .r3cg-hint{flex-basis:100%;margin:0}',
+	// A button, not a checkbox: argon forces every checkbox to a 1rem tick box with !important.
+	'.r3cg button.r3cg-switch{-webkit-appearance:none;appearance:none;position:relative;display:inline-block;flex:none;',
+	'width:2.75rem;min-width:2.75rem;height:1.5rem;min-height:0;margin:0;padding:0;border:0;border-radius:.75rem;',
+	'background:#8a939b;background-image:none;box-shadow:none;cursor:pointer;vertical-align:middle;transition:background-color .15s}',
+	'.r3cg button.r3cg-switch>span{position:absolute;top:.1875rem;left:.1875rem;width:1.125rem;height:1.125rem;border-radius:50%;',
+	'background:#fff;box-shadow:0 1px 2px #0005;transition:transform .15s}',
+	'.r3cg button.r3cg-switch.on{background:#24904e}.r3cg button.r3cg-switch.on>span{transform:translateX(1.25rem)}',
+	'.r3cg button.r3cg-switch:disabled{opacity:.5;cursor:default}.r3cg-switch-label{font-weight:600;font-size:1.05em;cursor:pointer}',
+	'.r3cg-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,19rem),1fr));gap:1rem;margin:1rem 0}',
+	'.r3cg-rule{display:flex;flex-direction:column;gap:.3rem;border:1px solid #8885;border-radius:6px;padding:.9rem 1rem;min-width:0}',
+	'.r3cg-rule.off{opacity:.8}.r3cg-rule-head{display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem}',
+	// argon draws every h3 as a padded white panel title with line-height:1.1 !important.
+	'.r3cg .r3cg-rule h3{display:block;width:auto;margin:0;padding:0;border:0;border-radius:0;background:none;box-shadow:none;',
+	'color:inherit;font-size:1.05em;font-weight:600;line-height:1.4!important;overflow-wrap:anywhere;min-width:0}',
+	'.r3cg-rule p{margin:0;overflow-wrap:anywhere}.r3cg-state{white-space:nowrap}',
+	'.r3cg-node{font-weight:600}.r3cg-domains,.r3cg-source{font-size:.9em;opacity:.8}',
+	'.r3cg-rule .r3cg-actions{margin-top:auto;padding-top:.5rem;gap:.5rem}',
+	'.r3cg-hint{font-size:.9em;opacity:.85;margin:.3rem 0 0;overflow-wrap:anywhere}.r3cg-hint:empty{display:none}',
+	'.r3cg .r3cg-hint.bad,.r3cg-modal .r3cg-hint.bad{color:#c84343;opacity:1}',
+	'.r3cg-message{margin:.75rem 0;padding:.6rem .85rem;border:1px solid #8885;border-left-width:4px;border-radius:4px;overflow-wrap:anywhere}',
 	'.r3cg-message.bad{border-color:#c84343}.r3cg-message.ok{border-color:#24904e}.r3cg-message.warn{border-color:#b07800}',
 	'.r3cg-message:empty{display:none}.r3cg-note,.r3cg-empty{font-size:.9em;opacity:.8;margin:1rem 0;overflow-wrap:anywhere}',
-	'.r3cg-field.full{grid-column:1/-1}',
-	'.r3cg-benchmark{grid-column:1/-1;min-width:0}.r3cg-benchmark progress{display:block;width:100%;height:12px;margin:.6rem 0}',
-	'.r3cg-benchmark summary{cursor:pointer;margin-top:.75rem}.r3cg-bench-list{list-style:none;padding:0;margin:.5rem 0}',
-	'.r3cg-bench-list li{padding:.6rem 0;border-bottom:1px solid #8884;overflow-wrap:anywhere}',
-	'.r3cg-bench-list strong{font-weight:600}.r3cg-bench-list p{margin:.2rem 0;font-size:.9em;opacity:.85}',
-	'.r3cg-steam{border:1px solid #8885;border-radius:5px;padding:1rem;margin:0 0 1rem;min-width:0}',
-	'.r3cg-steam-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem}',
-	'.r3cg-toggle{display:inline-flex;align-items:center;gap:.6rem;min-height:42px;font-weight:600;font-size:1.05em;cursor:pointer}',
-	'.r3cg input.r3cg-switch{-webkit-appearance:none;appearance:none;position:relative;display:inline-block;flex:none;',
-	'width:2.6em;min-width:2.6em;height:1.45em;min-height:0;margin:0;padding:0;border:0;border-radius:.725em;',
-	'background:#707a83;box-shadow:none;vertical-align:middle;cursor:pointer;transition:background .15s}',
-	'.r3cg input.r3cg-switch::after{content:"";position:absolute;top:.2em;left:.2em;width:1.05em;height:1.05em;',
-	'border-radius:50%;background:#fff;transition:transform .15s}',
-	'.r3cg input.r3cg-switch:checked{background:#24904e}.r3cg input.r3cg-switch:checked::after{transform:translateX(1.15em)}',
-	'.r3cg input.r3cg-switch:disabled{cursor:default}.r3cg-steam .r3cg-hint{margin:.5rem 0 0}',
-	'@media(prefers-reduced-motion:reduce){.r3cg input.r3cg-switch,.r3cg input.r3cg-switch::after{transition:none}}',
-	'@media(min-width:700px){.r3cg-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.r3cg-data{grid-template-columns:2fr 1fr 1fr}}',
-	'@media(max-width:420px){.r3cg-header{align-items:flex-start}.r3cg-form>.r3cg-actions{display:grid;grid-template-columns:minmax(0,1fr)}',
-	'.r3cg-form>.r3cg-actions button{width:100%}.r3cg-rule .r3cg-actions{gap:.5rem}.r3cg-rule .r3cg-actions button{flex:1 1 auto}}'
+	'.r3cg-footer{display:flex;align-items:center;flex-wrap:wrap;gap:.75rem;margin-top:1.5rem;padding-top:1rem;border-top:1px solid #8884}',
+	'.r3cg-footer .r3cg-note{margin:0;flex:1 1 16rem}',
+	'.r3cg button:focus-visible,.r3cg-modal button:focus-visible,.r3cg-modal input:focus-visible,.r3cg-modal textarea:focus-visible,',
+	'.r3cg-modal select:focus-visible{outline:2px solid currentColor;outline-offset:2px}',
+	'.modal.r3cg-modal{width:96%;max-width:46rem;margin:2rem auto;align-items:stretch}',
+	'.r3cg-dialog{display:flex;flex-direction:column;gap:.75rem;min-width:0;line-height:1.5}.r3cg-dialog p{margin:0}',
+	'.r3cg-fields{display:grid;grid-template-columns:minmax(0,1fr);gap:.75rem}.r3cg-field{min-width:0}',
+	'.r3cg-modal label{display:block;font-weight:600;margin-bottom:.3rem}',
+	'.r3cg-modal input[type=text],.r3cg-modal input[type=search],.r3cg-modal textarea,.r3cg-modal select{display:block;width:100%;max-width:100%;min-width:0}',
+	'.r3cg-modal textarea{min-height:5.5rem;resize:vertical}',
+	'.r3cg-picker{display:flex;flex-direction:column;gap:.5rem;min-width:0}',
+	'.r3cg-picker-head{display:grid;grid-template-columns:minmax(0,1fr);gap:.5rem}',
+	'.r3cg-chips{display:flex;flex-wrap:wrap;gap:.35rem}',
+	'.r3cg-modal button.r3cg-chip{-webkit-appearance:none;appearance:none;margin:0;padding:.15rem .65rem;min-height:1.9rem;height:auto;',
+	'border:1px solid #8886;border-radius:999px;background:transparent;background-image:none;color:inherit;font:inherit;',
+	'font-size:.9em;line-height:1.4;box-shadow:none;cursor:pointer}',
+	'.r3cg-modal button.r3cg-chip[aria-pressed=true]{background:#24904e;border-color:#24904e;color:#fff}',
+	'.r3cg-nodes{max-height:min(46vh,24rem);overflow-y:auto;border:1px solid #8885;border-radius:6px}',
+	'.r3cg-modal button.r3cg-row{-webkit-appearance:none;appearance:none;display:grid;grid-template-columns:3.5rem minmax(0,1fr) auto;',
+	'grid-template-areas:"region name result" "region type result";align-items:center;column-gap:.6rem;width:100%;',
+	'margin:0;padding:.45rem .7rem;min-height:0;height:auto;border:0;border-bottom:1px solid #8883;border-radius:0;',
+	'background:transparent;background-image:none;box-shadow:none;color:inherit;font:inherit;line-height:1.4;',
+	'text-align:left;text-transform:none;letter-spacing:normal;cursor:pointer}',
+	'.r3cg-modal button.r3cg-row:last-child{border-bottom:0}.r3cg-modal button.r3cg-row:hover{background:#8881}',
+	'.r3cg-modal button.r3cg-row.picked{background:#24904e22;box-shadow:inset 4px 0 0 #24904e}',
+	'.r3cg-modal button.r3cg-row:disabled{cursor:default;opacity:.55}',
+	'.r3cg-region{grid-area:region;font-size:.85em;opacity:.8}.r3cg-name{grid-area:name;font-weight:600;overflow-wrap:anywhere;min-width:0}',
+	'.r3cg-type{grid-area:type;font-size:.8em;opacity:.65}.r3cg-result{grid-area:result;font-size:.9em;text-align:right;white-space:nowrap}',
+	'.r3cg-row.ok .r3cg-result{color:#24904e;font-weight:600}.r3cg-row.failed .r3cg-result,.r3cg-row.blocked .r3cg-result{color:#c84343}',
+	'.r3cg-modal progress{display:block;width:100%;height:.5rem}.r3cg-picked{font-weight:600;overflow-wrap:anywhere}',
+	'.r3cg-picker>.cbi-button{align-self:flex-start}',
+	'.r3cg-modal .right{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:.5rem}',
+	'@media(min-width:36rem){.r3cg-picker-head{grid-template-columns:minmax(0,1fr) minmax(0,1.4fr)}}',
+	// Phones: the name already says the region, so its column goes and the result stays on the right.
+	'@media(max-width:30rem){.r3cg-modal button.r3cg-row{grid-template-columns:minmax(0,1fr) auto;',
+	'grid-template-areas:"name result" "type result"}.r3cg-region{display:none}',
+	'.r3cg-rule .r3cg-actions button{flex:1 1 auto}.modal.r3cg-modal{margin:.5rem auto;width:98%}}',
+	'@media(prefers-reduced-motion:reduce){.r3cg button.r3cg-switch,.r3cg button.r3cg-switch>span{transition:none}}'
 ].join('');
 
 return view.extend({
 	load: function() {
-		return fs.exec(CLI, ['status']).then(parseResult).then(function(st) { return { status: st }; })
+		return fs.exec(CLI, ['summary']).then(parseResult).then(function(st) { return { status: st }; })
 			.catch(function(e) { return { error: errorText(e) }; });
 	},
 
@@ -178,65 +319,59 @@ return view.extend({
 	handleSave: null,
 	handleReset: null,
 
+	now: function() { return Date.now(); },
+	later: function(fn, ms) { return setTimeout(fn, ms); },
+	cancel: function(id) { clearTimeout(id); },
+
 	render: function(data) {
 		var self = this;
 		this.status = null;
 		this.statusError = data.error || '';
-		this.source = '';
-		this.selected = '';
-		this.label = '';
-		this.domainsText = '';
-		this.preset = '';
-		this.editId = '';
-		this.sources = [];
-		this.nodes = [];
 		this.rules = [];
-		this.nodesSource = '';
-		this.benchmark = null;
-		this.benchmarkStarting = Object.create(null);
-		this.benchmarkNotice = '';
-		this.benchChecked = Object.create(null);
-		this.readSerial = 0;
+		this.sources = [];
+		this.mutating = false;
+		this.busyId = '';
 		this.reading = false;
 		this.foreground = false;
-		this.mutating = false;
-		this.formOpen = false;
+		this.readSerial = 0;
+		this.lastRead = 0;
 		this.notice = '';
 		this.noticeTone = '';
-		this.dirty = false;
+		this.dlg = null;
+		this.steamTarget = false;
+		this.steamOn = false;
 		this.ruleButtons = [];
 		this.root = el('div', { 'class': 'r3cg' }, el('style', {}, CSS));
 		this.badge = el('span', { 'class': 'r3cg-state', 'role': 'status', 'aria-live': 'polite' });
-		this.refreshBtn = this.button('刷新', 'neutral', function() { self.refreshStatus(true); });
+		this.refreshBtn = this.button('刷新', 'neutral', function() { return self.refresh(true); });
 		this.root.appendChild(el('div', { 'class': 'r3cg-header' }, [
 			el('div', { 'class': 'r3cg-heading' }, [el('h2', {}, '网站分流'), this.badge]), this.refreshBtn
 		]));
-		this.root.appendChild(el('p', { 'class': 'r3cg-intro' }, '添加网站域名，并为每条规则手动指定节点；其他流量保持现状。'));
-		this.steamTarget = false;
-		this.steamSwitch = el('input', { 'id': 'r3cg-steam', 'type': 'checkbox', 'role': 'switch', 'class': 'r3cg-switch',
-			'aria-describedby': 'r3cg-steam-state r3cg-steam-hint',
-			'change': function(ev) { return self.toggleSteam(ev.target.checked); } });
+		this.root.appendChild(el('p', { 'class': 'r3cg-intro' }, '给指定网站单独选一个出口节点；其他流量照旧走 OpenClash 原有规则。'));
+		this.steamSwitch = el('button', { 'type': 'button', 'role': 'switch', 'class': 'r3cg-switch', 'id': 'r3cg-steam',
+			'aria-checked': 'false', 'aria-labelledby': 'r3cg-steam-label', 'aria-describedby': 'r3cg-steam-state r3cg-steam-hint',
+			'click': function() { return self.toggleSteam(!self.steamOn); } }, el('span', { 'aria-hidden': 'true' }));
 		this.steamState = el('span', { 'class': 'r3cg-state', 'id': 'r3cg-steam-state', 'role': 'status', 'aria-live': 'polite' });
 		this.steamCard = this.root.appendChild(el('section', { 'class': 'r3cg-steam', 'aria-label': 'Steam 直连' }, [
-			el('div', { 'class': 'r3cg-steam-head' }, [
-				el('label', { 'class': 'r3cg-toggle', 'for': 'r3cg-steam' }, [this.steamSwitch, 'Steam 直连']), this.steamState
-			]),
+			el('div', { 'class': 'r3cg-steam-main' }, [this.steamSwitch, el('span', { 'class': 'r3cg-switch-label', 'id': 'r3cg-steam-label',
+				'click': function() { return self.toggleSteam(!self.steamOn); } }, 'Steam 直连')]),
+			this.steamState,
 			el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-steam-hint' }, STEAM_HINT)
 		]));
-		this.addBtn = this.button('添加网站', 'add', function() { self.openForm(null, false); });
-		this.presetBtn = this.button('ChatGPT 预设', 'neutral', function() { self.openForm(null, true); });
-		this.disableBtn = this.button('恢复原分流', 'reset', function() { self.mutate('disable'); });
-		this.root.appendChild(el('div', { 'class': 'r3cg-actions' }, [this.addBtn, this.presetBtn, this.disableBtn]));
-		this.message = el('p', { 'class': 'r3cg-message', 'role': 'status', 'aria-live': 'polite' });
-		this.root.appendChild(this.message);
+		this.addBtn = this.button('添加网站', 'add', function() { return self.openEditor(null, false, false); });
+		this.presetBtn = this.button('ChatGPT 预设', 'neutral', function() { return self.openEditor(null, true, false); });
+		this.root.appendChild(el('div', { 'class': 'r3cg-actions' }, [this.addBtn, this.presetBtn]));
+		this.message = this.root.appendChild(el('p', { 'class': 'r3cg-message', 'role': 'status', 'aria-live': 'polite' }));
 		this.list = this.root.appendChild(el('div', { 'class': 'r3cg-list', 'aria-label': '网站分流规则' }));
-		this.buildForm();
-		this.root.appendChild(el('p', { 'class': 'r3cg-note' },
-			'域名规则同时覆盖子域名。恢复原分流会停用全部网站规则并保留定义，关闭 Steam 直连，移除此模块的专用设置；其他流量保持现状。'));
-		if (data.status) this.acceptStatus(data.status, '');
-		else { this.renderRules(); this.renderSources(); this.renderNodes(); }
+		this.disableBtn = this.button('恢复原分流', 'reset', function() { return self.confirmDisable(); });
+		this.root.appendChild(el('div', { 'class': 'r3cg-footer' }, [this.disableBtn, el('p', { 'class': 'r3cg-note' },
+			'域名规则同时覆盖子域名。恢复原分流会停用全部网站规则（规则保留）并关闭 Steam 直连，OpenClash 原有分流不受影响。')]));
+		if (data.status) this.acceptStatus(data.status);
+		else this.renderRules();
 		this.sync();
-		poll.add(function() { return self.refreshStatus(false); }, 5);
+		poll.add(function() { return self.idleRefresh(); }, IDLE_POLL);
+		if (typeof document.addEventListener === 'function')
+			document.addEventListener('visibilitychange', function() { if (!document.hidden) self.idleRefresh(); });
 		return this.root;
 	},
 
@@ -244,122 +379,73 @@ return view.extend({
 		return el('button', { 'type': 'button', 'class': 'cbi-button cbi-button-' + kind, 'click': click }, text);
 	},
 
-	buildForm: function() {
-		var self = this;
-		this.form = el('section', { 'class': 'r3cg-form', 'aria-label': '网站规则编辑', 'hidden': true });
-		this.formTitle = el('h3', {}, '添加网站');
-		this.labelInput = el('input', { 'id': 'r3cg-label', 'type': 'text', 'maxlength': 128, 'placeholder': '例如：常用网站（可选）',
-			'input': function(ev) { self.label = ev.target.value; self.dirty = true; self.sync(); } });
-		this.domainsInput = el('textarea', { 'id': 'r3cg-domains', 'rows': 5, 'placeholder': 'example.com\nhttps://example.org/path',
-			'aria-describedby': 'r3cg-domain-hint', 'input': function(ev) {
-				self.domainsText = ev.target.value;
-				self.dirty = true;
-				self.sync();
-			} });
-		this.sourceSelect = el('select', { 'id': 'r3cg-source', 'aria-describedby': 'r3cg-source-hint', 'change': function(ev) {
-			if (self.mutating) return;
-			self.source = ev.target.value;
-			self.selected = '';
-			self.nodes = [];
-			self.nodesSource = '';
-			self.benchmark = null;
-			self.benchmarkNotice = '';
-			self.dirty = true;
-			self.notice = '';
-			self.renderNodes();
-			self.refreshStatus(true);
-		} });
-		this.nodeSelect = el('select', { 'id': 'r3cg-node', 'aria-describedby': 'r3cg-node-hint', 'change': function(ev) {
-			if (self.mutating) return;
-			self.selected = ev.target.value;
-			self.dirty = true;
-			self.notice = '';
-			self.sync();
-		} });
-		this.sourceHint = el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-source-hint' });
-		this.nodeHint = el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-node-hint', 'aria-live': 'polite' });
-		this.benchmarkBtn = this.button('3 轮测速', 'neutral', function() { self.startBenchmark(); });
-		this.bestBtn = this.button('选择最低延迟', 'neutral', function() { self.selectBest(); });
-		this.benchmarkProgress = el('p', { 'class': 'r3cg-hint', 'role': 'status', 'aria-live': 'polite' });
-		this.benchmarkBar = el('progress', { 'max': 1, 'value': 0, 'aria-label': '节点测速进度' });
-		this.benchmarkRows = el('ul', { 'class': 'r3cg-bench-list' });
-		function field(label, id, control, hint, full) {
-			return el('div', { 'class': 'r3cg-field' + (full ? ' full' : '') },
-				[el('label', { 'for': id }, label), control, hint]);
+	ruleById: function(id) {
+		return this.rules.filter(function(r) { return r.id === id; })[0] || null;
+	},
+
+	// LuCI code elsewhere (session expiry, another view) may close the shared modal.
+	dialogOpen: function() {
+		var body = document.body;
+		if (this.dlg && body && body.classList && !body.classList.contains('modal-overlay-active')) {
+			this.cancelTimer(this.dlg, 'timer');
+			this.cancelTimer(this.dlg, 'targetTimer');
+			this.dlg = null;
 		}
-		this.form.appendChild(this.formTitle);
-		this.form.appendChild(el('div', { 'class': 'r3cg-fields' }, [
-			field('网站名称（可选）', 'r3cg-label', this.labelInput, null, true),
-			field('网站域名或 URL', 'r3cg-domains', this.domainsInput,
-				el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-domain-hint' }, '一行一个；URL 会提取域名。不要与其他规则填写相同或上下级域名。'), true),
-			field('源配置', 'r3cg-source', this.sourceSelect, this.sourceHint),
-			field('指定节点', 'r3cg-node', this.nodeSelect, this.nodeHint),
-			el('div', { 'class': 'r3cg-benchmark' }, [
-				el('div', { 'class': 'r3cg-actions' }, [this.benchmarkBtn, this.bestBtn]),
-				this.benchmarkProgress, this.benchmarkBar,
-				el('p', { 'class': 'r3cg-hint' }, '仅可选择实测地区支持 ChatGPT、3 轮全部通过的节点。测速完成后可选择最低延迟，也可手选其他通过节点。'),
-				el('details', {}, [el('summary', {}, '查看各节点的 3 轮结果'), this.benchmarkRows])
-			])
-		]));
-		this.saveBtn = this.button('保存并启用', 'apply', function() { self.mutate('save'); });
-		this.cancelBtn = this.button('取消', 'neutral', function() { self.closeForm(); });
-		this.form.appendChild(el('div', { 'class': 'r3cg-actions' }, [this.saveBtn, this.cancelBtn]));
-		this.root.appendChild(this.form);
+		return !!this.dlg;
 	},
 
-	openForm: function(rule, preset) {
-		if (this.mutating) return;
-		this.formOpen = true;
-		this.editId = rule ? rule.id : '';
-		this.label = rule ? rule.label || '' : preset ? 'ChatGPT' : '';
-		this.domainsText = rule ? rule.domains.join('\n') : preset ? CHATGPT_DOMAINS.join('\n') : '';
-		this.preset = rule ? rule.preset || '' : preset ? 'chatgpt' : '';
-		this.source = rule ? rule.source : this.sources.indexOf(DEFAULT_SOURCE) >= 0 ? DEFAULT_SOURCE :
-			this.status && this.sources.indexOf(this.status.source) >= 0 ? this.status.source : this.sources[0] || '';
-		this.selected = rule ? rule.selected || '' : '';
-		this.nodes = [];
-		this.nodesSource = '';
-		this.benchmark = null;
-		this.benchmarkNotice = '';
-		this.dirty = false;
-		this.notice = '';
-		this.formTitle.textContent = rule ? '编辑网站' : preset ? '添加 ChatGPT 预设' : '添加网站';
-		this.labelInput.value = this.label;
-		this.domainsInput.value = this.domainsText;
-		this.form.hidden = false;
-		this.renderSources();
-		this.renderNodes();
-		this.refreshStatus(true);
-		this.labelInput.focus();
+	cancelTimer: function(d, key) {
+		if (d && d[key] != null) {
+			this.cancel(d[key]);
+			d[key] = null;
+		}
 	},
 
-	closeForm: function() {
-		if (this.mutating) return;
-		++this.readSerial;
-		this.reading = false;
-		this.formOpen = false;
-		this.form.hidden = true;
-		this.editId = '';
-		this.source = '';
-		this.selected = '';
-		this.dirty = false;
+	idleRefresh: function() {
+		if (this.mutating || this.reading || this.dialogOpen() || document.hidden || this.now() - this.lastRead < FRESH_MS)
+			return Promise.resolve(false);
+		return this.refresh(false);
+	},
+
+	refresh: function(manual) {
+		if (this.mutating || this.reading && !manual) return Promise.resolve(false);
+		var self = this, serial = ++this.readSerial;
+		this.reading = true;
+		this.foreground = !!manual;
+		if (manual) { this.notice = ''; this.noticeTone = ''; }
 		this.sync();
+		return fs.exec(CLI, ['summary']).then(parseResult).then(function(st) {
+			if (serial !== self.readSerial) return false;
+			self.acceptStatus(st);
+			return true;
+		}).catch(function(e) {
+			if (serial === self.readSerial) {
+				self.statusError = errorText(e);
+				self.lastRead = self.now();
+				self.renderRules();
+			}
+			return false;
+		}).then(function(ok) {
+			if (serial === self.readSerial) {
+				self.reading = false;
+				self.foreground = false;
+				self.sync();
+			}
+			return ok;
+		});
 	},
 
-	acceptStatus: function(st, requestedSource) {
+	acceptStatus: function(st) {
 		this.status = st;
 		this.statusError = '';
+		this.lastRead = this.now();
 		this.sources = (Array.isArray(st.sources) ? st.sources : []).filter(isSource);
-		this.rules = rulesOf(st.site_rules);
-		var nodeSource = requestedSource || st.source;
-		if (this.formOpen && nodeSource === this.source) {
-			this.nodes = nodesOf(st.nodes);
-			this.nodesSource = nodeSource;
-			this.benchmark = st.benchmark && st.benchmark.source === this.source ? st.benchmark : null;
-		}
+		this.rules = rulesOf(Array.isArray(st.rules) ? st.rules : st.site_rules);
 		this.renderRules();
-		this.renderSources();
-		this.renderNodes();
+		if (this.dlg && this.dlg.el && this.dlg.kind !== 'confirm') {
+			this.renderSources();
+			this.syncDialog();
+		}
 	},
 
 	renderRules: function() {
@@ -368,200 +454,68 @@ return view.extend({
 		this.ruleButtons = [];
 		if (!this.rules.length) {
 			this.list.appendChild(el('p', { 'class': 'r3cg-empty' }, this.statusError ?
-				'规则暂时无法读取，请刷新重试。' : '还没有网站规则。可添加自定义网站，或使用 ChatGPT 预设。'));
+				'规则暂时无法读取，请刷新重试。' : '还没有网站规则。可以添加自定义网站，或用 ChatGPT 预设。'));
 			return;
 		}
-		this.rules.forEach(function(rule) {
-			var state = self.statusError ? { text: '状态待确认', cls: 'bad' } : ruleState(rule, self.status && self.status.pending_restart), name = titleOf(rule);
-			var badge = el('span', { 'class': 'r3cg-state ' + state.cls },
-				[el('span', { 'class': 'r3cg-dot', 'aria-hidden': 'true' }), state.text]);
-			var edit = self.button('编辑', 'neutral', function() { self.openForm(rule, false); });
-			var toggle = self.button(rule.enabled ? '停用' : '启用', 'neutral', function() {
-				self.mutate('set-enabled', rule.id, !rule.enabled);
-			});
-			var remove = self.button('删除', 'remove', function() { self.mutate('remove', rule.id); });
-			[edit, toggle, remove].forEach(function(b) {
-				b.setAttribute('aria-label', b.textContent + '：' + name);
-				self.ruleButtons.push(b);
-			});
-			function detail(label, text) { return el('div', {}, [el('dt', {}, label), el('dd', {}, text)]); }
-			var card = el('article', { 'class': 'r3cg-rule' }, [
-				el('div', { 'class': 'r3cg-rule-head' }, [el('h3', {}, name), badge]),
-				el('dl', { 'class': 'r3cg-data' }, [
-					detail('网站域名', rule.domains.join('、')),
-					detail('源配置', rule.source || '未指定'),
-					detail('指定节点', rule.selected_name || '节点名称不可用')
-				]),
-				rule.error ? el('p', { 'class': 'r3cg-hint' }, statusErrorText(rule)) : null,
-				el('div', { 'class': 'r3cg-actions' }, [edit, toggle, remove])
-			]);
-			self.list.appendChild(card);
+		this.rules.forEach(function(rule) { self.list.appendChild(self.card(rule)); });
+	},
+
+	card: function(rule) {
+		var self = this, name = titleOf(rule), busy = this.mutating && this.busyId === rule.id;
+		var state = busy ? { text: '正在应用…', cls: 'warn' } : this.statusError ? { text: '状态待确认', cls: 'bad' } :
+			ruleState(rule, this.status && this.status.pending_restart);
+		var badge = el('span', { 'class': 'r3cg-state ' + state.cls }, [el('span', { 'class': 'r3cg-dot', 'aria-hidden': 'true' }), state.text]);
+		var change = this.button('换节点', 'action', function() { return self.openEditor(rule, false, true); });
+		var edit = this.button('编辑', 'neutral', function() { return self.openEditor(rule, false, false); });
+		var toggle = this.button(rule.enabled ? '停用' : '启用', 'neutral', function() { return self.mutate('set-enabled', rule.id, !rule.enabled); });
+		var remove = this.button('删除', 'remove', function() { return self.confirmRemove(rule); });
+		[change, edit, toggle, remove].forEach(function(b) {
+			b.setAttribute('aria-label', b.textContent + '：' + name);
+			self.ruleButtons.push(b);
 		});
+		return el('article', { 'class': 'r3cg-rule' + (rule.enabled ? '' : ' off') }, [
+			el('div', { 'class': 'r3cg-rule-head' }, [el('h3', {}, name), badge]),
+			el('p', { 'class': 'r3cg-domains', 'title': rule.domains.join('\n') }, shortDomains(rule.domains)),
+			el('p', { 'class': 'r3cg-node' }, this.nodeLine(rule)),
+			el('p', { 'class': 'r3cg-source' }, '订阅：' + (rule.source || '未指定')),
+			rule.enabled && rule.error && !this.statusError ? el('p', { 'class': 'r3cg-hint bad' }, ruleErrorText(rule.error)) : null,
+			el('div', { 'class': 'r3cg-actions' }, [change, edit, toggle, remove])
+		]);
 	},
 
-	renderSources: function() {
-		var self = this;
-		clear(this.sourceSelect).appendChild(el('option', { 'value': '' }, this.sources.length ? '请选择源配置' : '没有可用的源配置'));
-		this.sources.forEach(function(s) { self.sourceSelect.appendChild(el('option', { 'value': s }, s)); });
-		if (this.source && this.sources.indexOf(this.source) < 0)
-			this.sourceSelect.appendChild(el('option', { 'value': this.source, 'disabled': true }, this.source + '（已不可用）'));
-		this.sourceSelect.value = this.source;
-	},
-
-	renderNodes: function() {
-		var self = this;
-		clear(this.nodeSelect).appendChild(el('option', { 'value': '' }, this.nodes.length ? '请手动选择节点' : '没有可用节点'));
-		var sorted = this.nodes.slice().sort(function(a, b) {
-			return Number(eligible(b)) - Number(eligible(a)) || (eligible(a) ? a.median_ms - b.median_ms : 0);
-		});
-		clear(this.benchmarkRows);
-		sorted.forEach(function(n) {
-			var allowed = eligible(n), reason = self.nodeReason(n), name = countryName(n.country) + ' · ' + n.name + ' · ' + latency(n.median_ms);
-			// Unverified nodes stay selectable; the save path records the choice as
-			// unverified so the operator can skip the probe deliberately.
-			self.nodeSelect.appendChild(el('option', { 'value': n.id }, name + (allowed ? '' : '（' + reason + '）')));
-			var tick = el('input', { 'type': 'checkbox' });
-			tick.checked = !!self.benchChecked[n.id];
-			tick.addEventListener('change', function() {
-				if (tick.checked) self.benchChecked[n.id] = true; else delete self.benchChecked[n.id];
-				self.sync();
-			});
-			self.benchmarkRows.appendChild(el('li', {}, [
-				el('label', { 'class': 'r3cg-tick' }, [tick, el('span', {}, ' 选中测速')]),
-				el('strong', {}, countryName(n.country) + ' · ' + n.name),
-				el('p', {}, '3 轮：' + (Array.isArray(n.samples_ms) && n.samples_ms.length ? n.samples_ms.map(latency).join(' / ') : '尚未完成') +
-					'；中位延迟：' + latency(n.median_ms) + '；' + (allowed ? '已通过，可选用' : reason))]));
-		});
-		if (this.selected && !this.selectedNode())
-			this.nodeSelect.appendChild(el('option', { 'value': this.selected, 'disabled': true }, '原选择已不可用，请重新选择'));
-		this.nodeSelect.value = this.selected;
-	},
-
-	selectedNode: function() {
-		var selected = this.selected;
-		return this.nodes.filter(function(n) { return n.id === selected; })[0] || null;
-	},
-
-	hasSelected: function() {
-		// Any existing node is savable; eligibility only decides whether the
-		// probe proof is attached or the rule is marked unverified.
-		return !!this.selectedNode();
-	},
-
-	needsUnverifiedConfirm: function() {
-		var node = this.selectedNode();
-		return !!node && !eligible(node);
-	},
-
-	nodeReason: function(node) {
-		var results = this.benchmark && Array.isArray(this.benchmark.results) ? this.benchmark.results : [];
-		var result = results.filter(function(r) { return r.id === node.id; })[0];
-		var err = node.error || result && result.error;
-		if (err === 'PENDING' || err === 'BENCH_PENDING') return this.benchmark && this.benchmark.running ? '等待测速' : '尚未测速';
-		if (err) return benchmarkError(err);
-		if (measured(node) && node.eligible !== true) return '验证已失效，请重新测速';
-		if (Array.isArray(node.samples_ms) && node.samples_ms.length) return '3 轮尚未全部通过';
-		return this.benchmark && this.benchmark.running && !result ? '等待测速' : '尚未测速';
-	},
-
-	bestNode: function() {
-		var bench = this.benchmark;
-		if (!bench || bench.source !== this.source || bench.running || !(bench.total > 0) || bench.done < bench.total) return null;
-		var best = this.nodes.filter(function(n) { return n.id === bench.best && eligible(n); })[0];
-		var result = (Array.isArray(bench.results) ? bench.results : []).filter(function(r) { return r.id === bench.best && eligible(r); })[0];
-		return best && result && !this.nodes.some(function(n) { return eligible(n) && n.median_ms < best.median_ms; }) ? best : null;
-	},
-
-	selectBest: function() {
-		if (this.bestBtn.disabled) return;
-		var best = this.bestNode();
-		if (!best) return;
-		this.selected = best.id;
-		this.dirty = true;
-		this.renderNodes();
-		this.sync();
-	},
-
-	startBenchmark: function() {
-		if (this.benchmarkBtn.disabled) return Promise.resolve(false);
-		var self = this, source = this.source;
-		// Ticked nodes restrict the run; an empty selection keeps the full sweep.
-		var picked = Object.keys(this.benchChecked || {});
-		var argv = ['benchmark', source].concat(picked);
-		this.benchmarkStarting[source] = true;
-		this.benchmarkNotice = '';
-		this.sync();
-		return fs.exec(CLI, argv).then(parseResult).then(function() {
-			if (self.formOpen && self.source === source) return self.refreshStatus(false);
-		}).catch(function(e) {
-			if (self.formOpen && self.source === source) self.benchmarkNotice = /permission|access denied|拒绝/i.test(e && e.message || '') ?
-				'当前会话没有测速权限，请退出 LuCI 后重新登录。' : '测速启动失败，请刷新后重试。';
-		}).then(function() {
-			delete self.benchmarkStarting[source];
-			self.sync();
-		});
-	},
-
-	domains: function() {
-		return this.domainsText.split(/\r?\n/).map(function(s) { return s.trim(); }).filter(function(s) { return !!s; });
+	nodeLine: function(rule) {
+		var parts = [displayName(rule.selected_name) || '节点名称不可用'];
+		if (typeof rule.median_ms === 'number' && rule.median_ms > 0) {
+			parts.push(latency(rule.median_ms));
+			var when = ago(rule.tested_at, this.now());
+			if (when) parts.push(when + '测');
+		}
+		else parts.push(rule.unverified ? '未测速（未验证）' : '未测速');
+		return parts.join(' · ');
 	},
 
 	sync: function() {
-		var st = this.status, unavailable = !st || !!this.statusError;
+		var st = this.status, unavailable = !st || !!this.statusError, busy = !!this.mutating;
 		var bad = unavailable || !!st.error || st.enabled === true && st.applied !== true && !st.pending_restart;
-		var state = bad ? { text: '异常', cls: 'bad' } : st.pending_restart ? { text: '待启动生效', cls: 'warn' } :
-			st.enabled ? { text: '已启用', cls: 'ok' } : { text: '已停用', cls: '' };
-		clear(this.badge).appendChild(el('span', { 'class': 'r3cg-dot', 'aria-hidden': 'true' }));
-		this.badge.appendChild(document.createTextNode(state.text));
-		this.badge.className = 'r3cg-state ' + state.cls;
+		setState(this.badge, busy ? { text: '正在应用…', cls: 'warn' } : bad ? { text: '异常', cls: 'bad' } :
+			st.pending_restart ? { text: '待启动生效', cls: 'warn' } : st.enabled ? { text: '已生效', cls: 'ok' } : { text: '未启用', cls: '' });
 		var steam = steamOf(st), steamBusy = this.mutating === 'steam-direct';
-		var steamNow = steamBusy ? { text: this.steamTarget ? '正在开启…' : '正在关闭…', cls: 'warn' } :
-			unavailable ? { text: '状态待确认', cls: 'bad' } : steamState(steam);
-		if (this.steamState.textContent !== steamNow.text) {
-			clear(this.steamState).appendChild(el('span', { 'class': 'r3cg-dot', 'aria-hidden': 'true' }));
-			this.steamState.appendChild(document.createTextNode(steamNow.text));
-		}
-		this.steamState.className = 'r3cg-state ' + steamNow.cls;
+		setState(this.steamState, steamBusy ? { text: this.steamTarget ? '正在开启…' : '正在关闭…', cls: 'warn' } :
+			unavailable ? { text: '状态待确认', cls: 'bad' } : steamState(steam));
 		// The switch shows the effective state, so a saved-but-missing block reads as off.
-		this.steamSwitch.checked = steamBusy ? this.steamTarget : !!(steam && steam.enabled && steam.applied);
-		this.steamSwitch.disabled = this.mutating || unavailable || !steam;
-		var loading = this.reading && this.foreground;
-		this.addBtn.disabled = this.presetBtn.disabled = this.mutating || unavailable;
-		this.disableBtn.disabled = this.mutating || !st || (!st.enabled && !st.applied && !st.error && !this.rules.some(function(r) { return r.enabled; }) &&
+		this.steamOn = steamBusy ? this.steamTarget : !!(steam && steam.enabled && steam.applied);
+		this.steamSwitch.setAttribute('aria-checked', this.steamOn ? 'true' : 'false');
+		this.steamSwitch.className = 'r3cg-switch' + (this.steamOn ? ' on' : '');
+		this.steamSwitch.disabled = busy || unavailable || !steam;
+		this.addBtn.disabled = this.presetBtn.disabled = busy || unavailable;
+		this.presetBtn.hidden = this.rules.some(function(r) { return r.preset === 'chatgpt'; });
+		this.disableBtn.disabled = busy || !st || (!st.enabled && !st.applied && !st.error && !this.rules.some(function(r) { return r.enabled; }) &&
 			!(steam && (steam.enabled || steam.applied)));
-		this.refreshBtn.disabled = this.mutating || this.reading;
-		this.refreshBtn.textContent = loading ? '刷新中…' : '刷新';
-		this.labelInput.disabled = this.domainsInput.disabled = this.mutating;
-		this.sourceSelect.disabled = this.mutating || !this.sources.length;
-		this.nodeSelect.disabled = this.mutating || loading || unavailable || !this.nodes.length || this.nodesSource !== this.source;
-		this.saveBtn.disabled = this.mutating || loading || unavailable || !this.formOpen || !this.domains().length ||
-			this.sources.indexOf(this.source) < 0 || this.nodesSource !== this.source || !this.hasSelected();
-		this.cancelBtn.disabled = this.mutating;
-		var bench = this.benchmark, running = bench && bench.running, starting = this.benchmarkStarting[this.source];
-		this.benchmarkBtn.disabled = this.mutating || unavailable || loading || !this.formOpen || !this.nodes.length ||
-			this.sources.indexOf(this.source) < 0 || this.nodesSource !== this.source || running || starting;
-		var pickedCount = Object.keys(this.benchChecked || {}).length;
-		this.benchmarkBtn.textContent = starting ? '正在启动…' : running ? '测速进行中…' :
-			pickedCount ? '测速选中 ' + pickedCount + ' 个' : '3 轮测速（全部）';
-		this.bestBtn.disabled = this.mutating || unavailable || loading || !this.bestNode();
-		var total = bench && Number(bench.total) || 0, done = bench && Number(bench.done) || 0;
-		this.benchmarkBar.setAttribute('max', Math.max(1, total));
-		this.benchmarkBar.setAttribute('value', Math.min(Math.max(0, done), total));
-		this.benchmarkProgress.textContent = this.benchmarkNotice || (unavailable ? '测速状态读取失败，请刷新。' : starting ? '正在启动 3 轮测速…' :
-			bench && bench.error ? benchmarkError(bench.error) : running ? '正在测速：已完成 ' + done + ' / ' + total + ' 个节点。' :
-			total > 0 ? '测速完成：' + done + ' / ' + total + ' 个节点。' : '尚未测速，请先完成 3 轮测速。');
-		this.ruleButtons.forEach(function(b) { b.disabled = this.mutating || unavailable; }, this);
-		this.saveBtn.textContent = this.mutating === 'save' ? '正在保存…' : '保存并启用';
 		this.disableBtn.textContent = this.mutating === 'disable' ? '正在恢复…' : '恢复原分流';
-		this.root.setAttribute('aria-busy', this.mutating || loading ? 'true' : 'false');
-		this.sourceHint.textContent = st && st.source_error ? '此源配置暂时不可用，可切换配置或稍后刷新。' : '默认使用 lian_li.yaml。';
-		this.nodeHint.textContent = loading ? '正在读取节点…' : !this.source ? '先选择源配置。' : unavailable ?
-			'读取失败后可点击刷新重试。' : !this.nodes.length ? '此配置没有可用节点，请选择其他源配置。' :
-			this.selected && !this.selectedNode() ? '原选择已不在此配置中，请重新选择。' : this.selected && !eligible(this.selectedNode()) ?
-			'所选节点未通过测速，直接保存会按「未验证」启用，不附 3 轮证明。' : this.selected ?
-			countryName(this.selectedNode().country) + '；3 轮：' + (this.selectedNode().samples_ms || []).map(latency).join(' / ') +
-			'；中位延迟：' + latency(this.selectedNode().median_ms) + (this.dirty ? '；编辑尚未保存。' : '') :
-			'请手动选择节点；未测速的节点也可直接保存使用。';
+		this.refreshBtn.disabled = busy || this.reading;
+		this.refreshBtn.textContent = this.reading && this.foreground ? '刷新中…' : '刷新';
+		this.ruleButtons.forEach(function(b) { b.disabled = busy || unavailable; });
+		this.root.setAttribute('aria-busy', busy || this.reading && this.foreground ? 'true' : 'false');
 		var err = this.statusError || statusErrorText(st);
 		var pending = st && st.pending_restart ? '已保存，等待 OpenClash 启动后生效。' : '';
 		this.message.textContent = this.notice || err || pending;
@@ -569,24 +523,518 @@ return view.extend({
 		this.message.setAttribute('role', this.noticeTone === 'bad' || (!this.notice && err) ? 'alert' : 'status');
 	},
 
-	refreshStatus: function(manual, duringMutation) {
-		if ((this.mutating && !duringMutation) || (!manual && this.reading)) return Promise.resolve(false);
-		var self = this, serial = ++this.readSerial, source = this.formOpen ? this.source : '';
-		this.reading = true;
-		this.foreground = !!manual;
-		if (manual && !duringMutation) this.notice = '';
-		this.sync();
-		return fs.exec(CLI, source ? ['status', source] : ['status']).then(parseResult).then(function(st) {
-			if (serial !== self.readSerial) return false;
-			self.acceptStatus(st, source);
+	defaultSource: function() {
+		var st = this.status, s = this.sources;
+		if (st && s.indexOf(st.source) >= 0) return st.source;
+		return s.indexOf(DEFAULT_SOURCE) >= 0 ? DEFAULT_SOURCE : s[0] || '';
+	},
+
+	domainLines: function(text) {
+		return text.split(/\r?\n/).map(function(s) { return s.trim(); }).filter(function(s) { return !!s; });
+	},
+
+	// The ChatGPT preset is measured against chatgpt.com; any other site against its first domain.
+	targetOf: function(d) {
+		if (d.preset === 'chatgpt') return 'chatgpt';
+		var first = d.kind === 'node' ? d.rule.domains[0] : normalizeDomain(this.domainLines(d.domainsText)[0] || '');
+		return first ? 'site:' + first : '';
+	},
+
+	domainCheck: function() {
+		var d = this.dlg, raw = d.domainsText.split(/\r?\n/), out = [], bad = [], count = 0;
+		raw.forEach(function(line, i) {
+			if (!line.trim()) return;
+			count++;
+			var n = normalizeDomain(line);
+			if (!n) bad.push(i + 1);
+			else if (out.indexOf(n) < 0) out.push(n);
+		});
+		if (!count) return { ok: false, empty: true, text: '一行一个域名，也可以直接粘贴网址。', domains: [] };
+		if (bad.length) return { ok: false, text: '第 ' + bad.join('、') + ' 行不是有效的域名或网址。', domains: out };
+		if (count > 30) return { ok: false, text: '一条规则最多 30 个域名。', domains: out };
+		var clash = this.overlap(out, d.preset, d.rule && d.rule.id);
+		if (clash) return { ok: false, domains: out,
+			text: clash.mine + ' 与规则「' + titleOf(clash.rule) + '」的 ' + clash.theirs + ' 重叠，同一个网站只能归一条规则。' };
+		return { ok: true, text: '将匹配：' + out.join('、') + '，含子域名。', domains: out };
+	},
+
+	// Same test as check_domains on the router: equal, or one is a subdomain of the other.
+	overlap: function(domains, preset, selfId) {
+		function setOf(list, p) {
+			return p === 'chatgpt' ? list.concat(PRESET_BUILTIN.filter(function(x) { return list.indexOf(x) < 0; })) : list;
+		}
+		function hit(a, b) {
+			return a === b || a.slice(-(b.length + 1)) === '.' + b || b.slice(-(a.length + 1)) === '.' + a;
+		}
+		var mine = setOf(domains, preset);
+		for (var i = 0; i < this.rules.length; i++) {
+			var rule = this.rules[i];
+			if (rule.id === selfId) continue;
+			var theirs = setOf(rule.domains, rule.preset);
+			for (var j = 0; j < mine.length; j++)
+				for (var k = 0; k < theirs.length; k++)
+					if (hit(mine[j], theirs[k])) return { rule: rule, mine: mine[j], theirs: theirs[k] };
+		}
+		return null;
+	},
+
+	openEditor: function(rule, preset, nodeOnly) {
+		if (this.mutating || this.dialogOpen() || !this.status || this.statusError) return false;
+		var self = this, d = {
+			kind: nodeOnly && rule ? 'node' : 'edit', rule: rule || null,
+			preset: rule ? rule.preset || '' : preset ? 'chatgpt' : '',
+			label: rule ? rule.label || '' : preset ? 'ChatGPT' : '',
+			domainsText: rule ? rule.domains.join('\n') : preset ? CHATGPT_DOMAINS.join('\n') : '',
+			source: rule ? rule.source : this.defaultSource(), selected: rule ? rule.selected || '' : '',
+			target: '', nodes: [], bench: null, nodesKey: '', serial: 0, loading: false, loadError: '',
+			query: '', region: '', showFailed: false, starting: false, timer: null, targetTimer: null,
+			benchNotice: '', message: '', tone: '', dirty: false, el: null
+		};
+		d.target = this.targetOf(d);
+		this.dlg = d;
+		var p = d.el = {}, parts = [];
+		if (d.kind === 'node') {
+			parts.push(el('p', {}, [el('strong', {}, titleOf(rule)), ' · ' + shortDomains(rule.domains)]));
+		}
+		else {
+			p.domains = el('textarea', { 'id': 'r3cg-domains', 'rows': 4, 'spellcheck': 'false', 'aria-describedby': 'r3cg-domain-hint',
+				'placeholder': 'example.com\nhttps://example.org/path', 'input': function(ev) { self.setDomains(ev.target.value); } });
+			p.domains.value = d.domainsText;
+			p.preview = el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-domain-hint', 'aria-live': 'polite' });
+			p.label = el('input', { 'id': 'r3cg-label', 'type': 'text', 'maxlength': 80, 'autocomplete': 'off', 'aria-describedby': 'r3cg-label-hint',
+				'input': function(ev) { d.label = ev.target.value; d.dirty = true; self.syncDialog(); } });
+			p.label.value = d.label;
+			p.labelHint = el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-label-hint', 'aria-live': 'polite' });
+			parts.push(el('div', { 'class': 'r3cg-fields' }, [
+				el('div', { 'class': 'r3cg-field' }, [el('label', { 'for': 'r3cg-domains' }, '网站域名或网址'), p.domains, p.preview]),
+				el('div', { 'class': 'r3cg-field' }, [el('label', { 'for': 'r3cg-label' }, '名称（可不填）'), p.label, p.labelHint])
+			]));
+		}
+		parts.push(this.buildPicker(d));
+		p.message = el('p', { 'class': 'r3cg-message', 'role': 'status', 'aria-live': 'polite' });
+		parts.push(p.message);
+		// LuCI's Escape handler clicks the first button under .right, so Cancel goes first.
+		p.cancel = this.button('取消', 'neutral', function() { return self.closeDialog(); });
+		p.save = this.button('保存', 'apply', function() { return self.saveDialog(); });
+		ui.showModal(d.kind === 'node' ? '换节点' : rule ? '编辑网站' : preset ? '添加 ChatGPT 预设' : '添加网站',
+			[el('div', { 'class': 'r3cg-dialog' }, parts), el('div', { 'class': 'right' }, [p.cancel, ' ', p.save])], 'r3cg-modal');
+		this.renderSources();
+		this.renderPicker();
+		this.syncDialog();
+		(d.kind === 'edit' && !rule && !preset ? p.domains : p.search).focus();
+		this.loadNodes(false);
+		return true;
+	},
+
+	buildPicker: function(d) {
+		var self = this, p = d.el;
+		p.source = el('select', { 'id': 'r3cg-source', 'change': function(ev) { self.changeSource(ev.target.value); } });
+		p.search = el('input', { 'id': 'r3cg-search', 'type': 'search', 'placeholder': '名称、地区或类型', 'autocomplete': 'off',
+			'input': function(ev) { d.query = ev.target.value; self.renderPicker(); self.syncDialog(); } });
+		p.chips = el('div', { 'class': 'r3cg-chips', 'role': 'group', 'aria-label': '按地区筛选' });
+		p.benchBtn = this.button('测速', 'action', function() { return self.startBench(false); });
+		p.benchAllBtn = this.button('全部测速', 'neutral', function() { return self.startBench(true); });
+		p.fastBtn = this.button('选最快', 'neutral', function() { self.pickFastest(); });
+		p.benchLine = el('p', { 'class': 'r3cg-hint', 'role': 'status', 'aria-live': 'polite' });
+		p.progress = el('progress', { 'max': 1, 'value': 0, 'aria-label': '测速进度' });
+		p.list = el('div', { 'class': 'r3cg-nodes', 'role': 'radiogroup', 'aria-label': '节点', 'keydown': function(ev) {
+			if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp' || !p.list.querySelectorAll) return;
+			var rows = Array.prototype.slice.call(p.list.querySelectorAll('button.r3cg-row:not(:disabled)'));
+			var at = rows.indexOf(document.activeElement);
+			var next = rows[at < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, at + (ev.key === 'ArrowDown' ? 1 : -1)))];
+			if (next) { next.focus(); ev.preventDefault(); }
+		} });
+		p.more = this.button('', 'neutral', function() { d.showFailed = !d.showFailed; self.renderPicker(); });
+		p.picked = el('p', { 'class': 'r3cg-picked', 'aria-live': 'polite' });
+		return el('section', { 'class': 'r3cg-picker', 'aria-label': '选择节点' }, [
+			el('div', { 'class': 'r3cg-picker-head' }, [
+				el('div', { 'class': 'r3cg-field' }, [el('label', { 'for': 'r3cg-source' }, '订阅'), p.source]),
+				el('div', { 'class': 'r3cg-field' }, [el('label', { 'for': 'r3cg-search' }, '搜索节点'), p.search])
+			]),
+			p.chips,
+			el('div', { 'class': 'r3cg-toolbar' }, [p.benchBtn, p.benchAllBtn, p.fastBtn]),
+			p.benchLine, p.progress, p.list, p.more, p.picked
+		]);
+	},
+
+	renderSources: function() {
+		var d = this.dlg;
+		if (!d || !d.el || d.kind === 'confirm') return;
+		var select = clear(d.el.source);
+		if (!this.sources.length) select.appendChild(el('option', { 'value': '' }, '没有可用的订阅'));
+		this.sources.forEach(function(s) { select.appendChild(el('option', { 'value': s }, s)); });
+		if (d.source && this.sources.indexOf(d.source) < 0)
+			select.appendChild(el('option', { 'value': d.source, 'disabled': true }, d.source + '（已不可用）'));
+		select.value = d.source;
+	},
+
+	changeSource: function(value) {
+		var d = this.dlg;
+		if (!d || this.mutating || value === d.source) return;
+		d.source = value;
+		d.selected = d.rule && d.rule.source === value ? d.rule.selected : '';
+		d.region = '';
+		d.nodes = [];
+		d.bench = null;
+		d.nodesKey = '';
+		d.benchNotice = '';
+		d.message = '';
+		d.dirty = true;
+		this.loadNodes(false);
+	},
+
+	setDomains: function(text) {
+		var d = this.dlg, self = this;
+		if (!d) return;
+		d.domainsText = text;
+		d.dirty = true;
+		d.message = '';
+		var target = this.targetOf(d);
+		if (target !== d.target) {
+			d.target = target;
+			this.cancelTimer(d, 'targetTimer');
+			// Results are per site; wait for typing to settle before reading them.
+			d.targetTimer = this.later(function() {
+				d.targetTimer = null;
+				if (self.dlg === d) self.loadNodes(false);
+			}, TARGET_DELAY_MS);
+		}
+		this.syncDialog();
+	},
+
+	indexNodes: function(list) {
+		var rows = nodesOf(list).map(function(n, i) {
+			var row = { id: n.id, name: n.name, type: typeof n.type === 'string' ? n.type : '', dependent: n.dependent === true,
+				eligible: n.eligible === true, median_ms: n.median_ms, samples_ms: Array.isArray(n.samples_ms) ? n.samples_ms : [],
+				country: /^[A-Z]{2}$/.test(n.country || '') ? n.country : '', error: typeof n.error === 'string' ? n.error : '',
+				tested_at: n.tested_at, stale: n.stale === true, index: i, region: regionOf(n.name) || '?', label: displayName(n.name) };
+			row.state = nodeState(row);
+			row.haystack = (row.label + ' ' + row.type + ' ' + regionName(row.region) + ' ' + row.region).toLowerCase();
+			return row;
+		});
+		return rows.sort(function(a, b) {
+			var ma = typeof a.median_ms === 'number' ? a.median_ms : Infinity, mb = typeof b.median_ms === 'number' ? b.median_ms : Infinity;
+			return ORDER[a.state] - ORDER[b.state] || (a.state === 'ok' && ma !== mb ? ma - mb : 0) || a.index - b.index;
+		});
+	},
+
+	loadNodes: function(quiet) {
+		var d = this.dlg;
+		if (!d || !d.el || d.kind === 'confirm') return Promise.resolve(false);
+		var self = this, source = d.source, target = d.target, serial = ++d.serial;
+		this.cancelTimer(d, 'timer');
+		if (!target || !isSource(source)) {
+			d.loading = false;
+			this.renderPicker();
+			this.syncDialog();
+			return Promise.resolve(false);
+		}
+		if (!quiet) {
+			d.loading = true;
+			d.loadError = '';
+			this.renderPicker();
+			this.syncDialog();
+		}
+		return fs.exec(CLI, ['nodes', source, target]).then(parseResult).then(function(res) {
+			if (self.dlg !== d || serial !== d.serial) return false;
+			d.nodes = self.indexNodes(res.nodes);
+			d.bench = benchOf(res.benchmark);
+			d.nodesKey = source + '\n' + target;
+			d.loadError = '';
 			return true;
 		}).catch(function(e) {
-			if (serial === self.readSerial) { self.statusError = errorText(e); self.renderRules(); }
+			// A failed background read keeps the rows on screen and tries again on the next tick.
+			if (self.dlg === d && serial === d.serial && !quiet) {
+				d.loadError = errorText(e);
+				d.nodes = [];
+				d.nodesKey = '';
+			}
 			return false;
 		}).then(function(ok) {
-			if (serial === self.readSerial) { self.reading = false; self.sync(); }
+			if (self.dlg !== d || serial !== d.serial) return ok;
+			d.loading = false;
+			self.renderPicker();
+			self.syncDialog();
+			if (d.bench && d.bench.running)
+				d.timer = self.later(function() {
+					d.timer = null;
+					if (self.dlg === d) self.loadNodes(true);
+				}, BENCH_POLL_MS);
 			return ok;
 		});
+	},
+
+	pickerRows: function() {
+		var d = this.dlg, q = d.query.trim().toLowerCase(), region = d.region;
+		return d.nodes.filter(function(n) {
+			return (!region || n.region === region) && (!q || n.haystack.indexOf(q) >= 0);
+		});
+	},
+
+	emptyText: function(d) {
+		if (!d.target) return '先在上面填网站域名，测速会针对这个网站。';
+		if (d.loadError) return d.loadError;
+		if (d.loading || !d.nodesKey) return '正在读取节点…';
+		if (!d.nodes.length) return '这个订阅里没有节点。';
+		return '没有符合筛选条件的节点。';
+	},
+
+	renderPicker: function() {
+		var d = this.dlg;
+		if (!d || !d.el || d.kind === 'confirm') return;
+		var self = this, p = d.el, counts = {}, codes = [];
+		d.nodes.forEach(function(n) {
+			if (!has(counts, n.region)) { counts[n.region] = 0; codes.push(n.region); }
+			counts[n.region]++;
+		});
+		codes.sort(function(a, b) { return (a === '?') - (b === '?') || counts[b] - counts[a]; });
+		if (d.region && !has(counts, d.region)) d.region = '';
+		clear(p.chips);
+		p.chips.hidden = codes.length < 2;
+		if (codes.length > 1) {
+			[''].concat(codes).forEach(function(code) {
+				p.chips.appendChild(el('button', { 'type': 'button', 'class': 'r3cg-chip', 'aria-pressed': d.region === code ? 'true' : 'false',
+					'click': function() { d.region = code; self.renderPicker(); self.syncDialog(); } },
+					code ? regionName(code) + ' ' + counts[code] : '全部 ' + d.nodes.length));
+			});
+		}
+		var rows = this.pickerRows(), hidden = 0, shown = 0, failed = 0;
+		var live = rows.some(function(n) { return n.state === 'ok' || n.state === 'untested'; });
+		var active = document.activeElement, focused = active && active.getAttribute && p.list.contains && p.list.contains(active) ?
+			active.getAttribute('data-id') : '';
+		var top = p.list.scrollTop;
+		clear(p.list);
+		rows.forEach(function(n) {
+			var out = n.state === 'failed' || n.state === 'blocked';
+			if (out) failed++;
+			// Failed nodes fold away unless asked for, selected, or nothing else matches.
+			if (out && !d.showFailed && n.id !== d.selected && live) { hidden++; return; }
+			shown++;
+			p.list.appendChild(self.nodeRow(n, d));
+		});
+		if (!shown) p.list.appendChild(el('p', { 'class': 'r3cg-empty' }, this.emptyText(d)));
+		p.list.scrollTop = top;
+		if (focused && p.list.querySelector) {
+			var again = p.list.querySelector('[data-id="' + focused + '"]');
+			if (again) again.focus();
+		}
+		p.more.hidden = !hidden && !(d.showFailed && failed && live);
+		p.more.textContent = d.showFailed ? '收起未通过的节点' : '显示 ' + hidden + ' 个未通过的节点';
+	},
+
+	nodeRow: function(n, d) {
+		var self = this, picked = n.id === d.selected;
+		return el('button', { 'type': 'button', 'class': 'r3cg-row ' + n.state + (picked ? ' picked' : ''), 'role': 'radio',
+			'data-id': n.id, 'aria-checked': picked ? 'true' : 'false', 'disabled': n.state === 'blocked' || !!this.mutating,
+			'click': function() { self.selectNode(n.id); } }, [
+			el('span', { 'class': 'r3cg-region' }, regionName(n.region)),
+			el('span', { 'class': 'r3cg-name' }, n.label),
+			el('span', { 'class': 'r3cg-type' }, n.type),
+			el('span', { 'class': 'r3cg-result' }, this.nodeStatus(n, d))
+		]);
+	},
+
+	nodeStatus: function(n, d) {
+		var when = ago(n.tested_at, this.now());
+		if (n.state === 'ok') {
+			var exit = d.target === 'chatgpt' && n.country && n.country !== n.region ? '出口' + regionName(n.country) : '';
+			return [latency(n.median_ms) || '已通过', exit, when].filter(Boolean).join(' · ');
+		}
+		if (n.state === 'blocked') return benchError('NODE_DEPENDENCY');
+		if (n.state === 'failed') return [n.error ? benchError(n.error) : '验证未通过', when].filter(Boolean).join(' · ');
+		if (n.error === 'PENDING' && d.bench && d.bench.running && d.bench.run_ids.indexOf(n.id) >= 0) return '等待测速…';
+		if (n.stale) return '结果已过期' + (when ? '（' + when + '）' : '');
+		if (n.error && n.error !== 'PENDING') return benchError(n.error);
+		return '未测速';
+	},
+
+	selectedNode: function() {
+		var d = this.dlg;
+		if (!d || d.nodesKey !== d.source + '\n' + d.target) return null;
+		return d.nodes.filter(function(n) { return n.id === d.selected; })[0] || null;
+	},
+
+	selectNode: function(id) {
+		var d = this.dlg;
+		if (!d || !d.el || this.mutating) return;
+		d.selected = id;
+		d.dirty = true;
+		d.message = '';
+		d.tone = '';
+		this.renderPicker();
+		this.syncDialog();
+	},
+
+	// Picks among the rows on screen, so it works as soon as the first results arrive.
+	pickFastest: function() {
+		var d = this.dlg, best = null;
+		if (!d || !d.el || this.mutating) return;
+		this.pickerRows().forEach(function(n) {
+			if (n.state === 'ok' && typeof n.median_ms === 'number' && (!best || n.median_ms < best.median_ms)) best = n;
+		});
+		if (best) this.selectNode(best.id);
+	},
+
+	// Filtered rows are measured on their own; otherwise (or past 64 ids) the whole subscription.
+	benchPlan: function() {
+		var d = this.dlg, total = d.nodes.length, minutes = Math.ceil(total * SECONDS_PER_NODE / 60);
+		var all = { ids: [], label: '全部测速（' + total + ' 个' + (minutes >= 2 ? '，约 ' + minutes + ' 分钟' : '') + '）' };
+		if (!d.query.trim() && !d.region) return all;
+		var ids = this.pickerRows().filter(function(n) { return n.state !== 'blocked'; }).map(function(n) { return n.id; });
+		if (!ids.length) return { ids: null, label: '没有可测速的节点' };
+		return ids.length > BENCH_MAX_IDS || ids.length === total ? all : { ids: ids, label: '测速这 ' + ids.length + ' 个' };
+	},
+
+	startBench: function(all) {
+		var d = this.dlg;
+		if (!d || !d.el || this.mutating || d.starting || d.loading || d.bench && d.bench.running ||
+			d.nodesKey !== d.source + '\n' + d.target || !d.nodes.length)
+			return Promise.resolve(false);
+		var self = this, plan = all ? { ids: [] } : this.benchPlan();
+		if (!plan.ids) return Promise.resolve(false);
+		d.starting = true;
+		d.benchNotice = '';
+		this.syncDialog();
+		return fs.exec(CLI, ['benchmark', d.source, d.target].concat(plan.ids)).then(parseResult).then(function() {
+			if (self.dlg === d) return self.loadNodes(true);
+		}).catch(function(e) {
+			if (self.dlg === d) d.benchNotice = permissionDenied(e) ? '当前会话没有测速权限，请退出 LuCI 后重新登录。' :
+				e && has(BENCH_ERRORS, e.token) ? BENCH_ERRORS[e.token] + '。' : '测速启动失败，请稍后重试。';
+		}).then(function() {
+			if (self.dlg === d) {
+				d.starting = false;
+				self.syncDialog();
+			}
+			return true;
+		});
+	},
+
+	benchLine: function(d) {
+		var b = d.bench;
+		if (d.benchNotice) return d.benchNotice;
+		if (d.starting) return '正在启动测速…';
+		if (!b || !d.target) return '';
+		if (b.running) return '正在测速：' + b.done + ' / ' + b.total + '，结果逐行出现；关掉窗口也会继续测。';
+		if (b.error) return benchError(b.error) + '。';
+		var when = ago(b.finished_at, this.now());
+		return (when ? '上次测速：' + when + '。' : '这个订阅还没测过速。') + (d.target === 'chatgpt' ?
+			'测速会核对 ChatGPT 是否支持节点所在地区。' : '测速是经节点访问 ' + d.target.slice(5) + ' 三次，取中位首字节时间。');
+	},
+
+	pickedText: function(d) {
+		if (!d.selected) return '还没选节点：点上面列表里的一行。';
+		var n = this.selectedNode();
+		if (!n) return d.nodesKey === d.source + '\n' + d.target ? '原来的节点已不在这个订阅里，请重新选择。' : '';
+		var text = '已选：' + n.label;
+		if (n.state === 'ok') {
+			var when = ago(n.tested_at, this.now());
+			return [text, latency(n.median_ms), when && when + '测'].filter(Boolean).join(' · ');
+		}
+		if (n.state === 'blocked') return text + '（依赖其他代理，不能使用）';
+		return text + (n.state === 'failed' ? '（测速未通过，仍可保存，标为「未验证」）' : '（未测速，保存后标为「未验证」）');
+	},
+
+	syncDialog: function() {
+		var d = this.dlg;
+		if (!d || !d.el || d.kind === 'confirm') return;
+		var p = d.el, busy = !!this.mutating, ready = !d.loading && d.nodesKey === d.source + '\n' + d.target;
+		if (d.kind === 'edit') {
+			var check = this.domainCheck(), first = check.domains[0], long = utf8Length(d.label.trim()) > LABEL_BYTES;
+			p.preview.textContent = check.text;
+			p.preview.className = 'r3cg-hint' + (check.ok || check.empty ? '' : ' bad');
+			p.label.setAttribute('placeholder', first ? '不填就叫 ' + first.slice(0, LABEL_BYTES) : '例如：常用网站');
+			p.labelHint.textContent = long ? '名称太长，最多约 50 个汉字。' : '';
+			p.labelHint.className = 'r3cg-hint' + (long ? ' bad' : '');
+			p.label.disabled = p.domains.disabled = busy;
+		}
+		p.source.disabled = busy || !this.sources.length;
+		p.search.disabled = !d.nodes.length;
+		var running = !!(d.bench && d.bench.running), plan = this.benchPlan(), rows = ready ? this.pickerRows() : [];
+		p.benchBtn.disabled = busy || !ready || d.starting || running || !d.nodes.length || !plan.ids;
+		p.benchBtn.textContent = d.starting ? '正在启动…' : running ? '测速进行中…' : plan.label;
+		p.benchAllBtn.hidden = !plan.ids || !plan.ids.length;
+		p.benchAllBtn.disabled = busy || !ready || d.starting || running;
+		p.fastBtn.disabled = busy || !rows.some(function(n) { return n.state === 'ok'; });
+		p.progress.hidden = !running;
+		p.progress.setAttribute('max', Math.max(1, d.bench ? d.bench.total : 0));
+		p.progress.setAttribute('value', d.bench ? Math.min(d.bench.done, d.bench.total) : 0);
+		p.benchLine.textContent = this.benchLine(d);
+		p.picked.textContent = this.pickedText(d);
+		p.message.textContent = d.message;
+		p.message.className = 'r3cg-message' + (d.tone ? ' ' + d.tone : '');
+		p.message.setAttribute('role', d.tone === 'bad' ? 'alert' : 'status');
+		p.save.disabled = !this.canSave();
+		p.save.textContent = this.mutating === 'save' ? '正在应用…' : d.rule && d.rule.enabled === false ? '保存' : '保存并生效';
+		p.cancel.disabled = busy;
+	},
+
+	canSave: function() {
+		var d = this.dlg;
+		if (!d || !d.el || d.kind === 'confirm' || this.mutating || d.loading || d.nodesKey !== d.source + '\n' + d.target ||
+			this.sources.indexOf(d.source) < 0)
+			return false;
+		if (d.kind === 'edit' && (!this.domainCheck().ok || utf8Length(d.label.trim()) > LABEL_BYTES)) return false;
+		var n = this.selectedNode();
+		return !!n && n.state !== 'blocked';
+	},
+
+	saveDialog: function() {
+		var d = this.dlg;
+		if (!this.canSave()) return Promise.resolve(false);
+		var n = this.selectedNode(), edit = d.kind === 'edit';
+		var payload = {
+			label: edit ? d.label.trim() || this.domainCheck().domains[0].slice(0, LABEL_BYTES) : d.rule.label,
+			domains: edit ? this.domainLines(d.domainsText) : d.rule.domains.slice(),
+			source: d.source, selected: d.selected, enabled: d.rule ? d.rule.enabled !== false : true
+		};
+		// No current proof: the router keeps the node and marks the rule unverified.
+		if (n.state !== 'ok') payload.unverified = true;
+		if (d.rule) payload.id = d.rule.id;
+		if (d.preset) payload.preset = d.preset;
+		return this.mutate('save', d.rule ? d.rule.id : '', payload);
+	},
+
+	closeDialog: function(force) {
+		var d = this.dlg;
+		if (!d || this.mutating && !force) return false;
+		this.cancelTimer(d, 'timer');
+		this.cancelTimer(d, 'targetTimer');
+		d.el = null;
+		this.dlg = null;
+		ui.hideModal();
+		this.sync();
+		// A benchmark may have finished while the dialog was open.
+		if (!force) this.idleRefresh();
+		return true;
+	},
+
+	showConfirm: function(title, lines, okText, kind, action) {
+		if (this.mutating || this.dialogOpen()) return false;
+		var self = this;
+		var cancel = this.button('取消', 'neutral', function() { return self.closeDialog(); });
+		var ok = this.button(okText, kind, function() { self.closeDialog(true); return action(); });
+		this.dlg = { kind: 'confirm', ok: ok, cancel: cancel };
+		ui.showModal(title, [el('div', { 'class': 'r3cg-dialog' }, lines), el('div', { 'class': 'right' }, [cancel, ' ', ok])], 'r3cg-modal');
+		cancel.focus();
+		return true;
+	},
+
+	confirmRemove: function(rule) {
+		var self = this;
+		return this.showConfirm('删除网站规则', [
+			el('p', {}, '删除「' + titleOf(rule) + '」？'),
+			el('p', { 'class': 'r3cg-hint' }, rule.enabled ? '删除后这些域名回到原来的分流。删除不能撤销，只能重新添加。' :
+				'这条规则已停用，删除不影响当前分流。删除不能撤销。')
+		], '删除', 'negative', function() { return self.mutate('remove', rule.id); });
+	},
+
+	confirmDisable: function() {
+		if (this.disableBtn.disabled) return false;
+		var self = this, steam = steamOf(this.status), on = this.rules.filter(function(r) { return r.enabled; }).length;
+		var what = (on ? '停用全部 ' + on + ' 条网站规则（规则保留，随时可以重新启用）' : '清除本模块写入运行配置的分流') +
+			(steam && (steam.enabled || steam.applied) ? '，并关闭 Steam 直连' : '') + '。';
+		return this.showConfirm('恢复原分流', [el('p', {}, '将' + what), el('p', { 'class': 'r3cg-hint' }, 'OpenClash 原有的分流规则不受影响。')],
+			'恢复原分流', 'negative', function() { return self.mutate('disable'); });
 	},
 
 	toggleSteam: function(want) {
@@ -594,86 +1042,89 @@ return view.extend({
 			this.sync();
 			return Promise.resolve(false);
 		}
-		return this.mutate('steam-direct', null, want);
+		return this.mutate('steam-direct', '', want);
 	},
 
-	mutate: function(action, id, enabled) {
+	// Every change command answers with the same fields as `summary`, read back from the
+	// controller after the reload, so the page needs no second read to confirm it.
+	verified: function(action, id, arg, st) {
+		var pending = !!st.pending_restart, steam = steamOf(st), rule = this.ruleById(action === 'save' ? st.id || id : id);
+		if (action === 'steam-direct') return !!steam && steam.enabled === arg && steam.applied === arg;
+		if (action === 'remove') return !rule;
+		if (action === 'save')
+			return !!rule && rule.source === arg.source && rule.selected === arg.selected && rule.enabled === arg.enabled &&
+				(pending || !arg.enabled || rule.applied === true && !rule.error);
+		if (action === 'set-enabled')
+			return !!rule && rule.enabled === arg && (pending || (arg ? rule.applied === true && !rule.error : rule.applied !== true));
+		return !this.rules.some(function(r) { return r.enabled; }) && st.enabled === false &&
+			(pending || st.applied !== true && !st.error) && (!steam || !steam.enabled && !steam.applied);
+	},
+
+	doneText: function(action, arg, pending) {
+		if (pending) return '已保存，等待 OpenClash 启动后生效。';
+		if (action === 'steam-direct') return arg ? 'Steam 直连已开启。' : 'Steam 直连已关闭。';
+		if (action === 'save') return arg.enabled ? '网站规则已保存并生效。' : '网站规则已保存（未启用）。';
+		if (action === 'remove') return '网站规则已删除。';
+		if (action === 'set-enabled') return arg ? '网站规则已启用。' : '网站规则已停用。';
+		return '已恢复原分流，全部网站规则已停用，Steam 直连已关闭。';
+	},
+
+	mutate: function(action, id, arg) {
 		if (this.mutating || ['save', 'set-enabled', 'remove', 'disable', 'steam-direct'].indexOf(action) < 0 ||
-			action === 'save' && this.saveBtn.disabled || action === 'disable' && this.disableBtn.disabled ||
-			action === 'steam-direct' && (this.steamSwitch.disabled || typeof enabled !== 'boolean') ||
-			(action === 'set-enabled' || action === 'remove') && !this.rules.some(function(r) { return r.id === id; }))
+			(action === 'set-enabled' || action === 'remove') && !this.ruleById(id) ||
+			(action === 'set-enabled' || action === 'steam-direct') && typeof arg !== 'boolean' ||
+			action === 'save' && (!arg || typeof arg !== 'object'))
 			return Promise.resolve(false);
-		var self = this, payload, args, before = this.rules.map(function(r) { return r.id; });
-		if (action === 'save') {
-			payload = { label: this.label.trim(), domains: this.domains(), source: this.source, selected: this.selected, enabled: true };
-			// Saving an unprobed node is allowed; the backend then stores the rule
-			// without a proof so status shows it as unverified instead of blocking.
-			if (this.needsUnverifiedConfirm()) payload.unverified = true;
-			if (this.editId) payload.id = this.editId;
-			if (this.preset) payload.preset = this.preset;
-			args = ['save', JSON.stringify(payload)];
-		} else if (action === 'set-enabled') args = ['set-enabled', id, enabled ? '1' : '0'];
-		else if (action === 'remove') args = ['remove', id];
-		else if (action === 'steam-direct') args = ['steam-direct', enabled ? '1' : '0'];
-		else args = ['disable'];
-		if (action === 'steam-direct') this.steamTarget = enabled;
+		var self = this, d = action === 'save' && this.dlg && this.dlg.el ? this.dlg : null, started = this.now();
+		var args = action === 'save' ? ['save', JSON.stringify(arg)] : action === 'set-enabled' ? ['set-enabled', id, arg ? '1' : '0'] :
+			action === 'remove' ? ['remove', id] : action === 'steam-direct' ? ['steam-direct', arg ? '1' : '0'] : ['disable'];
+		if (action === 'steam-direct') this.steamTarget = arg;
 		this.mutating = action;
+		this.busyId = id || '';
 		++this.readSerial;
 		this.reading = false;
 		this.notice = '';
 		this.noticeTone = '';
+		if (d) { d.message = ''; d.tone = ''; }
+		this.renderRules();
 		this.sync();
+		this.renderPicker();
+		this.syncDialog();
 		return fs.exec(CLI, args).then(parseResult).then(function(result) {
-			return self.refreshStatus(true, true).then(function(ok) {
-				var st = self.status, target;
-				if (!ok) {
-					self.notice = result.pending_restart ? '已保存，等待 OpenClash 启动后生效；当前状态读取失败，请稍后刷新确认。' :
-						'操作已提交，当前状态读取失败。请点击刷新确认。';
-					self.noticeTone = 'warn';
-					return;
-				}
-				if (action === 'save') {
-					var savedId = payload.id || result.id || result.rule && result.rule.id;
-					target = self.rules.filter(function(r) {
-						return savedId ? r.id === savedId : before.indexOf(r.id) < 0 &&
-							r.source === payload.source && r.selected === payload.selected && r.enabled === true;
-					});
-					target = target.length === 1 ? target[0] : null;
-				} else target = self.rules.filter(function(r) { return r.id === id; })[0];
-				var pending = result.pending_restart || st.pending_restart, steam = steamOf(st);
-				var verified = action === 'steam-direct' ? !!steam && steam.enabled === enabled && steam.applied === enabled :
-					action === 'save' ? target && target.source === payload.source && target.selected === payload.selected && target.enabled === true &&
-					(pending || target.applied === true && !target.error) :
-					action === 'remove' ? !target : action === 'set-enabled' ? target && target.enabled === enabled &&
-						(pending || (enabled ? target.applied === true && !target.error : target.applied !== true)) :
-						!self.rules.some(function(r) { return r.enabled; }) && st.enabled === false && (pending || st.applied !== true && !st.error) &&
-						(!steam || !steam.enabled && !steam.applied);
-				if (!verified) {
-					self.notice = statusErrorText(st) || '操作已提交，尚未确认生效。请刷新状态。';
-					self.noticeTone = 'bad';
-					return;
-				}
-				// Steam is applied live or not at all; it never waits for a restart.
-				self.notice = action === 'steam-direct' ? (enabled ? 'Steam 直连已开启。' : 'Steam 直连已关闭。') :
-					pending ? '已保存，等待 OpenClash 启动后生效。' : action === 'save' ? '网站规则已保存并启用。' :
-					action === 'remove' ? '网站规则已删除。' : action === 'set-enabled' ? (enabled ? '网站规则已启用。' : '网站规则已停用。') :
-						'已恢复原分流，全部网站规则已停用，Steam 直连已关闭。';
-				self.noticeTone = pending && action !== 'steam-direct' ? 'warn' : 'ok';
-				if (action === 'save' || action === 'remove' && id === self.editId) {
-					self.formOpen = false;
-					self.form.hidden = true;
-					self.editId = '';
-					self.source = '';
-					self.selected = '';
-					self.dirty = false;
-				}
+			if (Array.isArray(result.rules)) return result;
+			return fs.exec(CLI, ['summary']).then(parseResult).then(function(st) {
+				st.id = result.id;
+				return st;
 			});
+		}).then(function(st) {
+			self.acceptStatus(st);
+			if (!self.verified(action, id, arg, st)) {
+				var text = statusErrorText(st) || '操作已提交，尚未确认生效。请刷新状态。';
+				if (d && self.dlg === d) { d.message = text; d.tone = 'bad'; }
+				self.notice = text;
+				self.noticeTone = 'bad';
+				return false;
+			}
+			if (d && self.dlg === d) self.closeDialog(true);
+			var pending = !!st.pending_restart && action !== 'steam-direct';
+			self.notice = self.doneText(action, arg, pending) + '用时 ' + ((self.now() - started) / 1000).toFixed(1) + ' 秒' +
+				(st.reloaded === false ? '，运行配置无变化，未重载' : '') + '。';
+			self.noticeTone = pending ? 'warn' : 'ok';
+			return true;
 		}).catch(function(e) {
-			self.notice = errorText(e);
-			self.noticeTone = 'bad';
-		}).then(function() {
+			var text = errorText(e);
+			// A failed save keeps the dialog and everything typed in it.
+			if (d && self.dlg === d) { d.message = text; d.tone = 'bad'; }
+			else { self.notice = text; self.noticeTone = 'bad'; }
+			return false;
+		}).then(function(ok) {
 			self.mutating = false;
+			self.busyId = '';
+			self.renderRules();
 			self.sync();
+			self.renderPicker();
+			self.syncDialog();
+			return ok;
 		});
 	}
 });

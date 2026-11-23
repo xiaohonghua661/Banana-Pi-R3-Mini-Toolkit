@@ -3,6 +3,8 @@
 		"description": "查看、管理及恢复自定义网站分流",
 		"read": {
 			"file": {
+				"/usr/sbin/r3mini-chatgpt summary": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt nodes *": [ "exec" ],
 				"/usr/sbin/r3mini-chatgpt status": [ "exec" ],
 				"/usr/sbin/r3mini-chatgpt benchmark-status *": [ "exec" ],
 				"/usr/sbin/r3mini-chatgpt status *": [ "exec" ]
