@@ -896,10 +896,18 @@ module R3MiniChatGPT
       pending_restart = s['pending_restart'] == true && !matches
       error = nil if pending_restart && !s['enabled'] && error == 'CONTROLLER_UNAVAILABLE'
       applied = s['enabled'] && matches && rules.select { |r| r['enabled'] }.all? { |r| r['applied'] }
+      sources = source_files
+      # OpenClash's current config (users switch among several subscriptions); new rules default to it.
+      active = begin
+        active_basename
+      rescue Failure
+        nil
+      end
       {'ok' => true, 'enabled' => s['enabled'], 'applied' => applied == true, 'error' => error,
        'pending_restart' => pending_restart,
        'steam_direct' => {'enabled' => s['steam_direct'], 'applied' => snapshot ? steam_live?(snapshot) : false},
-       'source' => s['source'], 'sources' => source_files, 'rules' => rules,
+       'source' => s['source'], 'sources' => sources, 'active_source' => sources.include?(active) ? active : nil,
+       'rules' => rules,
        'last_action' => s['last_action'], 'last_time' => s['last_time']}
     end
 

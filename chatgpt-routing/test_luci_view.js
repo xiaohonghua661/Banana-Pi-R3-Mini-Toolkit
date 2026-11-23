@@ -65,6 +65,20 @@ const N5 = node('5555555555555555', '🇺🇸 美国 链式', { dependent: true,
 const N6 = node('6666666666666666', '剩余流量：1017.5 GB', { error: 'PENDING' });
 const ALL = [N6, N1, N2, N3, N4, N5];
 const STEAM_ON = { enabled: true, applied: true }, STEAM_OFF = { enabled: false, applied: false };
+// Shaped like mesl_xhh.yaml on .242 (2026-11-24 export): 172 nodes in 91 regions, every name led by a flag.
+const flag = code => String.fromCodePoint(...[...code].map(c => 0x1f1e6 + c.charCodeAt(0) - 65));
+function meslLike() {
+	const big = [['HK', 15], ['US', 14], ['SG', 12], ['JP', 12], ['TW', 9], ['KR', 5], ['DE', 4], ['GB', 4]];
+	const tail = 'AE AL AM AR AT AZ BA BD BE BG BH BO BR BY CA CH CL CO CR CY CZ DK DZ EC EE EG ES FI FR GE GR GT HR HU ID IE IL IN IQ IR IS IT JO KE KH KZ LA LK LT LU LV MA MD MK MN MO MT MX MY NG NL NO NP NZ PA PE PH PK PL PT PY QA RO RS RU SA SE SI SK TH TR UA VN'.split(' ');
+	const regions = big.concat(tail.map((code, i) => [code, i < 14 ? 2 : 1]));
+	const nodes = [];
+	regions.forEach(([code, count]) => {
+		for (let i = 1; i <= count; i++)
+			nodes.push(node((nodes.length + 1).toString(16).padStart(16, '0'), flag(code) + ' ' + code + ' ' + String(i).padStart(2, '0'), { type: 'anytls', error: 'PENDING' }));
+	});
+	return nodes;
+}
+
 
 function rule(o = {}) {
 	return Object.assign({ id: 'aaaaaaaaaaaa', label: '演示网站', domains: ['example.com'], preset: '', source: 'lian_li.yaml',
@@ -175,13 +189,13 @@ async function run() {
 		const h = harness(), pending = deferred();
 		h.queue(pending.promise);
 		const result = h.view.refreshBtn.click();
-		assert.equal(h.view.refreshBtn.textContent, '刷新中…');
+		assert.equal(h.view.refreshBtn.textContent, '读取中…');
 		h.clock.now += 31000;
 		await h.polls[0].fn();
 		assert.equal(h.calls.length, 1);
 		pending.resolve(reply(summary()));
 		assert.equal(await result, true);
-		assert.equal(h.view.refreshBtn.textContent, '刷新');
+		assert.equal(h.view.refreshBtn.textContent, '立即刷新');
 	});
 
 	await test('首次读取失败显示异常且不能添加，刷新成功后恢复', async () => {
@@ -193,6 +207,59 @@ async function run() {
 		await h.view.refresh(true);
 		assert.equal(h.view.addBtn.disabled, false);
 		assert.match(h.view.badge.textContent, /未启用/);
+	});
+
+	await test('标题按LuCI标准单独一行，状态和立即刷新在标题下面', () => {
+		const h = harness(summary({ rules: [rule()], enabled: true, applied: true, active_source: 'lian_li.yaml' }));
+		const kids = h.view.root.children.filter(c => c.tagName !== 'style');
+		assert.equal(kids[0].tagName, 'h2');
+		assert.equal(kids[0].textContent, '网站分流');
+		assert.equal(kids[0].children.length, 1, 'h2 只放标题文字：argon 把它画成压在蓝色页头上的标题卡');
+		assert.equal(kids[1].className, 'cbi-map-descr');
+		assert.equal(kids[2].className, 'r3cg-statusbar');
+		assert.deepEqual(kids[2].children, [h.view.badge, h.view.activeInfo, h.view.refreshBtn]);
+		assert.equal(h.view.refreshBtn.textContent, '立即刷新', 'LuCI 页头已有自己的「刷新」开关');
+		assert.equal(h.view.activeInfo.textContent, 'OpenClash 当前配置：lian_li.yaml');
+	});
+
+	await test('新网站默认用OpenClash当前配置，下拉和卡片标出当前配置', async () => {
+		const st = summary({ rules: [rule({ source: 'other.yaml' })], enabled: true, applied: true, source: 'lian_li.yaml', active_source: 'other.yaml' });
+		const h = harness(st);
+		assert.match(h.view.list.textContent, /订阅：other\.yaml（当前配置）/);
+		await openNew(h, 'example.org', nodesReply(ALL, {}, { source: 'other.yaml', target: 'site:example.org' }));
+		assert.deepEqual(h.calls[0], ['nodes', 'other.yaml', 'site:example.org']);
+		assert.equal(h.view.dlg.source, 'other.yaml');
+		assert.deepEqual(h.view.dlg.el.source.children.map(o => o.textContent), ['lian_li.yaml', 'other.yaml（OpenClash 当前配置）']);
+		const old = harness(summary({ source: 'other.yaml' }));
+		assert.equal(old.view.defaultSource(), 'other.yaml', '旧后端没有 active_source 时退回上次保存的订阅');
+		assert.equal(old.view.activeInfo.textContent, '');
+	});
+
+	await test('91个地区：最大的8个做按钮，其余进下拉，不铺满一墙', async () => {
+		const nodes = meslLike(), r = rule(), h = harness(enabledWith(r));
+		assert.equal(nodes.length, 172);
+		await openRule(h, r, true, nodesReply(nodes));
+		const p = h.view.dlg.el;
+		const chips = p.chips.children.filter(c => c.tagName === 'button');
+		assert.deepEqual(chips.map(c => c.textContent), ['全部 172', '香港 15', '美国 14', '日本 12', '新加坡 12', '台湾 9', '韩国 5', '德国 4', '英国 4']);
+		const more = p.chips.children.find(c => c.tagName === 'select');
+		assert.equal(more.children.length, 84);
+		assert.equal(more.children[0].textContent, '其他 83 个地区…');
+		assert.ok(more.children.some(o => o.textContent === '埃及 1'), '表里没有的地区用浏览器的中文名');
+		more.change('EG');
+		assert.deepEqual(rowsOf(h).map(b => part(b, 'r3cg-region').textContent), ['埃及']);
+		assert.equal(p.chips.children.find(c => c.tagName === 'select').value, 'EG');
+		assert.equal(p.chips.children[0].attributes['aria-pressed'], 'false');
+		assert.equal(p.benchBtn.textContent, '测速这 1 个');
+		p.chips.children.find(c => c.textContent === '台湾 9').click();
+		assert.equal(p.chips.children.find(c => c.tagName === 'select').value, '');
+		assert.equal(rowsOf(h).length, 9);
+	});
+
+	await test('地区不多时全部做按钮，不出下拉', async () => {
+		const r = rule(), h = harness(enabledWith(r));
+		await openRule(h, r);
+		assert.equal(h.view.dlg.el.chips.children.filter(c => c.tagName === 'select').length, 0);
 	});
 
 	await test('网站名、域名和节点名称仅按文本插入', async () => {
@@ -341,7 +408,7 @@ async function run() {
 		assert.equal(part(row(h, N1), 'r3cg-region').textContent, '日本');
 		assert.equal(part(row(h, N1), 'r3cg-result').textContent, '90 ms · 2 小时前');
 		assert.equal(part(row(h, N3), 'r3cg-result').textContent, '未测速');
-		assert.deepEqual(h.view.dlg.el.chips.children.map(c => c.textContent), ['全部 6', '日本 1', '台湾 1', '香港 1', '美国 1', '其他 2']);
+		assert.deepEqual(h.view.dlg.el.chips.children.map(c => c.textContent), ['全部 6', '美国 1', '日本 1', '台湾 1', '香港 1', '其他 2']);
 		assert.equal(h.view.dlg.el.more.hidden, false);
 		assert.equal(h.view.dlg.el.more.textContent, '显示 3 个未通过或不可用的条目');
 		h.view.dlg.el.more.click();
@@ -585,7 +652,7 @@ async function run() {
 	await test('Steam直连卡片在网站操作之前，开关是role=switch按钮且三种状态', async () => {
 		const h = harness(summary({ steam_direct: STEAM_OFF })), kids = h.view.root.children;
 		const cardAt = kids.indexOf(h.view.steamCard), actionsAt = kids.findIndex(c => c.children.includes(h.view.addBtn));
-		assert.ok(kids.findIndex(c => c.className === 'r3cg-intro') < cardAt && cardAt < actionsAt);
+		assert.ok(kids.findIndex(c => c.className === 'cbi-map-descr') < cardAt && cardAt < actionsAt);
 		assert.match(h.view.steamCard.textContent, /^Steam 直连/);
 		assert.ok(h.view.steamCard.textContent.includes('Steam 联机（Valve 服务器和中继 IP）、登录接口、下载走直连，不经过代理节点；商店和社区网页不变。'));
 		assert.equal(h.view.steamSwitch.tagName, 'button');

@@ -4,7 +4,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>网站分流 · 离线页面验收</title>
 <!--
-  合成数据 + 本地模拟接口，实际执行 router/ 里的 LuCI 页面源码，不连接路由器。
+  合成数据 + 本地模拟接口，实际执行 router/ 里的 LuCI 页面源码，不连接路由器。只供开发时看交互，不能当验收：
+  数据是自编的小样本，也没有 argon 的蓝色页头。验收用 test_real_page.py，在设备的真实页面和真实数据上做。
   ?mode=rules|change|add|conflict|bench|confirm|delete|steam|fault|long|empty|failure
   ?theme=URL       换成真实主题样式（例如从路由器复制的 argon cascade.css），可加 &dark=URL
   弹窗按 LuCI 的结构模拟：#modal_overlay > .modal，body.modal-overlay-active，Esc 点 .right 里第一个按钮。

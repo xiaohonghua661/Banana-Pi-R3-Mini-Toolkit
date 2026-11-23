@@ -1,5 +1,7 @@
 LuCI「服务 → 网站分流」给指定网站单独选一个出口节点。每条规则是一组域名加「订阅 + 节点」，以卡片列出，可换节点、编辑、启停、删除；另有 ChatGPT 预设，已有预设规则时不再显示该按钮。首次安装为空且保持关闭；保存启用的规则才改变运行分流。「恢复原分流」先弹确认，写明会停用几条规则、是否关闭 Steam 直连；执行后停用所有规则（定义保留）、关闭 Steam 直连，并移除本模块的专属节点、组和规则，模块继续保留在菜单中，其他规则保留。删除规则同样先确认。
 
+页面标题按 LuCI 的标准写法单独成行（argon 把它画成压在蓝色页头上的标题卡），状态、「OpenClash 当前配置」和「立即刷新」放在标题下面；LuCI 页头自带的「刷新」是轮询开关，本页按钮因此叫「立即刷新」。OpenClash 挂了几个订阅、会换当前配置：添加网站时默认用 OpenClash 当前配置，订阅下拉和规则卡片都标出它。地区筛选按节点数取前 8 个做按钮，其余进「其他 N 个地区」下拉（MESL 订阅有 91 个地区），地区名由浏览器给出中文名。
+
 页面打开时和之后每 30 秒读一次轻量的 `summary`：不解析订阅、不启动测速助手，2026-11-23 在设备上实测 0.7 秒、约 0.7 KB（旧版每 10 秒读一次 `status`，5.7 秒、112 KB）。标签页在后台或弹窗打开时不读。「换节点」「编辑」「添加网站」都在 LuCI 弹窗里完成，底栏「取消」在前，按 Esc 即取消。节点选择器打开时读一次 `nodes`：可搜索名称、地区或类型，按节点名开头的国旗或地名分出地区，点一下筛选；测过且通过的按三轮中位延迟排前，未测速的其次，未通过的折叠。「测速这 N 个」只测当前筛出的节点（超过 64 个时改为全部测速），测速进行时每 3 秒刷新一次，结果逐行出现，测完即停；关掉弹窗测速照常进行。「选最快」在筛出且已有结果的节点里挑。未测速或测速未通过的节点也能保存，规则标为「未验证」。名称可不填，默认用第一个域名。保存、启停、删除直接用命令返回的状态确认，不再额外读一次，提示里带用时。
 
 页面顶部的「Steam 直连」开关让 Steam 联机（Valve 服务器和中继 IP）、登录接口和下载走直连，不经过代理节点；商店和社区网页不变。开启后运行 YAML 的 `rules:` 最前面是 23 条连续的 DIRECT 规则：`DOMAIN-SUFFIX,steamserver.net`、`DOMAIN-SUFFIX,steamcontent.com`、`DOMAIN,api.steampowered.com`，再加 Valve AS32590 的 20 个 IPv4 网段（`IP-CIDR,网段,DIRECT,no-resolve`，取自 2026-11-12 的 RIPEstat 公告前缀并合并相邻段，列表在后端常量 `STEAM_PREFIXES`）；网站规则排在它们后面。开关状态存为 `settings.json` 的 `steam_direct`，OpenClash 重启或订阅更新后由覆写钩子重新加入。切换时先确认控制接口在线，再备份、经控制接口重载（Mihomo 解析失败时控制接口返回 400 并继续运行原配置）并回读核验，任一步失败都恢复原文件和设置。只切换 Steam 不重建网站规则，所以某条网站规则等待重新测速时开关照常可用。关闭时只删除位于最顶部且完整的这一组；用户配置里的同类规则，即使是顶部以外的完整副本，也一律保留。开启后若顶部这组缺失或残缺，页面显示「开启了但配置里没找到——重新打开一次」，开关显示为关；再打开一次会在顶部补回完整的一组，残缺的旧行保留不删。开启要求 OpenClash 处于规则模式（否则报 `ROUTING_MODE_UNSUPPORTED`），控制接口离线时报 `CONTROLLER_UNAVAILABLE`，两者都不写任何文件。
@@ -50,7 +52,7 @@ python chatgpt-routing/manage.py verify HOST_A --key KEY_PATH
 /usr/sbin/r3mini-chatgpt steam-direct 0
 ```
 
-`summary` 是页面用的状态：`enabled`、`applied`、`error`、`pending_restart`、`steam_direct`、`sources`，`rules` 每条另带 `applied`、`error`、`verified`、`unverified`、`median_ms`、`tested_at`。`nodes` 返回一个订阅对一个测速目标的节点行和测速进度，目标缺省为 `chatgpt`。`benchmark` 的目标同样缺省为 `chatgpt`，带节点令牌时只测这些节点（最多 64 个）。修改类命令（`save`、`set-enabled`、`remove`、`disable`、`steam-direct`）返回与 `summary` 相同的字段，另加 `site_rules`、`id`、`reloaded`（这次有没有热重载）和 `elapsed_ms`；生成的运行配置没变化时（只改名称、删除已停用的规则、原样再保存）只写设置文件，不重载。
+`summary` 是页面用的状态：`enabled`、`applied`、`error`、`pending_restart`、`steam_direct`、`sources`、`active_source`（OpenClash 当前配置，读不到或不在订阅目录里时为 null），`rules` 每条另带 `applied`、`error`、`verified`、`unverified`、`median_ms`、`tested_at`。`nodes` 返回一个订阅对一个测速目标的节点行和测速进度，目标缺省为 `chatgpt`。`benchmark` 的目标同样缺省为 `chatgpt`，带节点令牌时只测这些节点（最多 64 个）。修改类命令（`save`、`set-enabled`、`remove`、`disable`、`steam-direct`）返回与 `summary` 相同的字段，另加 `site_rules`、`id`、`reloaded`（这次有没有热重载）和 `elapsed_ms`；生成的运行配置没变化时（只改名称、删除已停用的规则、原样再保存）只写设置文件，不重载。
 
 `status` 的输出格式保持不变，供 gpt-night 和 `manage.py verify` 使用：顶层 `enabled` 表示是否有启用的规则，`applied` 是运行规则/节点的实际核验结果，`site_rules` 提供每条规则的状态，`steam_direct` 是 `{"enabled": 布尔, "applied": 布尔}`：`enabled` 为保存的开关，`applied` 表示运行 YAML 的 `rules:` 最前面有完整的 Steam 规则组。`benchmark` 启动异步实测，`benchmark-status` 读取进度、每节点结果和 `best` 推荐令牌。节点令牌由页面读取，不能用节点名代替。`save` 接收页面生成的规则 JSON；`set-enabled` 的末项可为 `0`/`1`，`remove` 删除单条规则，`disable` 全部停用并关闭 Steam 直连；`steam-direct 1`/`0` 开关 Steam 直连，重复执行时若设置、文件和实时规则都已一致，就不备份、不写文件、不重载；其他参数报 `ARGUMENT_INVALID`；`apply` 保留旧 ChatGPT 预设接口。订阅仅接受 `/etc/openclash/config/` 下普通 YAML 文件。`hook RUNTIME_YAML` 仅供 OpenClash 覆写钩子内部调用，LuCI ACL 不授权它；ACL 对 Steam 只授权 `steam-direct 0` 与 `steam-direct 1` 两条完整命令。
 
@@ -62,9 +64,12 @@ python chatgpt-routing/manage.py verify HOST_A --key KEY_PATH
 python chatgpt-routing/test_manage.py
 python chatgpt-routing/test_backend.py --key KEY_PATH
 node chatgpt-routing/test_luci_view.js
+python chatgpt-routing/test_real_page.py --key KEY_PATH --candidate
 ```
 
-`test_manage.py` 是部署器测试，其中 2 项需要 WSL。`test_backend.py` 把后端、测速助手和 `test_router_suite.rb`（70 项）传到设备 `/tmp` 下的新目录，用设备自带的 Ruby 运行，跑完删除；每项用例都把 `R3MINI_CHATGPT_ROOT` 指到自己的沙箱，配假 curl、假 Mihomo 内核和假 uci，不读写正式文件，约 4 分钟、一个 CPU 核。`-k 关键字` 只跑名字含该关键字的用例，`test_benchmark.py` 只跑测速助手部分。`test_luci_view.js`（39 项）在 Node 里执行页面源码。`test_luci_preview.html?mode=…` 是离线预览，用模拟接口实际运行页面，可加 `&theme=` 加载从设备复制的 argon 样式。
+`test_manage.py` 是部署器测试，其中 2 项需要 WSL。`test_backend.py` 把后端、测速助手和 `test_router_suite.rb`（70 项）传到设备 `/tmp` 下的新目录，用设备自带的 Ruby 运行，跑完删除；每项用例都把 `R3MINI_CHATGPT_ROOT` 指到自己的沙箱，配假 curl、假 Mihomo 内核和假 uci，不读写正式文件，约 4 分钟、一个 CPU 核。`-k 关键字` 只跑名字含该关键字的用例，`test_benchmark.py` 只跑测速助手部分。`test_luci_view.js`（44 项）在 Node 里执行页面源码；其中的大订阅用例按设备上 MESL 的实际规模造数据（172 个节点、91 个地区）。
+
+页面验收只认 `test_real_page.py`：它打开设备上真实的 LuCI 页面，用的是 argon 主题和它的蓝色页头、LuCI 自己的弹窗，以及设备上全部订阅的真实节点名和数量；`--candidate` 把本地的页面脚本换进去，用于安装前验收，不加则验收已安装的页面。浏览器里会拦掉所有写命令，走查只读：打开弹窗、逐个切换订阅、从下拉里选地区、取消两个确认框。它在 320、375、768、1280 宽度、暗色、文字放大到 200% 下截图，检查溢出、脚本错误、状态行有没有压在页头上，截图放 `tmp/site-routing/realpage-<时间>/`。LuCI 会话经密钥 SSH 按 rpcd 给 root 的授权建立，不输入密码，结束后销毁。`test_luci_preview.html?mode=…` 用自编数据和模拟弹窗，只供开发时看交互，不能当验收：2026-11-23 它排得好看的地区按钮，换成设备上 91 个地区的订阅就是一整墙；它也没有 argon 的蓝色页头，标题旁的状态和按钮装上设备后压在了页头上。
 
 所有失败输出为 `OPERATION_FAILED kind=TOKEN`；先处理对应原因再重跑。`PINNED_HOST_KEY_MISSING` 需核验并固定密钥，`SSH_KEY_MISSING` 表示私钥路径不是文件，`SSH_KEY_INVALID` 表示无法作为无口令私钥读取，`SSH_KEY_LOGIN_FAILED` 表示设备拒绝该私钥（需确认设备已登记对应公钥），这三种都不会改用密码重试；`BACKUP_NO_LONGER_MATCHES_PRODUCTION` 需重新备份，`BACKUP_IDENTITY_MISMATCH`/`BACKUP_RUNTIME_CHANGED` 需核对目标和恢复点，`INSTALL_FAILED_AND_ROLLBACK_FAILED` 需保留恢复点并检查设备当前状态。安装、真实网络分流与硬件启动的验收以实际执行记录为准。
 

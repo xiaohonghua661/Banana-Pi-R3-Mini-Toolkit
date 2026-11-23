@@ -16,6 +16,8 @@ var PRESET_BUILTIN = CHATGPT_DOMAINS.concat(['openaiapi-site.azureedge.net', 'op
 var IDLE_POLL = 30, FRESH_MS = 5000, BENCH_POLL_MS = 3000, TARGET_DELAY_MS = 600;
 // The backend accepts at most 64 node ids per run; a full sweep measured about 2.5 s per node.
 var BENCH_MAX_IDS = 64, SECONDS_PER_NODE = 2.5;
+// Region filter: the biggest regions as buttons, the long tail (MESL: 83 more) in a dropdown.
+var REGION_CHIPS = 8;
 // settings.json validation (and therefore rollback to an older backend) caps a name at 160 UTF-8 bytes.
 var LABEL_BYTES = 160;
 var REGION_NAMES = { HK: '香港', TW: '台湾', JP: '日本', SG: '新加坡', US: '美国', KR: '韩国', GB: '英国', DE: '德国',
@@ -186,8 +188,17 @@ function displayName(name) {
 	return flagCode(text) ? Array.from(text).slice(2).join('').trim() || text : text;
 }
 
+// MESL lists 91 regions (2026-11-24); the browser names the ones the table above leaves out.
+var REGION_NAMER = null;
+try { REGION_NAMER = new Intl.DisplayNames(['zh-CN'], { type: 'region' }); } catch (e) {}
+
 function regionName(code) {
-	return has(REGION_NAMES, code) ? REGION_NAMES[code] : code || REGION_NAMES['?'];
+	if (has(REGION_NAMES, code)) return REGION_NAMES[code];
+	try {
+		var name = code && REGION_NAMER ? REGION_NAMER.of(code) : '';
+		if (name && name !== code) return name;
+	} catch (e) {}
+	return code || REGION_NAMES['?'];
 }
 
 function latency(ms) {
@@ -243,8 +254,12 @@ function benchOf(b) {
 var CSS = [
 	'.r3cg{max-width:1080px;line-height:1.5}.r3cg *,.r3cg-modal *{box-sizing:border-box}',
 	'.r3cg [hidden],.r3cg-modal [hidden]{display:none!important}',
-	'.r3cg-header,.r3cg-heading,.r3cg-actions,.r3cg-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem}',
-	'.r3cg-header{justify-content:space-between;margin-bottom:.75rem}.r3cg h2,.r3cg h3{margin:0}.r3cg-intro{margin:0 0 1rem}',
+	'.r3cg-statusbar,.r3cg-actions,.r3cg-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem}',
+	'.r3cg-statusbar{gap:.4rem 1rem;padding:0 1.25rem}.r3cg-statusbar .cbi-button{margin-left:auto}.r3cg h3{margin:0}',
+	'.r3cg-active{font-size:.9em;opacity:.8;overflow-wrap:anywhere}',
+	'.r3cg-modal select.r3cg-more{display:inline-block;width:auto;max-width:100%;min-height:1.9rem;font-size:.9em}',
+	// argon keeps button text on one line; long labels must wrap on phones with large text.
+	'.r3cg .cbi-button,.r3cg-modal .cbi-button{white-space:normal;max-width:100%}',
 	'.r3cg-state{display:inline-flex;align-items:center;gap:.4rem;font-size:.9em;font-weight:600}',
 	'.r3cg-dot{height:.6rem;width:.6rem;border-radius:50%;background:#707a83;flex:none}',
 	'.r3cg-state.ok .r3cg-dot{background:#24904e}.r3cg-state.bad .r3cg-dot{background:#c84343}.r3cg-state.warn .r3cg-dot{background:#b07800}',
@@ -347,11 +362,14 @@ return view.extend({
 		this.ruleButtons = [];
 		this.root = el('div', { 'class': 'r3cg' }, el('style', {}, CSS));
 		this.badge = el('span', { 'class': 'r3cg-state', 'role': 'status', 'aria-live': 'polite' });
-		this.refreshBtn = this.button('刷新', 'neutral', function() { return self.refresh(true); });
-		this.root.appendChild(el('div', { 'class': 'r3cg-header' }, [
-			el('div', { 'class': 'r3cg-heading' }, [el('h2', {}, '网站分流'), this.badge]), this.refreshBtn
-		]));
-		this.root.appendChild(el('p', { 'class': 'r3cg-intro' }, '给指定网站单独选一个出口节点；其他流量照旧走 OpenClash 原有规则。'));
+		this.activeInfo = el('span', { 'class': 'r3cg-active' });
+		// LuCI already shows its own 「刷新」 poll switch in the header; this one reads at once.
+		this.refreshBtn = this.button('立即刷新', 'neutral', function() { return self.refresh(true); });
+		// Standard LuCI layout: argon draws a lone h2 as the title card over its blue header band,
+		// so status and buttons go below it, on the page background.
+		this.root.appendChild(el('h2', { 'name': 'content' }, '网站分流'));
+		this.root.appendChild(el('div', { 'class': 'cbi-map-descr' }, '给指定网站单独选一个出口节点；其他流量照旧走 OpenClash 原有规则。'));
+		this.root.appendChild(el('div', { 'class': 'r3cg-statusbar' }, [this.badge, this.activeInfo, this.refreshBtn]));
 		this.steamSwitch = el('button', { 'type': 'button', 'role': 'switch', 'class': 'r3cg-switch', 'id': 'r3cg-steam',
 			'aria-checked': 'false', 'aria-labelledby': 'r3cg-steam-label', 'aria-describedby': 'r3cg-steam-state r3cg-steam-hint',
 			'click': function() { return self.toggleSteam(!self.steamOn); } }, el('span', { 'aria-hidden': 'true' }));
@@ -481,7 +499,7 @@ return view.extend({
 			el('div', { 'class': 'r3cg-rule-head' }, [el('h3', {}, name), badge]),
 			el('p', { 'class': 'r3cg-domains', 'title': rule.domains.join('\n') }, shortDomains(rule.domains)),
 			el('p', { 'class': 'r3cg-node' }, this.nodeLine(rule)),
-			el('p', { 'class': 'r3cg-source' }, '订阅：' + (rule.source || '未指定')),
+			el('p', { 'class': 'r3cg-source' }, '订阅：' + (rule.source || '未指定') + (rule.source && rule.source === this.activeSource() ? '（当前配置）' : '')),
 			rule.enabled && rule.error && !this.statusError ? el('p', { 'class': 'r3cg-hint bad' }, ruleErrorText(rule.error)) : null,
 			el('div', { 'class': 'r3cg-actions' }, [change, edit, toggle, remove])
 		]);
@@ -517,7 +535,8 @@ return view.extend({
 			!(steam && (steam.enabled || steam.applied)));
 		this.disableBtn.textContent = this.mutating === 'disable' ? '正在恢复…' : '恢复原分流';
 		this.refreshBtn.disabled = busy || this.reading;
-		this.refreshBtn.textContent = this.reading && this.foreground ? '刷新中…' : '刷新';
+		this.refreshBtn.textContent = this.reading && this.foreground ? '读取中…' : '立即刷新';
+		this.activeInfo.textContent = st && isSource(st.active_source) ? 'OpenClash 当前配置：' + st.active_source : '';
 		this.ruleButtons.forEach(function(b) { b.disabled = busy || unavailable; });
 		this.root.setAttribute('aria-busy', busy || this.reading && this.foreground ? 'true' : 'false');
 		var err = this.statusError || statusErrorText(st);
@@ -527,8 +546,15 @@ return view.extend({
 		this.message.setAttribute('role', this.noticeTone === 'bad' || (!this.notice && err) ? 'alert' : 'status');
 	},
 
+	// OpenClash's current config; null when unknown (older backend, uci unreadable).
+	activeSource: function() {
+		var st = this.status;
+		return st && this.sources.indexOf(st.active_source) >= 0 ? st.active_source : null;
+	},
+
 	defaultSource: function() {
 		var st = this.status, s = this.sources;
+		if (this.activeSource()) return this.activeSource();
 		if (st && s.indexOf(st.source) >= 0) return st.source;
 		return s.indexOf(DEFAULT_SOURCE) >= 0 ? DEFAULT_SOURCE : s[0] || '';
 	},
@@ -666,7 +692,8 @@ return view.extend({
 		if (!d || !d.el || d.kind === 'confirm') return;
 		var select = clear(d.el.source);
 		if (!this.sources.length) select.appendChild(el('option', { 'value': '' }, '没有可用的订阅'));
-		this.sources.forEach(function(s) { select.appendChild(el('option', { 'value': s }, s)); });
+		var active = this.activeSource();
+		this.sources.forEach(function(s) { select.appendChild(el('option', { 'value': s }, s + (s === active ? '（OpenClash 当前配置）' : ''))); });
 		if (d.source && this.sources.indexOf(d.source) < 0)
 			select.appendChild(el('option', { 'value': d.source, 'disabled': true }, d.source + '（已不可用）'));
 		select.value = d.source;
@@ -791,16 +818,30 @@ return view.extend({
 			if (!has(counts, n.region)) { counts[n.region] = 0; codes.push(n.region); }
 			counts[n.region]++;
 		});
-		codes.sort(function(a, b) { return (a === '?') - (b === '?') || counts[b] - counts[a]; });
+		codes.sort(function(a, b) {
+			return (a === '?') - (b === '?') || counts[b] - counts[a] || regionName(a).localeCompare(regionName(b), 'zh');
+		});
 		if (d.region && !has(counts, d.region)) d.region = '';
+		// One more chip beats a dropdown holding a single region.
+		var chips = codes.length > REGION_CHIPS + 1 ? codes.slice(0, REGION_CHIPS) : codes, rest = codes.slice(chips.length);
 		clear(p.chips);
 		p.chips.hidden = codes.length < 2;
 		if (codes.length > 1) {
-			[''].concat(codes).forEach(function(code) {
+			[''].concat(chips).forEach(function(code) {
 				p.chips.appendChild(el('button', { 'type': 'button', 'class': 'r3cg-chip', 'aria-pressed': d.region === code ? 'true' : 'false',
 					'click': function() { d.region = code; self.renderPicker(); self.syncDialog(); } },
 					code ? regionName(code) + ' ' + counts[code] : '全部 ' + d.nodes.length));
 			});
+		}
+		if (rest.length) {
+			var more = el('select', { 'class': 'r3cg-more', 'aria-label': '其他地区',
+				'change': function(ev) { d.region = ev.target.value; self.renderPicker(); self.syncDialog(); } },
+				el('option', { 'value': '' }, '其他 ' + rest.length + ' 个地区…'));
+			rest.slice().sort(function(a, b) { return regionName(a).localeCompare(regionName(b), 'zh'); }).forEach(function(code) {
+				more.appendChild(el('option', { 'value': code }, regionName(code) + ' ' + counts[code]));
+			});
+			more.value = rest.indexOf(d.region) >= 0 ? d.region : '';
+			p.chips.appendChild(more);
 		}
 		var rows = this.pickerRows(), hidden = 0, shown = 0, failed = 0;
 		var live = rows.some(function(n) { return n.state === 'ok' || n.state === 'untested'; });

@@ -1294,7 +1294,7 @@ class Case
     apply
     out, = run([RUBY, BACKEND, 'summary'])
     summary = jload(out)
-    eq(%w[applied enabled error last_action last_time ok pending_restart rules source sources steam_direct], summary.keys.sort)
+    eq(%w[active_source applied enabled error last_action last_time ok pending_restart rules source sources steam_direct], summary.keys.sort)
     check(out.bytesize < 2048, "summary is #{out.bytesize} bytes")
     rule = summary['rules'][0]
     eq(true, rule['applied'])
@@ -1348,6 +1348,15 @@ class Case
     eq(false, removed['reloaded'])
     eq(reloads, controller['reloads'])
     eq([], settings_json['rules'])
+  end
+
+  def test_summary_names_the_active_openclash_config
+    eq(nil, cmd('summary')['active_source'], 'the active config is not a subscription file here')
+    write_source(@nodes, @root + '/etc/openclash/config/MESL_yue.yaml')
+    summary = cmd('summary')
+    eq('MESL_yue.yaml', summary['active_source'])
+    eq('lian_li.yaml', summary['source'], 'the last saved source stays separate')
+    check(summary['sources'].include?('MESL_yue.yaml'))
   end
 
   def test_blank_name_defaults_to_the_first_domain
