@@ -61,7 +61,9 @@ const N2 = node('2222222222222222', '<img src=x onerror=alert(1)>', { type: 'tro
 const N3 = node('3333333333333333', '🇹🇼 台湾 03', { type: 'vmess', error: 'PENDING' });
 const N4 = node('4444444444444444', '🇭🇰 香港 04', { error: 'TLS_FAILED', tested_at: iso(3600) });
 const N5 = node('5555555555555555', '🇺🇸 美国 链式', { dependent: true, error: 'PENDING' });
-const ALL = [N1, N2, N3, N4, N5];
+// A subscription notice posing as a node, as in mesl_xhh.yaml on .242.
+const N6 = node('6666666666666666', '剩余流量：1017.5 GB', { error: 'PENDING' });
+const ALL = [N6, N1, N2, N3, N4, N5];
 const STEAM_ON = { enabled: true, applied: true }, STEAM_OFF = { enabled: false, applied: false };
 
 function rule(o = {}) {
@@ -308,6 +310,18 @@ async function run() {
 		}
 	});
 
+	await test('订阅信息条目折叠、禁选、不能保存，也不进筛选测速', async () => {
+		const r = rule(), h = harness(enabledWith(r));
+		await openRule(h, r);
+		assert.ok(!rowIds(h).includes(N6.id));
+		h.view.selectNode(N6.id);
+		assert.match(h.view.dlg.el.picked.textContent, /这是订阅信息，不是节点/);
+		assert.equal(h.view.canSave(), false);
+		h.view.dlg.el.chips.children.find(c => c.textContent === '其他 2').click();
+		assert.equal(h.view.dlg.el.benchBtn.textContent, '测速这 1 个');
+		assert.deepEqual(h.view.benchPlan().ids, [N2.id]);
+	});
+
 	await test('依赖其他代理的节点禁选且不能保存', async () => {
 		const r = rule(), h = harness(enabledWith(r));
 		await openRule(h, r);
@@ -327,13 +341,15 @@ async function run() {
 		assert.equal(part(row(h, N1), 'r3cg-region').textContent, '日本');
 		assert.equal(part(row(h, N1), 'r3cg-result').textContent, '90 ms · 2 小时前');
 		assert.equal(part(row(h, N3), 'r3cg-result').textContent, '未测速');
-		assert.deepEqual(h.view.dlg.el.chips.children.map(c => c.textContent), ['全部 5', '日本 1', '台湾 1', '香港 1', '美国 1', '其他 1']);
+		assert.deepEqual(h.view.dlg.el.chips.children.map(c => c.textContent), ['全部 6', '日本 1', '台湾 1', '香港 1', '美国 1', '其他 2']);
 		assert.equal(h.view.dlg.el.more.hidden, false);
-		assert.equal(h.view.dlg.el.more.textContent, '显示 2 个未通过的节点');
+		assert.equal(h.view.dlg.el.more.textContent, '显示 3 个未通过或不可用的条目');
 		h.view.dlg.el.more.click();
-		assert.deepEqual(rowIds(h), [N2.id, N1.id, N3.id, N4.id, N5.id]);
+		assert.deepEqual(rowIds(h), [N2.id, N1.id, N3.id, N4.id, N6.id, N5.id]);
 		assert.equal(part(row(h, N4), 'r3cg-result').textContent, '连接失败 · 1 小时前');
-		assert.equal(h.view.dlg.el.more.textContent, '收起未通过的节点');
+		assert.equal(part(row(h, N6), 'r3cg-result').textContent, '订阅信息，不是节点');
+		assert.equal(row(h, N6).disabled, true);
+		assert.equal(h.view.dlg.el.more.textContent, '收起未通过和不可用的条目');
 		h.view.dlg.el.more.click();
 		h.view.dlg.el.search.input('香港');
 		assert.deepEqual(rowIds(h), [N4.id], '只剩未通过的节点时直接列出');
@@ -343,7 +359,7 @@ async function run() {
 		const r = rule(), h = harness(enabledWith(r));
 		await openRule(h, r);
 		const p = h.view.dlg.el;
-		assert.equal(p.benchBtn.textContent, '全部测速（5 个）');
+		assert.equal(p.benchBtn.textContent, '全部测速（6 个）');
 		assert.equal(p.benchAllBtn.hidden, true);
 		p.chips.children.find(c => c.textContent === '台湾 1').click();
 		assert.deepEqual(rowIds(h), [N3.id]);
@@ -409,7 +425,7 @@ async function run() {
 		first.resolve(reply(nodesReply([node('6666666666666666', '另一订阅节点')], {}, { source: 'other.yaml' })));
 		await tick();
 		assert.equal(h.view.dlg.source, 'lian_li.yaml');
-		assert.equal(h.view.dlg.nodes.length, 5);
+		assert.equal(h.view.dlg.nodes.length, 6);
 		assert.equal(h.view.dlg.el.save.disabled, false);
 		assert.deepEqual(h.calls.slice(1), [['nodes', 'other.yaml', 'site:example.com'], ['nodes', 'lian_li.yaml', 'site:example.com']]);
 	});

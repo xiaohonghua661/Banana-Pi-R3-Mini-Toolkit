@@ -43,7 +43,9 @@ var RULE_ERRORS = { NODE_MISSING: '节点已不在订阅里，请换节点。', 
 	CONTROLLER_UNAVAILABLE: '读不到 OpenClash 控制接口，OpenClash 可能没在运行。',
 	RUNTIME_MISSING: '没找到 OpenClash 运行配置。', ROUTING_MODE_UNSUPPORTED: 'OpenClash 不是规则模式，分流无法生效。' };
 var STEAM_HINT = 'Steam 联机（Valve 服务器和中继 IP）、登录接口、下载走直连，不经过代理节点；商店和社区网页不变。';
-var ORDER = { ok: 0, untested: 1, failed: 2, blocked: 3 };
+// Subscriptions list their quota and expiry as fake proxies (on .242: 「剩余流量：1017.5 GB」).
+var INFO_RE = /剩余流量|套餐到期|到期时间|过期时间|下次重置|流量重置|官网|官方网站|traffic|expire/i;
+var ORDER = { ok: 0, untested: 1, failed: 2, info: 3, blocked: 4 };
 
 function has(map, key) {
 	return Object.prototype.hasOwnProperty.call(map, key);
@@ -220,10 +222,12 @@ function ruleState(rule, pending) {
 }
 
 // ok: has current proof; untested: no verdict yet (or only an outdated one); failed: a verdict
-// against the node; blocked: the node cannot run alone (dialer-proxy).
+// against the node; info: a subscription notice posing as a node; blocked: the node cannot run
+// alone (dialer-proxy).
 function nodeState(n) {
 	if (n.dependent || n.error === 'NODE_DEPENDENCY') return 'blocked';
 	if (n.eligible) return 'ok';
+	if (INFO_RE.test(n.name)) return 'info';
 	if (VERDICTS.indexOf(n.error) >= 0) return 'failed';
 	if (!n.error && !n.stale && n.samples_ms.length) return 'failed';
 	return 'untested';
@@ -805,7 +809,7 @@ return view.extend({
 		var top = p.list.scrollTop;
 		clear(p.list);
 		rows.forEach(function(n) {
-			var out = n.state === 'failed' || n.state === 'blocked';
+			var out = n.state === 'failed' || n.state === 'info' || n.state === 'blocked';
 			if (out) failed++;
 			// Failed nodes fold away unless asked for, selected, or nothing else matches.
 			if (out && !d.showFailed && n.id !== d.selected && live) { hidden++; return; }
@@ -819,13 +823,13 @@ return view.extend({
 			if (again) again.focus();
 		}
 		p.more.hidden = !hidden && !(d.showFailed && failed && live);
-		p.more.textContent = d.showFailed ? '收起未通过的节点' : '显示 ' + hidden + ' 个未通过的节点';
+		p.more.textContent = d.showFailed ? '收起未通过和不可用的条目' : '显示 ' + hidden + ' 个未通过或不可用的条目';
 	},
 
 	nodeRow: function(n, d) {
 		var self = this, picked = n.id === d.selected;
 		return el('button', { 'type': 'button', 'class': 'r3cg-row ' + n.state + (picked ? ' picked' : ''), 'role': 'radio',
-			'data-id': n.id, 'aria-checked': picked ? 'true' : 'false', 'disabled': n.state === 'blocked' || !!this.mutating,
+			'data-id': n.id, 'aria-checked': picked ? 'true' : 'false', 'disabled': n.state === 'blocked' || n.state === 'info' || !!this.mutating,
 			'click': function() { self.selectNode(n.id); } }, [
 			el('span', { 'class': 'r3cg-region' }, regionName(n.region)),
 			el('span', { 'class': 'r3cg-name' }, n.label),
@@ -841,6 +845,7 @@ return view.extend({
 			return [latency(n.median_ms) || '已通过', exit, when].filter(Boolean).join(' · ');
 		}
 		if (n.state === 'blocked') return benchError('NODE_DEPENDENCY');
+		if (n.state === 'info') return '订阅信息，不是节点';
 		if (n.state === 'failed') return [n.error ? benchError(n.error) : '验证未通过', when].filter(Boolean).join(' · ');
 		if (n.error === 'PENDING' && d.bench && d.bench.running && d.bench.run_ids.indexOf(n.id) >= 0) return '等待测速…';
 		if (n.stale) return '结果已过期' + (when ? '（' + when + '）' : '');
@@ -880,7 +885,7 @@ return view.extend({
 		var d = this.dlg, total = d.nodes.length, minutes = Math.ceil(total * SECONDS_PER_NODE / 60);
 		var all = { ids: [], label: '全部测速（' + total + ' 个' + (minutes >= 2 ? '，约 ' + minutes + ' 分钟' : '') + '）' };
 		if (!d.query.trim() && !d.region) return all;
-		var ids = this.pickerRows().filter(function(n) { return n.state !== 'blocked'; }).map(function(n) { return n.id; });
+		var ids = this.pickerRows().filter(function(n) { return n.state !== 'blocked' && n.state !== 'info'; }).map(function(n) { return n.id; });
 		if (!ids.length) return { ids: null, label: '没有可测速的节点' };
 		return ids.length > BENCH_MAX_IDS || ids.length === total ? all : { ids: ids, label: '测速这 ' + ids.length + ' 个' };
 	},
@@ -931,6 +936,7 @@ return view.extend({
 			return [text, latency(n.median_ms), when && when + '测'].filter(Boolean).join(' · ');
 		}
 		if (n.state === 'blocked') return text + '（依赖其他代理，不能使用）';
+		if (n.state === 'info') return text + '（这是订阅信息，不是节点，请换一个）';
 		return text + (n.state === 'failed' ? '（测速未通过，仍可保存，标为「未验证」）' : '（未测速，保存后标为「未验证」）');
 	},
 
@@ -975,7 +981,7 @@ return view.extend({
 			return false;
 		if (d.kind === 'edit' && (!this.domainCheck().ok || utf8Length(d.label.trim()) > LABEL_BYTES)) return false;
 		var n = this.selectedNode();
-		return !!n && n.state !== 'blocked';
+		return !!n && n.state !== 'blocked' && n.state !== 'info';
 	},
 
 	saveDialog: function() {
