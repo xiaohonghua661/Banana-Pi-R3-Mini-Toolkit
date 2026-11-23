@@ -13,6 +13,19 @@ var BENCH_ERRORS = { UNSUPPORTED_REGION: '地区不支持', REGION_CHANGED: '三
 	BENCH_INTERRUPTED: '测速已中断，请重试', CORE_MISSING: '测速暂不可用', CORE_START_FAILED: '测速启动失败',
 	CORE_NOT_READY: '测速服务尚未就绪', TLS_FAILED: '连接失败', TRACE_FAILED: '地区验证失败', API_UNAVAILABLE: '服务连接失败',
 	PROBE_FAILED: '连接失败' };
+var STEAM_HINT = 'Steam 联机（Valve 服务器和中继 IP）、登录接口、下载走直连，不经过代理节点；商店和社区网页不变。';
+
+function steamOf(st) {
+	var steam = st && st.steam_direct;
+	return steam && typeof steam.enabled === 'boolean' && typeof steam.applied === 'boolean' ? steam : null;
+}
+
+function steamState(steam) {
+	if (!steam) return { text: '状态待确认', cls: 'bad' };
+	if (steam.enabled && steam.applied) return { text: '已生效', cls: 'ok' };
+	if (steam.enabled) return { text: '开启了但配置里没找到——重新打开一次', cls: 'bad' };
+	return { text: '未生效', cls: '' };
+}
 
 function countryName(country) {
 	return typeof country === 'string' && /^[A-Z]{2}$/.test(country) ? COUNTRY_NAMES[country] || country : '地区未确认';
@@ -139,6 +152,17 @@ var CSS = [
 	'.r3cg-benchmark summary{cursor:pointer;margin-top:.75rem}.r3cg-bench-list{list-style:none;padding:0;margin:.5rem 0}',
 	'.r3cg-bench-list li{padding:.6rem 0;border-bottom:1px solid #8884;overflow-wrap:anywhere}',
 	'.r3cg-bench-list strong{font-weight:600}.r3cg-bench-list p{margin:.2rem 0;font-size:.9em;opacity:.85}',
+	'.r3cg-steam{border:1px solid #8885;border-radius:5px;padding:1rem;margin:0 0 1rem;min-width:0}',
+	'.r3cg-steam-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem}',
+	'.r3cg-toggle{display:inline-flex;align-items:center;gap:.6rem;min-height:42px;font-weight:600;font-size:1.05em;cursor:pointer}',
+	'.r3cg input.r3cg-switch{-webkit-appearance:none;appearance:none;position:relative;display:inline-block;flex:none;',
+	'width:2.6em;min-width:2.6em;height:1.45em;min-height:0;margin:0;padding:0;border:0;border-radius:.725em;',
+	'background:#707a83;box-shadow:none;vertical-align:middle;cursor:pointer;transition:background .15s}',
+	'.r3cg input.r3cg-switch::after{content:"";position:absolute;top:.2em;left:.2em;width:1.05em;height:1.05em;',
+	'border-radius:50%;background:#fff;transition:transform .15s}',
+	'.r3cg input.r3cg-switch:checked{background:#24904e}.r3cg input.r3cg-switch:checked::after{transform:translateX(1.15em)}',
+	'.r3cg input.r3cg-switch:disabled{cursor:default}.r3cg-steam .r3cg-hint{margin:.5rem 0 0}',
+	'@media(prefers-reduced-motion:reduce){.r3cg input.r3cg-switch,.r3cg input.r3cg-switch::after{transition:none}}',
 	'@media(min-width:700px){.r3cg-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.r3cg-data{grid-template-columns:2fr 1fr 1fr}}',
 	'@media(max-width:420px){.r3cg-header{align-items:flex-start}.r3cg-form>.r3cg-actions{display:grid;grid-template-columns:minmax(0,1fr)}',
 	'.r3cg-form>.r3cg-actions button{width:100%}.r3cg-rule .r3cg-actions{gap:.5rem}.r3cg-rule .r3cg-actions button{flex:1 1 auto}}'
@@ -171,6 +195,7 @@ return view.extend({
 		this.benchmark = null;
 		this.benchmarkStarting = Object.create(null);
 		this.benchmarkNotice = '';
+		this.benchChecked = Object.create(null);
 		this.readSerial = 0;
 		this.reading = false;
 		this.foreground = false;
@@ -187,6 +212,17 @@ return view.extend({
 			el('div', { 'class': 'r3cg-heading' }, [el('h2', {}, '网站分流'), this.badge]), this.refreshBtn
 		]));
 		this.root.appendChild(el('p', { 'class': 'r3cg-intro' }, '添加网站域名，并为每条规则手动指定节点；其他流量保持现状。'));
+		this.steamTarget = false;
+		this.steamSwitch = el('input', { 'id': 'r3cg-steam', 'type': 'checkbox', 'role': 'switch', 'class': 'r3cg-switch',
+			'aria-describedby': 'r3cg-steam-state r3cg-steam-hint',
+			'change': function(ev) { return self.toggleSteam(ev.target.checked); } });
+		this.steamState = el('span', { 'class': 'r3cg-state', 'id': 'r3cg-steam-state', 'role': 'status', 'aria-live': 'polite' });
+		this.steamCard = this.root.appendChild(el('section', { 'class': 'r3cg-steam', 'aria-label': 'Steam 直连' }, [
+			el('div', { 'class': 'r3cg-steam-head' }, [
+				el('label', { 'class': 'r3cg-toggle', 'for': 'r3cg-steam' }, [this.steamSwitch, 'Steam 直连']), this.steamState
+			]),
+			el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-steam-hint' }, STEAM_HINT)
+		]));
 		this.addBtn = this.button('添加网站', 'add', function() { self.openForm(null, false); });
 		this.presetBtn = this.button('ChatGPT 预设', 'neutral', function() { self.openForm(null, true); });
 		this.disableBtn = this.button('恢复原分流', 'reset', function() { self.mutate('disable'); });
@@ -196,7 +232,7 @@ return view.extend({
 		this.list = this.root.appendChild(el('div', { 'class': 'r3cg-list', 'aria-label': '网站分流规则' }));
 		this.buildForm();
 		this.root.appendChild(el('p', { 'class': 'r3cg-note' },
-			'域名规则同时覆盖子域名。恢复原分流会停用全部网站规则并保留定义，移除此模块的专用设置；其他流量保持现状。'));
+			'域名规则同时覆盖子域名。恢复原分流会停用全部网站规则并保留定义，关闭 Steam 直连，移除此模块的专用设置；其他流量保持现状。'));
 		if (data.status) this.acceptStatus(data.status, '');
 		else { this.renderRules(); this.renderSources(); this.renderNodes(); }
 		this.sync();
@@ -381,8 +417,18 @@ return view.extend({
 		clear(this.benchmarkRows);
 		sorted.forEach(function(n) {
 			var allowed = eligible(n), reason = self.nodeReason(n), name = countryName(n.country) + ' · ' + n.name + ' · ' + latency(n.median_ms);
-			self.nodeSelect.appendChild(el('option', { 'value': n.id, 'disabled': !allowed }, name + (allowed ? '' : '（' + reason + '）')));
-			self.benchmarkRows.appendChild(el('li', {}, [el('strong', {}, countryName(n.country) + ' · ' + n.name),
+			// Unverified nodes stay selectable; the save path records the choice as
+			// unverified so the operator can skip the probe deliberately.
+			self.nodeSelect.appendChild(el('option', { 'value': n.id }, name + (allowed ? '' : '（' + reason + '）')));
+			var tick = el('input', { 'type': 'checkbox' });
+			tick.checked = !!self.benchChecked[n.id];
+			tick.addEventListener('change', function() {
+				if (tick.checked) self.benchChecked[n.id] = true; else delete self.benchChecked[n.id];
+				self.sync();
+			});
+			self.benchmarkRows.appendChild(el('li', {}, [
+				el('label', { 'class': 'r3cg-tick' }, [tick, el('span', {}, ' 选中测速')]),
+				el('strong', {}, countryName(n.country) + ' · ' + n.name),
 				el('p', {}, '3 轮：' + (Array.isArray(n.samples_ms) && n.samples_ms.length ? n.samples_ms.map(latency).join(' / ') : '尚未完成') +
 					'；中位延迟：' + latency(n.median_ms) + '；' + (allowed ? '已通过，可选用' : reason))]));
 		});
@@ -397,7 +443,14 @@ return view.extend({
 	},
 
 	hasSelected: function() {
-		return eligible(this.selectedNode());
+		// Any existing node is savable; eligibility only decides whether the
+		// probe proof is attached or the rule is marked unverified.
+		return !!this.selectedNode();
+	},
+
+	needsUnverifiedConfirm: function() {
+		var node = this.selectedNode();
+		return !!node && !eligible(node);
 	},
 
 	nodeReason: function(node) {
@@ -432,10 +485,13 @@ return view.extend({
 	startBenchmark: function() {
 		if (this.benchmarkBtn.disabled) return Promise.resolve(false);
 		var self = this, source = this.source;
+		// Ticked nodes restrict the run; an empty selection keeps the full sweep.
+		var picked = Object.keys(this.benchChecked || {});
+		var argv = ['benchmark', source].concat(picked);
 		this.benchmarkStarting[source] = true;
 		this.benchmarkNotice = '';
 		this.sync();
-		return fs.exec(CLI, ['benchmark', source]).then(parseResult).then(function() {
+		return fs.exec(CLI, argv).then(parseResult).then(function() {
 			if (self.formOpen && self.source === source) return self.refreshStatus(false);
 		}).catch(function(e) {
 			if (self.formOpen && self.source === source) self.benchmarkNotice = /permission|access denied|拒绝/i.test(e && e.message || '') ?
@@ -458,9 +514,21 @@ return view.extend({
 		clear(this.badge).appendChild(el('span', { 'class': 'r3cg-dot', 'aria-hidden': 'true' }));
 		this.badge.appendChild(document.createTextNode(state.text));
 		this.badge.className = 'r3cg-state ' + state.cls;
+		var steam = steamOf(st), steamBusy = this.mutating === 'steam-direct';
+		var steamNow = steamBusy ? { text: this.steamTarget ? '正在开启…' : '正在关闭…', cls: 'warn' } :
+			unavailable ? { text: '状态待确认', cls: 'bad' } : steamState(steam);
+		if (this.steamState.textContent !== steamNow.text) {
+			clear(this.steamState).appendChild(el('span', { 'class': 'r3cg-dot', 'aria-hidden': 'true' }));
+			this.steamState.appendChild(document.createTextNode(steamNow.text));
+		}
+		this.steamState.className = 'r3cg-state ' + steamNow.cls;
+		// The switch shows the effective state, so a saved-but-missing block reads as off.
+		this.steamSwitch.checked = steamBusy ? this.steamTarget : !!(steam && steam.enabled && steam.applied);
+		this.steamSwitch.disabled = this.mutating || unavailable || !steam;
 		var loading = this.reading && this.foreground;
 		this.addBtn.disabled = this.presetBtn.disabled = this.mutating || unavailable;
-		this.disableBtn.disabled = this.mutating || !st || (!st.enabled && !st.applied && !st.error && !this.rules.some(function(r) { return r.enabled; }));
+		this.disableBtn.disabled = this.mutating || !st || (!st.enabled && !st.applied && !st.error && !this.rules.some(function(r) { return r.enabled; }) &&
+			!(steam && (steam.enabled || steam.applied)));
 		this.refreshBtn.disabled = this.mutating || this.reading;
 		this.refreshBtn.textContent = loading ? '刷新中…' : '刷新';
 		this.labelInput.disabled = this.domainsInput.disabled = this.mutating;
@@ -472,7 +540,9 @@ return view.extend({
 		var bench = this.benchmark, running = bench && bench.running, starting = this.benchmarkStarting[this.source];
 		this.benchmarkBtn.disabled = this.mutating || unavailable || loading || !this.formOpen || !this.nodes.length ||
 			this.sources.indexOf(this.source) < 0 || this.nodesSource !== this.source || running || starting;
-		this.benchmarkBtn.textContent = starting ? '正在启动…' : running ? '测速进行中…' : '3 轮测速';
+		var pickedCount = Object.keys(this.benchChecked || {}).length;
+		this.benchmarkBtn.textContent = starting ? '正在启动…' : running ? '测速进行中…' :
+			pickedCount ? '测速选中 ' + pickedCount + ' 个' : '3 轮测速（全部）';
 		this.bestBtn.disabled = this.mutating || unavailable || loading || !this.bestNode();
 		var total = bench && Number(bench.total) || 0, done = bench && Number(bench.done) || 0;
 		this.benchmarkBar.setAttribute('max', Math.max(1, total));
@@ -487,10 +557,11 @@ return view.extend({
 		this.sourceHint.textContent = st && st.source_error ? '此源配置暂时不可用，可切换配置或稍后刷新。' : '默认使用 lian_li.yaml。';
 		this.nodeHint.textContent = loading ? '正在读取节点…' : !this.source ? '先选择源配置。' : unavailable ?
 			'读取失败后可点击刷新重试。' : !this.nodes.length ? '此配置没有可用节点，请选择其他源配置。' :
-			this.selected && !this.selectedNode() ? '原选择已不在此配置中，请重新选择。' : this.selected && !this.hasSelected() ?
-			'所选节点尚未通过地区与 3 轮测速，请重新测速或选择其他已通过节点。' : this.hasSelected() ?
-			countryName(this.selectedNode().country) + '；3 轮：' + this.selectedNode().samples_ms.map(latency).join(' / ') +
-			'；中位延迟：' + latency(this.selectedNode().median_ms) + (this.dirty ? '；编辑尚未保存。' : '') : '请手动选择已通过的节点。';
+			this.selected && !this.selectedNode() ? '原选择已不在此配置中，请重新选择。' : this.selected && !eligible(this.selectedNode()) ?
+			'所选节点未通过测速，直接保存会按「未验证」启用，不附 3 轮证明。' : this.selected ?
+			countryName(this.selectedNode().country) + '；3 轮：' + (this.selectedNode().samples_ms || []).map(latency).join(' / ') +
+			'；中位延迟：' + latency(this.selectedNode().median_ms) + (this.dirty ? '；编辑尚未保存。' : '') :
+			'请手动选择节点；未测速的节点也可直接保存使用。';
 		var err = this.statusError || statusErrorText(st);
 		var pending = st && st.pending_restart ? '已保存，等待 OpenClash 启动后生效。' : '';
 		this.message.textContent = this.notice || err || pending;
@@ -518,20 +589,34 @@ return view.extend({
 		});
 	},
 
+	toggleSteam: function(want) {
+		if (typeof want !== 'boolean' || this.mutating || this.steamSwitch.disabled) {
+			this.sync();
+			return Promise.resolve(false);
+		}
+		return this.mutate('steam-direct', null, want);
+	},
+
 	mutate: function(action, id, enabled) {
-		if (this.mutating || ['save', 'set-enabled', 'remove', 'disable'].indexOf(action) < 0 ||
+		if (this.mutating || ['save', 'set-enabled', 'remove', 'disable', 'steam-direct'].indexOf(action) < 0 ||
 			action === 'save' && this.saveBtn.disabled || action === 'disable' && this.disableBtn.disabled ||
+			action === 'steam-direct' && (this.steamSwitch.disabled || typeof enabled !== 'boolean') ||
 			(action === 'set-enabled' || action === 'remove') && !this.rules.some(function(r) { return r.id === id; }))
 			return Promise.resolve(false);
 		var self = this, payload, args, before = this.rules.map(function(r) { return r.id; });
 		if (action === 'save') {
 			payload = { label: this.label.trim(), domains: this.domains(), source: this.source, selected: this.selected, enabled: true };
+			// Saving an unprobed node is allowed; the backend then stores the rule
+			// without a proof so status shows it as unverified instead of blocking.
+			if (this.needsUnverifiedConfirm()) payload.unverified = true;
 			if (this.editId) payload.id = this.editId;
 			if (this.preset) payload.preset = this.preset;
 			args = ['save', JSON.stringify(payload)];
 		} else if (action === 'set-enabled') args = ['set-enabled', id, enabled ? '1' : '0'];
 		else if (action === 'remove') args = ['remove', id];
+		else if (action === 'steam-direct') args = ['steam-direct', enabled ? '1' : '0'];
 		else args = ['disable'];
+		if (action === 'steam-direct') this.steamTarget = enabled;
 		this.mutating = action;
 		++this.readSerial;
 		this.reading = false;
@@ -555,21 +640,25 @@ return view.extend({
 					});
 					target = target.length === 1 ? target[0] : null;
 				} else target = self.rules.filter(function(r) { return r.id === id; })[0];
-				var pending = result.pending_restart || st.pending_restart;
-				var verified = action === 'save' ? target && target.source === payload.source && target.selected === payload.selected && target.enabled === true &&
+				var pending = result.pending_restart || st.pending_restart, steam = steamOf(st);
+				var verified = action === 'steam-direct' ? !!steam && steam.enabled === enabled && steam.applied === enabled :
+					action === 'save' ? target && target.source === payload.source && target.selected === payload.selected && target.enabled === true &&
 					(pending || target.applied === true && !target.error) :
 					action === 'remove' ? !target : action === 'set-enabled' ? target && target.enabled === enabled &&
 						(pending || (enabled ? target.applied === true && !target.error : target.applied !== true)) :
-						!self.rules.some(function(r) { return r.enabled; }) && st.enabled === false && (pending || st.applied !== true && !st.error);
+						!self.rules.some(function(r) { return r.enabled; }) && st.enabled === false && (pending || st.applied !== true && !st.error) &&
+						(!steam || !steam.enabled && !steam.applied);
 				if (!verified) {
 					self.notice = statusErrorText(st) || '操作已提交，尚未确认生效。请刷新状态。';
 					self.noticeTone = 'bad';
 					return;
 				}
-				self.notice = pending ? '已保存，等待 OpenClash 启动后生效。' : action === 'save' ? '网站规则已保存并启用。' :
+				// Steam is applied live or not at all; it never waits for a restart.
+				self.notice = action === 'steam-direct' ? (enabled ? 'Steam 直连已开启。' : 'Steam 直连已关闭。') :
+					pending ? '已保存，等待 OpenClash 启动后生效。' : action === 'save' ? '网站规则已保存并启用。' :
 					action === 'remove' ? '网站规则已删除。' : action === 'set-enabled' ? (enabled ? '网站规则已启用。' : '网站规则已停用。') :
-						'已恢复原分流，全部网站规则已停用。';
-				self.noticeTone = pending ? 'warn' : 'ok';
+						'已恢复原分流，全部网站规则已停用，Steam 直连已关闭。';
+				self.noticeTone = pending && action !== 'steam-direct' ? 'warn' : 'ok';
 				if (action === 'save' || action === 'remove' && id === self.editId) {
 					self.formOpen = false;
 					self.form.hidden = true;

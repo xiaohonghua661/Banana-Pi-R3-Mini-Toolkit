@@ -31,7 +31,8 @@
       '<option value="empty">空节点</option><option value="fault">规则异常</option><option value="failure">保存失败</option>' +
       '<option value="loading">正在加载</option><option value="long">长文本</option><option value="pending">等待 OpenClash 启动</option>' +
       '<option value="unavailable">源配置读取失败</option><option value="untested">未测速</option>' +
-      '<option value="benchmarking">3轮测速进行中</option><option value="benchfailed">测速失败</option></select></label>' +
+      '<option value="benchmarking">3轮测速进行中</option><option value="benchfailed">测速失败</option>' +
+      '<option value="steam">Steam 直连已生效</option><option value="steammissing">Steam 开启但配置里没找到</option></select></label>' +
       '<p class="preview-note">离线模拟主题；用于布局与交互验收。真实 LuCI 主题和权限仍须另验。</p></div><iframe title="网站分流页面"></iframe>';
     const width = document.getElementById('width'), zoom = document.getElementById('zoom'), mode = document.getElementById('mode');
     const update = function() {
@@ -75,10 +76,12 @@
     id: 'bbbbbbbbbbbb', label: '自定义演示网站', domains: ['example.org'], source: 'other.yaml',
     selected: n3.id, selected_name: n3.name, enabled: false, applied: false, error: '', preset: ''
   }];
+  let steam = { enabled: mode === 'steam' || mode === 'steammissing', applied: mode === 'steam' };
   const result = (data, code) => ({ code: code || 0, stdout: JSON.stringify(data), stderr: '' });
   const state = function(source) {
     const measured = telemetry(source);
     return { ok: true, enabled: rules.some(r => r.enabled), applied: rules.some(r => r.applied), source: 'lian_li.yaml',
+      steam_direct: Object.assign({}, steam),
       sources: ['lian_li.yaml', 'other.yaml'], nodes: mode === 'empty' ? [] : measured.nodes, benchmark: measured.benchmark,
       site_rules: rules, pending_restart: mode === 'pending', source_error: '', error: mode === 'fault' ? 'RUNTIME_GROUP_MISSING' : '' };
   };
@@ -110,7 +113,8 @@
     }
     if (args[0] === 'remove') rules = rules.filter(r => r.id !== args[1]);
     else if (args[0] === 'set-enabled') rules.forEach(r => { if (r.id === args[1]) { r.enabled = args[2] === '1'; r.applied = r.enabled && mode !== 'pending'; } });
-    else if (args[0] === 'disable') rules.forEach(r => { r.enabled = false; r.applied = false; });
+    else if (args[0] === 'disable') { rules.forEach(r => { r.enabled = false; r.applied = false; }); steam = { enabled: false, applied: false }; }
+    else if (args[0] === 'steam-direct' && ['0', '1'].includes(args[1])) steam = { enabled: args[1] === '1', applied: args[1] === '1' };
     else throw new Error('离线预览不支持此操作');
     return result(state());
   } };

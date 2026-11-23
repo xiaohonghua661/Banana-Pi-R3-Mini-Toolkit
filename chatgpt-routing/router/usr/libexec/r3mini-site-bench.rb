@@ -194,8 +194,15 @@ class R3MiniSiteBench
     public_state(stored)
   end
 
-  def start(source)
+  def start(source, only = nil)
     sha, nodes = source_data(source)
+    if only.is_a?(Array) && !only.empty?
+      # Restrict the run to the ids the operator ticked; everything else keeps
+      # its previous row so a partial rerun never erases earlier verdicts.
+      wanted = nodes.select { |node| only.include?(Digest::SHA256.hexdigest(node['name'])[0, 16]) }
+      raise Failure, 'NODE_MISSING' if wanted.empty?
+      nodes = wanted
+    end
     dir = job_dir(source)
     lockpath = dir + '/job.lock'
     raise Failure, 'IO_FAILED' if File.symlink?(lockpath)
@@ -510,8 +517,8 @@ class R3MiniSiteBench
   end
 
   def run(argv)
-    raise Failure, 'ARGUMENT_INVALID' unless argv.length == 2 && %w[start status].include?(argv[0])
-    argv[0] == 'start' ? start(argv[1]) : status(argv[1])
+    raise Failure, 'ARGUMENT_INVALID' unless argv.length.between?(2, 66) && %w[start status].include?(argv[0])
+    argv[0] == 'start' ? start(argv[1], argv[2..-1]) : status(argv[1])
   end
 
   def self.run_cli(argv)

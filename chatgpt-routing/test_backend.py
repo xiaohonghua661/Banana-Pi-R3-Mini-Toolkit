@@ -29,6 +29,15 @@ HERE = Path(__file__).resolve().parent
 BACKEND = HERE / "router/usr/libexec/r3mini-chatgpt.rb"
 PRESET_ID = hashlib.sha256(b"r3mini-chatgpt-preset").hexdigest()[:12]
 PRESET_GROUP = "R3Site-" + PRESET_ID
+# Written out independently of the backend constant: the requested block, in order.
+STEAM_PREFIXES = ["45.121.184.0/24", "103.10.124.0/23", "103.28.54.0/24", "146.66.152.0/24", "146.66.155.0/24",
+                  "155.133.224.0/21", "155.133.236.0/22", "155.133.240.0/23", "155.133.244.0/24", "155.133.246.0/24",
+                  "155.133.248.0/22", "155.133.252.0/24", "155.133.254.0/23", "162.254.192.0/21", "185.25.180.0/24",
+                  "185.25.182.0/23", "192.69.96.0/22", "205.196.6.0/24", "208.64.200.0/22", "208.78.164.0/22"]
+STEAM_BLOCK = ["DOMAIN-SUFFIX,steamserver.net,DIRECT", "DOMAIN-SUFFIX,steamcontent.com,DIRECT",
+               "DOMAIN,api.steampowered.com,DIRECT"] + [f"IP-CIDR,{p},DIRECT,no-resolve" for p in STEAM_PREFIXES]
+STEAM_ON = {"enabled": True, "applied": True}
+STEAM_OFF = {"enabled": False, "applied": False}
 
 MOCK_CURL = r'''#!/usr/bin/python3
 import json, os, sys, time
@@ -63,7 +72,7 @@ if method == 'PUT':
     for group in runtime.get('proxy-groups', []):
         values = group.get('proxies', [])
         proxies[group['name']] = {'all': values, 'now': values[0] if values else None}
-    types = {'DOMAIN-SUFFIX': 'DomainSuffix', 'DOMAIN': 'Domain', 'DOMAIN-KEYWORD': 'DomainKeyword', 'MATCH': 'Match', 'RULE-SET': 'RuleSet'}
+    types = {'DOMAIN-SUFFIX': 'DomainSuffix', 'DOMAIN': 'Domain', 'DOMAIN-KEYWORD': 'DomainKeyword', 'MATCH': 'Match', 'RULE-SET': 'RuleSet', 'IP-CIDR': 'IPCIDR'}
     rules = []
     for entry in runtime.get('rules', []):
         parts = entry.split(',')
@@ -71,6 +80,8 @@ if method == 'PUT':
     state.update(proxies=proxies, rules=rules, reloads=state.get('reloads', 0) + 1)
     if state.pop('bad_next_reload', False):
         state['rules'] = [r for r in rules if not r['proxy'].startswith('R3Site-')]
+    if state.pop('drop_steam_next_reload', False):
+        state['rules'] = [r for r in rules if r['type'] != 'IPCIDR']
     fail = state.pop('fail_after_load', False)
     statefile.write_text(json.dumps(state))
     sys.exit(22 if fail else 0)
@@ -193,7 +204,7 @@ class BackendTest(unittest.TestCase):
         for group in cfg["proxy-groups"]:
             values = group.get("proxies", [])
             state["proxies"][group["name"]] = {"all": values, "now": values[0] if values else None}
-        types = {"DOMAIN-SUFFIX": "DomainSuffix", "DOMAIN": "Domain", "DOMAIN-KEYWORD": "DomainKeyword"}
+        types = {"DOMAIN-SUFFIX": "DomainSuffix", "DOMAIN": "Domain", "DOMAIN-KEYWORD": "DomainKeyword", "IP-CIDR": "IPCIDR"}
         state["rules"] = []
         for r in cfg["rules"]:
             p = r.split(",")
@@ -865,6 +876,171 @@ class BackendTest(unittest.TestCase):
         self.assertTrue(result["applied"])
         self.assertEqual(len(result["nodes"]), count)
         self.assertLess(status_elapsed, 20, f"large subscription status took {status_elapsed:.3f}s")
+
+    def rules_of(self, path=None):
+        return yaml.safe_load((path or self.runtime).read_text())["rules"]
+
+    def backup_count(self):
+        backups = self.root / "etc/r3mini-chatgpt/backups"
+        return len(list(backups.iterdir())) if backups.exists() else 0
+
+    def test_status_reports_steam_direct_and_keeps_existing_fields(self):
+        result = self.command("status")
+        self.assertEqual(result["steam_direct"], STEAM_OFF)
+        self.assertEqual(set(result), {"ok", "enabled", "applied", "source", "selected", "selected_name", "site_rules",
+                                       "sources", "nodes", "benchmark", "backup_count", "last_action", "last_time",
+                                       "error", "source_error", "pending_restart", "runtime_group", "steam_direct"})
+        self.assertFalse(self.settings.exists())
+        self.settings.write_text(json.dumps({"rules": [], "steam_direct": "yes"}))
+        self.assertEqual(self.command("status", ok=False)["error"], "SETTINGS_INVALID")
+        self.assertEqual(self.command("steam-direct", "1", ok=False)["error"], "SETTINGS_INVALID")
+
+    def test_steam_direct_on_off_is_idempotent_and_restores_original(self):
+        on = self.command("steam-direct", "1")
+        self.assertEqual(on["steam_direct"], STEAM_ON)
+        self.assertFalse(on["enabled"] or on["applied"] or on["error"])
+        # Read-only check, then reload of the validated file, then live verification.
+        self.assertEqual([url.split(":9090")[1] for url in self.controller()["urls"]],
+                         ["/proxies", "/rules", "/configs?force=true", "/proxies", "/rules"])
+        self.assertEqual(yaml.safe_load(self.runtime.read_text()), dict(self.initial, rules=STEAM_BLOCK + self.initial["rules"]))
+        live = self.controller()["rules"]
+        self.assertEqual(live[3], {"type": "IPCIDR", "payload": "45.121.184.0/24", "proxy": "DIRECT"})
+        self.assertEqual(live[len(STEAM_BLOCK)]["payload"], "claude.ai")
+        reloads, backups = self.controller()["reloads"], self.backup_count()
+        self.assertEqual(self.command("steam-direct", "1")["steam_direct"], STEAM_ON)
+        self.assertEqual(self.rules_of(), STEAM_BLOCK + self.initial["rules"])
+        self.assertEqual((self.controller()["reloads"], self.backup_count()), (reloads, backups))
+        self.assertEqual(self.command("steam-direct", "0")["steam_direct"], STEAM_OFF)
+        self.assertEqual(yaml.safe_load(self.runtime.read_text()), self.initial)
+        self.assertEqual(self.controller()["rules"][0]["payload"], "claude.ai")
+        reloads, backups = self.controller()["reloads"], self.backup_count()
+        self.assertEqual(self.command("steam-direct", "0")["steam_direct"], STEAM_OFF)
+        self.assertEqual((self.controller()["reloads"], self.backup_count()), (reloads, backups))
+        self.assertEqual(yaml.safe_load(self.runtime.read_text()), self.initial)
+        stored = json.loads(self.settings.read_text())
+        self.assertIs(stored["steam_direct"], False)
+        self.assertEqual(stored["last_action"], "steam-direct")
+        self.assertEqual(self.runtime.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list((self.root / "tmp/r3mini-chatgpt").iterdir()), [])
+
+    def test_hook_adds_steam_block_only_when_enabled_and_ahead_of_site_rules(self):
+        hookfile = self.root / "tmp/MESL_yue.yaml"
+        hookfile.write_text(yaml.safe_dump(self.initial, allow_unicode=True))
+        self.assertFalse(self.command("hook", "/tmp/MESL_yue.yaml")["changed"])
+        site = self.save_site("site", ["example.com"])
+        site_rule = "DOMAIN-SUFFIX,example.com,R3Site-" + site["id"]
+        self.command("hook", "/tmp/MESL_yue.yaml")
+        self.assertEqual(self.rules_of(hookfile), [site_rule] + self.initial["rules"])
+        self.assertEqual(self.command("steam-direct", "1")["steam_direct"], STEAM_ON)
+        expected = STEAM_BLOCK + [site_rule] + self.initial["rules"]
+        self.assertEqual(self.rules_of(), expected)
+        reloads = self.controller()["reloads"]
+        # OpenClash regenerates the runtime from the subscription on restart or refresh.
+        for logical in ("/tmp/MESL_yue.yaml", "/etc/openclash/MESL_yue.yaml"):
+            target = self.root / logical.lstrip("/")
+            target.write_text(yaml.safe_dump(self.initial, allow_unicode=True))
+            self.assertTrue(self.command("hook", logical)["changed"])
+            self.assertEqual(self.rules_of(target), expected)
+            self.assertFalse(self.command("hook", logical)["changed"])
+        self.assertEqual(self.controller()["reloads"], reloads)
+        self.assertEqual(self.command("status")["steam_direct"], STEAM_ON)
+        second = self.save_site("second", ["second.example.net"], index=1)
+        self.assertTrue(second["applied"])
+        self.assertEqual(second["steam_direct"], STEAM_ON)
+        self.assertEqual(self.rules_of(), STEAM_BLOCK + [site_rule, "DOMAIN-SUFFIX,second.example.net,R3Site-" + second["id"]] +
+                         self.initial["rules"])
+
+    def test_damaged_or_missing_block_is_restored_and_lookalikes_never_removed(self):
+        lookalikes = ["DOMAIN-SUFFIX,steamcontent.com,DIRECT", "DOMAIN-SUFFIX,steamserver.net,DIRECT"]
+        config = yaml.safe_load(yaml.safe_dump(self.initial))
+        # The user's own copy, even of the complete block, is not at the top and is never ours.
+        config["rules"] = config["rules"][:2] + lookalikes + STEAM_BLOCK + config["rules"][2:]
+        self.runtime.write_text(yaml.safe_dump(config, allow_unicode=True))
+        self.seed_live()
+        self.assertEqual(self.command("status")["steam_direct"], STEAM_OFF)
+        self.command("steam-direct", "0")
+        self.assertEqual(self.rules_of(), config["rules"])
+        self.command("steam-direct", "1")
+        self.assertEqual(self.rules_of(), STEAM_BLOCK + config["rules"])
+        damaged = STEAM_BLOCK[:5] + STEAM_BLOCK[6:]
+        for broken in ([], damaged):
+            self.runtime.write_text(yaml.safe_dump(dict(config, rules=broken + config["rules"]), allow_unicode=True))
+            self.seed_live()
+            self.assertEqual(self.command("status")["steam_direct"], {"enabled": True, "applied": False})
+            self.assertEqual(self.command("steam-direct", "1")["steam_direct"], STEAM_ON)
+            self.assertEqual(self.rules_of(), STEAM_BLOCK + broken + config["rules"])
+        self.assertEqual(self.command("steam-direct", "0")["steam_direct"], STEAM_OFF)
+        # Only the intact block at the top is removed; damaged copies and user rules stay.
+        self.assertEqual(self.rules_of(), damaged + config["rules"])
+
+    def test_disable_also_turns_steam_direct_off(self):
+        self.save_site("site", ["example.com"])
+        self.assertEqual(self.command("steam-direct", "1")["steam_direct"], STEAM_ON)
+        result = self.command("disable")
+        self.assertEqual(result["steam_direct"], STEAM_OFF)
+        self.assertFalse(result["enabled"] or result["applied"])
+        self.assertEqual(yaml.safe_load(self.runtime.read_text()), self.initial)
+        self.assertIs(json.loads(self.settings.read_text())["steam_direct"], False)
+        self.assertEqual(self.controller()["rules"][0]["payload"], "claude.ai")
+        self.command("steam-direct", "1")
+        state = self.controller()
+        state["offline"] = True
+        self.write_controller(state)
+        response = self.command("disable")
+        self.assertTrue(response["pending_restart"])
+        self.assertEqual(response["steam_direct"], STEAM_OFF)
+        self.assertEqual(yaml.safe_load(self.runtime.read_text()), self.initial)
+        before = self.runtime.read_bytes(), self.settings.read_bytes(), self.backup_count()
+        self.assertEqual(self.command("steam-direct", "1", ok=False)["error"], "CONTROLLER_UNAVAILABLE")
+        self.assertEqual((self.runtime.read_bytes(), self.settings.read_bytes(), self.backup_count()), before)
+
+    def test_steam_direct_failures_change_nothing(self):
+        before = self.runtime.read_bytes()
+        (self.root / "fail_core").touch()
+        self.assertEqual(self.command("steam-direct", "1", ok=False)["error"], "CONFIG_TEST_FAILED")
+        self.assertEqual(self.runtime.read_bytes(), before)
+        self.assertEqual(self.controller()["reloads"], 0)
+        (self.root / "fail_core").unlink()
+        for flag, token in (("fail_after_load", "RELOAD_FAILED"), ("drop_steam_next_reload", "VERIFY_FAILED")):
+            state = self.controller()
+            state[flag] = True
+            self.write_controller(state)
+            self.assertEqual(self.command("steam-direct", "1", ok=False)["error"], token)
+            self.assertEqual(self.runtime.read_bytes(), before)
+            self.assertEqual(self.controller()["rules"][0]["payload"], "claude.ai")
+        self.assertFalse(self.settings.exists())
+        self.assertEqual(self.command("status")["steam_direct"], STEAM_OFF)
+        for args in (("steam-direct",), ("steam-direct", "2"), ("steam-direct", "on"), ("steam-direct", "1", "1")):
+            self.assertEqual(self.command(*args, ok=False)["error"], "ARGUMENT_INVALID")
+        global_mode = yaml.safe_dump(dict(self.initial, mode="global"), allow_unicode=True)
+        self.runtime.write_text(global_mode)
+        self.assertEqual(self.command("steam-direct", "1", ok=False)["error"], "ROUTING_MODE_UNSUPPORTED")
+        self.assertEqual(self.runtime.read_text(), global_mode)
+        self.assertFalse(self.settings.exists())
+        # Enabled Steam needs rule mode at OpenClash start too; the hook leaves the file as generated.
+        self.runtime.write_bytes(before)
+        self.command("steam-direct", "1")
+        hookfile = self.root / "tmp/MESL_yue.yaml"
+        hookfile.write_text(global_mode)
+        self.assertEqual(self.command("hook", "/tmp/MESL_yue.yaml", ok=False)["error"], "ROUTING_MODE_UNSUPPORTED")
+        self.assertEqual(hookfile.read_text(), global_mode)
+
+    def test_steam_switch_leaves_a_site_rule_awaiting_retest_untouched(self):
+        self.apply()
+        self.nodes[0]["server"] = "changed-selected.invalid"
+        self.source.write_text(yaml.safe_dump({"proxies": self.nodes}, allow_unicode=True))
+        self.bench_flags(eligible=False)
+        before = yaml.safe_load(self.runtime.read_text())
+        stored = json.loads(self.settings.read_text())
+        result = self.command("steam-direct", "1")
+        self.assertEqual(result["steam_direct"], STEAM_ON)
+        self.assertEqual(result["site_rules"][0]["error"], "NODE_CHANGED")
+        self.assertEqual(yaml.safe_load(self.runtime.read_text()), dict(before, rules=STEAM_BLOCK + before["rules"]))
+        updated = json.loads(self.settings.read_text())
+        self.assertEqual(updated["rules"], stored["rules"])
+        self.assertTrue(updated["steam_direct"])
+        self.command("disable")
+        self.assertEqual(yaml.safe_load(self.runtime.read_text()), self.initial)
 
 
 if __name__ == "__main__":

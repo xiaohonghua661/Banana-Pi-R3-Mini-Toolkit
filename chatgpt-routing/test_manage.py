@@ -1,5 +1,6 @@
 """Offline deployment boundary tests; never imports credentials or opens SSH."""
 import contextlib
+import fnmatch
 import importlib.util
 import io
 import json
@@ -254,6 +255,144 @@ finally:
             self.assertNotIn("fixture.yaml", envelope)
             self.assertIn("BACKUP_CHECK_OK", output.getvalue())
             self.assertIn("SCOPED_RESTORE_DRILL_OK", output.getvalue())
+
+    @contextlib.contextmanager
+    def ssh_fixture(self, pinned=True):
+        """Throwaway home with known_hosts and a fresh test key; the private delivery doc does not exist."""
+        import paramiko
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            (home / ".ssh").mkdir()
+            (home / ".ssh/known_hosts").write_text("pinned-by-test\n")
+            key = home / "id_ed25519_test"
+            key.write_bytes(ed25519.Ed25519PrivateKey.generate().private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, serialization.NoEncryption()))
+            client = mock.MagicMock()
+            with mock.patch.object(Path, "home", return_value=home), mock.patch.object(m, "ROOT", home / "no-project"), \
+                    mock.patch("paramiko.HostKeys", return_value={"192.0.2.1": object()} if pinned else {}), \
+                    mock.patch("paramiko.SSHClient", return_value=client):
+                yield home, key, client
+
+    def test_key_login_uses_only_that_key_and_keeps_pinned_host_policy(self):
+        import paramiko
+        with self.ssh_fixture() as (home, key, client):
+            self.assertIs(m.connect("192.0.2.1", key), client)
+        self.assertEqual(client.connect.call_count, 1)
+        self.assertEqual(client.connect.call_args.args, ("192.0.2.1",))
+        kwargs = client.connect.call_args.kwargs
+        self.assertEqual((kwargs["username"], kwargs["key_filename"], kwargs["look_for_keys"], kwargs["allow_agent"]),
+                         ("root", str(key), False, False))
+        self.assertFalse({"password", "passphrase", "pkey"} & set(kwargs))
+        client.load_host_keys.assert_called_once_with(str(home / ".ssh/known_hosts"))
+        self.assertIsInstance(client.set_missing_host_key_policy.call_args.args[0], paramiko.RejectPolicy)
+
+    def test_key_login_failures_never_fall_back_to_passwords(self):
+        import paramiko
+        with self.ssh_fixture() as (home, key, client):
+            garbage = home / "not-a-key"
+            garbage.write_text("not a private key\n")
+            client.connect.side_effect = paramiko.AuthenticationException("denied")
+            for path, token in ((home / "missing", "SSH_KEY_MISSING"), (garbage, "SSH_KEY_INVALID"), (key, "SSH_KEY_LOGIN_FAILED")):
+                with self.assertRaisesRegex(RuntimeError, "^" + token + "$"):
+                    m.connect("192.0.2.1", path)
+            self.assertEqual(client.connect.call_count, 1)
+            client.connect.side_effect = paramiko.SSHException("Server '192.0.2.1' not found in known_hosts")
+            with self.assertRaisesRegex(RuntimeError, "^SSH_CONNECTION_OR_PIN_FAILED$"):
+                m.connect("192.0.2.1", key)
+            self.assertEqual(client.connect.call_count, 2)
+            self.assertEqual(client.close.call_count, 2)
+        with self.ssh_fixture(pinned=False) as (home, key, client):
+            with self.assertRaisesRegex(RuntimeError, "^PINNED_HOST_KEY_MISSING$"):
+                m.connect("192.0.2.1", key)
+            client.connect.assert_not_called()
+
+    def test_every_device_subcommand_uses_key_option_or_env(self):
+        key = Path("keys") / "id_ed25519_test"
+        env = {k: v for k, v in os.environ.items() if k != "R3MINI_SSH_KEY"}
+        for action in ("backup", "install", "verify", "rollback"):
+            client = mock.MagicMock()
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(m, "connect", return_value=client) as connect, \
+                    mock.patch.object(m, action) as handler:
+                self.assertEqual(m.main([action, "192.0.2.1", "--key", str(key)]), 0)
+            connect.assert_called_once_with("192.0.2.1", key)
+            handler.assert_called_once()
+            client.close.assert_called_once()
+        with mock.patch.dict(os.environ, dict(env, R3MINI_SSH_KEY=str(key)), clear=True), \
+                mock.patch.object(m, "connect", return_value=mock.MagicMock()) as connect, mock.patch.object(m, "verify"):
+            m.main(["verify", "192.0.2.1", "--host", "192.0.2.2"])
+            self.assertEqual(connect.call_args_list, [mock.call("192.0.2.1", key), mock.call("192.0.2.2", key)])
+            connect.reset_mock()
+            m.main(["verify", "192.0.2.1", "--key", "other-key"])
+            connect.assert_called_once_with("192.0.2.1", Path("other-key"))
+        with mock.patch.dict(os.environ, dict(env, R3MINI_SSH_KEY=""), clear=True), \
+                mock.patch.object(m, "connect", return_value=mock.MagicMock()) as connect, mock.patch.object(m, "verify"):
+            m.main(["verify", "192.0.2.1"])
+            connect.assert_called_once_with("192.0.2.1", None)
+
+    def verify_fixture(self, settings, steam):
+        local = {path: {"kind": "F", "mode": mode, "value": m.digest(data)} for path, data, mode in m.local_files()}
+        manifest = {"runtime": "/etc/openclash/fixture.yaml", "snapshot": {"/etc/config/network": {"kind": "F", "mode": "644", "value": "a" * 64}},
+                    "health": {"services": {"openclash": 1}, "core_pid": ["1"]}}
+        status = {"ok": True, "enabled": settings["enabled"], "applied": settings["enabled"], "error": None}
+        if steam is not None:
+            status["steam_direct"] = steam
+        hook = m.hook_with_block(b"#!/bin/sh\nexit 0\n")
+
+        def text(client, command, **kwargs):
+            return json.dumps(settings) if command == "cat " + m.SETTINGS else json.dumps(status)
+        return manifest, mock.patch.multiple(m, snapshot=mock.DEFAULT, run=mock.DEFAULT, text=mock.DEFAULT, health=mock.DEFAULT,
+                                             luci_checks=mock.DEFAULT), dict(manifest["snapshot"], **local), hook, text
+
+    def test_verify_checks_saved_steam_switch_against_runtime(self):
+        cases = (({"enabled": False}, {"enabled": False, "applied": False}, "steam_direct=false"),
+                 ({"enabled": False, "steam_direct": True}, {"enabled": True, "applied": True}, "steam_direct=true"),
+                 ({"enabled": False, "steam_direct": True}, {"enabled": True, "applied": False}, "LIVE_ROUTING_STATE_MISMATCH"),
+                 ({"enabled": False}, {"enabled": True, "applied": True}, "STATUS_SCHEMA_INVALID"),
+                 ({"enabled": False}, None, "STATUS_SCHEMA_INVALID"))
+        for settings, steam, expected in cases:
+            manifest, patches, snap, hook, text = self.verify_fixture(settings, steam)
+            output = io.StringIO()
+            with patches as fake, contextlib.redirect_stdout(output):
+                fake["snapshot"].return_value = snap
+                fake["run"].return_value = (0, hook, b"")
+                fake["text"].side_effect = text
+                fake["health"].return_value = manifest["health"]
+                if expected.startswith("steam_direct="):
+                    m.verify(None, "192.0.2.1", None, manifest)
+                    self.assertIn("VERIFY_OK files=6 enabled=false " + expected, output.getvalue())
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "^" + expected + "$"):
+                        m.verify(None, "192.0.2.1", None, manifest)
+
+    def test_luci_acl_check_grants_exactly_the_two_steam_commands(self):
+        acl = json.loads((m.HERE / "router" / m.ACL.lstrip("/")).read_text(encoding="utf-8"))["luci-app-r3mini-chatgpt"]
+        granted = [pattern for mode in ("read", "write") for pattern in acl[mode]["file"]]
+        menu = {"children": {"admin": {"children": {"services": {"children": {"r3mini-chatgpt": {
+            "action": {"path": "services/r3mini-chatgpt"}, "depends": {"acl": ["luci-app-r3mini-chatgpt"]}}}}}}}}
+        asked = {}
+
+        def text(client, command, **kwargs):
+            if "luci-indexcache" in command:
+                return "@@INDEX\n" + json.dumps(menu)
+            if command.startswith("ubus call session access "):
+                target = json.loads(shlex.split(command)[-1])["object"]
+                # rpcd matches file exec ACL entries with fnmatch on "command arg ...".
+                asked[target] = any(fnmatch.fnmatchcase(target, pattern) for pattern in granted)
+                return json.dumps({"access": asked[target]})
+            if command.startswith("ubus call session create"):
+                return json.dumps({"ubus_rpc_session": "fixture"})
+            if command.startswith("ubus call session "):
+                return "{}"
+            return json.dumps({"result": [0, {"code": 0, "stdout": "{}"}]})
+        view = (m.HERE / "router" / m.VIEW.lstrip("/")).read_bytes()
+        with mock.patch.object(m, "run", return_value=(0, view, b"")), mock.patch.object(m, "text", side_effect=text), \
+                contextlib.redirect_stdout(io.StringIO()):
+            m.luci_checks(None)
+        self.assertEqual({k: v for k, v in asked.items() if "steam-direct" in k},
+                         {m.CLI + " steam-direct 0": True, m.CLI + " steam-direct 1": True, m.CLI + " steam-direct 2": False})
+        self.assertFalse(asked[m.CLI + " hook x.yaml"])
 
 
 if __name__ == "__main__":

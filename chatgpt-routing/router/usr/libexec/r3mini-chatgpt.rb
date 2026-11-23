@@ -24,6 +24,22 @@ module R3MiniChatGPT
     ['DOMAIN-KEYWORD', 'openai']
   ].freeze
   RULES = DOMAINS.map { |kind, domain| "#{kind},#{domain},#{GROUP}" }.freeze
+  # Valve Corporation AS32590 IPv4 prefixes: RIPEstat announced-prefixes, queried
+  # 2026-11-12, adjacent prefixes collapsed. Steam relays and game servers are
+  # dialed by raw IP, which the domain rules cannot match.
+  STEAM_PREFIXES = %w[
+    45.121.184.0/24 103.10.124.0/23 103.28.54.0/24 146.66.152.0/24 146.66.155.0/24
+    155.133.224.0/21 155.133.236.0/22 155.133.240.0/23 155.133.244.0/24 155.133.246.0/24
+    155.133.248.0/22 155.133.252.0/24 155.133.254.0/23 162.254.192.0/21 185.25.180.0/24
+    185.25.182.0/23 192.69.96.0/22 205.196.6.0/24 208.64.200.0/22 208.78.164.0/22
+  ].freeze
+  STEAM_RULES = (%w[DOMAIN-SUFFIX,steamserver.net,DIRECT DOMAIN-SUFFIX,steamcontent.com,DIRECT
+                    DOMAIN,api.steampowered.com,DIRECT] +
+                 STEAM_PREFIXES.map { |prefix| "IP-CIDR,#{prefix},DIRECT,no-resolve" }).freeze
+  LIVE_TYPES = {'DOMAIN' => 'Domain', 'DOMAIN-SUFFIX' => 'DomainSuffix', 'DOMAIN-KEYWORD' => 'DomainKeyword',
+                'IP-CIDR' => 'IPCIDR'}.freeze
+  # The controller's /rules payload omits the no-resolve flag.
+  STEAM_LIVE = STEAM_RULES.map { |rule| kind, payload, target = rule.split(','); [LIVE_TYPES[kind], payload, target] }.freeze
   PRESET_ID = Digest::SHA256.hexdigest('r3mini-chatgpt-preset')[0, 12]
   ERRORS = {
     'ARGUMENT_INVALID' => '命令参数无效，请刷新页面后重试。',
@@ -148,7 +164,7 @@ module R3MiniChatGPT
 
     def settings
       result = {'version' => 2, 'rules' => [], 'enabled' => false, 'source' => 'lian_li.yaml', 'selected' => nil,
-                'last_action' => nil, 'last_time' => nil}
+                'last_action' => nil, 'last_time' => nil, 'steam_direct' => false}
       return result unless File.exist?(@settings_path)
       loaded = parse(read(@settings_path, 'SETTINGS_INVALID', 512 * 1024), 'SETTINGS_INVALID')
       fail!('SETTINGS_INVALID') unless loaded.is_a?(Hash)
@@ -172,6 +188,7 @@ module R3MiniChatGPT
       result['version'] = 2
       result['enabled'] = result['rules'].any? { |r| r['enabled'] }
       fail!('SETTINGS_INVALID') unless result['rule_errors'].nil? || result['rule_errors'].is_a?(Hash)
+      fail!('SETTINGS_INVALID') unless [true, false].include?(result['steam_direct'])
       result
     end
 
@@ -314,11 +331,14 @@ module R3MiniChatGPT
       @node_hashes[node] ||= Digest::SHA256.hexdigest(YAML.dump(canonical(node.reject { |key, _| key == 'name' })))
     end
 
-    def benchmark(source, operation = 'status')
+    def benchmark(source, operation = 'status', only = [])
       source_path(source)
       helper = path('/usr/libexec/r3mini-site-bench.rb')
       fail!('BENCHMARK_UNAVAILABLE') unless File.lstat(helper).file?
-      output = IO.popen(['/usr/bin/ruby', helper, operation, source], err: '/dev/null') { |io| io.read(4 * 1024 * 1024 + 1) } || ''
+      only = Array(only).select { |id| id.is_a?(String) && id.match?(/\A[0-9a-f]{16}\z/) }
+      fail!('ARGUMENT_INVALID') if only.length > 60
+      argv = ['/usr/bin/ruby', helper, operation, source] + only
+      output = IO.popen(argv, err: '/dev/null') { |io| io.read(4 * 1024 * 1024 + 1) } || ''
       fail!('BENCHMARK_UNAVAILABLE') if output.bytesize > 4 * 1024 * 1024
       result = parse(output, 'BENCHMARK_UNAVAILABLE')
       fail!('BENCHMARK_UNAVAILABLE') unless result.is_a?(Hash) && [true, false].include?(result['ok'])
@@ -402,6 +422,9 @@ module R3MiniChatGPT
     end
 
     def require_node_proof(rule, s)
+      # Explicit operator opt-out: keep the node without a probe, marked so the
+      # UI and status output can show it as unverified instead of gating it.
+      return {'unverified' => true} if rule['unverified'] == true
       node = selected_node(rule)
       proof = node_proof(rule['source'], node, s)
       unless proof
@@ -509,15 +532,29 @@ module R3MiniChatGPT
       end
     end
 
+    def routing_mode!(config)
+      mode = config['mode']
+      fail!('ROUTING_MODE_UNSUPPORTED') unless mode.nil? || mode.is_a?(String) && mode.downcase == 'rule'
+    end
+
+    # The Steam block belongs to this module only while it is intact at the very
+    # top; look-alike rules anywhere else are the user's own and stay untouched.
+    def steam_block?(rules)
+      rules.is_a?(Array) && rules.first(STEAM_RULES.length) == STEAM_RULES
+    end
+
+    def without_steam(rules)
+      steam_block?(rules) ? rules.drop(STEAM_RULES.length) : rules
+    end
+
     def transform(config, s, closed = {})
       result = config.dup
       result['proxies'] = (config['proxies'] || []).reject { |n| owned_node?(n['name']) }
       result['proxy-groups'] = (config['proxy-groups'] || []).reject { |g| owned_group?(g['name']) }
-      result['rules'] = (config['rules'] || []).reject { |r| owned_rule?(r) }
+      result['rules'] = without_steam(config['rules'] || []).reject { |r| owned_rule?(r) }
       prefix = []
       (s['rules'] || []).select { |r| r['enabled'] }.each do |rule|
-        mode = config['mode']
-        fail!('ROUTING_MODE_UNSUPPORTED') unless mode.nil? || mode.is_a?(String) && mode.downcase == 'rule'
+        routing_mode!(config)
         members = []
         if closed[rule['id']]
           target = 'REJECT'
@@ -559,7 +596,9 @@ module R3MiniChatGPT
         end
         prefix += generated_rules(rule)
       end
-      result['rules'] = prefix + result['rules']
+      routing_mode!(config) if s['steam_direct']
+      # Steam goes first so a broader site rule (e.g. steampowered.com) cannot take its hosts.
+      result['rules'] = (s['steam_direct'] ? STEAM_RULES : []) + prefix + result['rules']
       result
     end
 
@@ -599,12 +638,15 @@ module R3MiniChatGPT
     end
 
     def expected_live_rules(rule)
-      types = {'DOMAIN' => 'Domain', 'DOMAIN-SUFFIX' => 'DomainSuffix', 'DOMAIN-KEYWORD' => 'DomainKeyword'}
-      domain_pairs(rule).map { |kind, domain| [types[kind], domain, group_name(rule)] }
+      domain_pairs(rule).map { |kind, domain| [LIVE_TYPES[kind], domain, group_name(rule)] }
     end
 
     def live_rule_tuple(rule)
       rule.is_a?(Hash) ? [rule['type'], rule['payload'], rule['proxy']] : nil
+    end
+
+    def steam_live?(snapshot)
+      snapshot['rules'].first(STEAM_LIVE.length).map { |r| live_rule_tuple(r) } == STEAM_LIVE
     end
 
     def live_rule_matches?(snapshot, rule)
@@ -622,7 +664,9 @@ module R3MiniChatGPT
       active = (s['rules'] || []).select { |r| r['enabled'] }
       return false unless active.all? { |r| live_rule_matches?(snapshot, r) }
       expected = active.flat_map { |r| expected_live_rules(r) }
-      actual = snapshot['rules'].first(expected.length).map { |r| live_rule_tuple(r) }
+      # Site rules come right after a loaded Steam block.
+      offset = steam_live?(snapshot) ? STEAM_LIVE.length : 0
+      actual = snapshot['rules'].drop(offset).first(expected.length).map { |r| live_rule_tuple(r) }
       proxies = snapshot['proxies']
       owned_nodes = proxies.keys.select { |n| owned_node?(n) }
       actual == expected &&
@@ -638,7 +682,7 @@ module R3MiniChatGPT
       snapshot_matches?(live_snapshot(config), s)
     end
 
-    def status(source = nil, verified_snapshot = nil)
+    def status(source = nil, verified_snapshot = nil, written = nil)
       s = settings
       candidate_source = source || s['source']
       source_name(candidate_source)
@@ -667,9 +711,17 @@ module R3MiniChatGPT
       error = site_status.find { |r| r['enabled'] && r['error'] }
       error = error && error['error']
       pending_restart = s['pending_restart'] == true
+      runtime_error = nil
+      begin
+        # Parsed once: the Steam check reads the file, the live check its controller.
+        written ||= runtime(runtime_path)
+      rescue Failure => e
+        runtime_error = e.token
+      end
       begin
         fail!('CONTROLLER_UNAVAILABLE') if verified_snapshot == false
-        snapshot = verified_snapshot || live_snapshot(runtime(runtime_path))
+        fail!(runtime_error) if runtime_error && !verified_snapshot
+        snapshot = verified_snapshot || live_snapshot(written)
         matches = snapshot_matches?(snapshot, s)
         pending_restart = false if matches
         site_status.each_with_index do |site, index|
@@ -691,6 +743,7 @@ module R3MiniChatGPT
       {'ok' => true, 'enabled' => s['enabled'], 'applied' => applied, 'source' => s['source'],
        'selected' => selected_site && selected_site['selected'], 'selected_name' => selected_site && selected_site['selected_name'],
        'site_rules' => site_status,
+       'steam_direct' => {'enabled' => s['steam_direct'], 'applied' => !written.nil? && steam_block?(written['rules'])},
        'sources' => source_files, 'nodes' => candidates.map { |id, n|
          proof = node_proof(candidate_source, n, s)
          measured = measured_node(candidate_source, id)
@@ -818,6 +871,7 @@ module R3MiniChatGPT
                   'domains' => payload['domains'].map { |d| normalize_domain(d) }.uniq,
                   'preset' => payload.key?('preset') ? payload['preset'] : previous['preset'] || '',
                   'source' => payload['source'], 'selected' => payload['selected'],
+                  'unverified' => payload['unverified'] == true,
                   'enabled' => payload.key?('enabled') ? payload['enabled'] : true}
           validate_rule(rule)
           selected_node(rule)
@@ -836,7 +890,9 @@ module R3MiniChatGPT
             desired['rules'][index]['enabled'] = node_id == '1'
           end
         elsif action == 'disable'
+          # Restoring the original routing removes every module-owned rule.
           desired['rules'].each { |r| r['enabled'] = false }
+          desired['steam_direct'] = false
         end
         desired['enabled'] = desired['rules'].any? { |r| r['enabled'] }
         desired['version'] = 2
@@ -888,7 +944,8 @@ module R3MiniChatGPT
             reloaded = true
             reload(old_config, file)
             verified_snapshot = live_snapshot(new_config)
-            fail!('VERIFY_FAILED') unless snapshot_matches?(verified_snapshot, desired)
+            fail!('VERIFY_FAILED') unless snapshot_matches?(verified_snapshot, desired) &&
+              steam_live?(verified_snapshot) == steam_block?(new_config['rules'])
           end
           desired['error'] = nil
           # Disabling a failed rule must not erase its revocation marker.
@@ -918,7 +975,7 @@ module R3MiniChatGPT
           elsif action == 'hook'
             {'ok' => true, 'action' => 'hook', 'changed' => true}
           else
-            result = status(nil, verified_snapshot)
+            result = status(nil, verified_snapshot, new_config)
             fail!('VERIFY_FAILED') if desired['enabled'] && !result['applied']
             result['id'] = affected_id if affected_id
             if offline_disable
@@ -927,6 +984,51 @@ module R3MiniChatGPT
             end
             result
           end
+        rescue StandardError => error
+          restore(file, saved, old_config, reloaded) if changed
+          raise error
+        ensure
+          File.unlink(candidate) if candidate && File.exist?(candidate)
+        end
+      end
+    end
+
+    # Touches only the Steam block, so a site rule waiting for a new benchmark
+    # cannot block this switch; the hook still rebuilds everything at start.
+    def steam_direct(value)
+      fail!('ARGUMENT_INVALID') unless ['0', '1'].include?(value)
+      enabled = value == '1'
+      with_lock do
+        s = settings
+        file = runtime_path
+        old_config = runtime(file)
+        routing_mode!(old_config) if enabled
+        new_config = old_config.merge('rules' => (enabled ? STEAM_RULES : []) + without_steam(old_config['rules'] || []))
+        # Read-only first: an offline controller fails here before anything is written.
+        current = live_snapshot(old_config)
+        if new_config == old_config && s['steam_direct'] == enabled &&
+           steam_live?(current) == steam_block?(old_config['rules'])
+          # Saved, on disk and loaded already: no backup, write or reload.
+          return status(nil, current, old_config)
+        end
+        # A successful reload from disk leaves no change waiting for a restart.
+        desired = s.merge('steam_direct' => enabled, 'pending_restart' => false, 'last_action' => 'steam-direct',
+                          'last_time' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'))
+        saved = backup(file)
+        changed = false
+        reloaded = false
+        begin
+          candidate = temporary(File.dirname(file), '.yaml') { |f| f.write(YAML.dump(new_config)); f.flush; f.fsync }
+          validate(candidate)
+          File.rename(candidate, file)
+          changed = true
+          File.chmod(0600, file)
+          reloaded = true
+          reload(old_config, file)
+          snapshot = live_snapshot(new_config)
+          fail!('VERIFY_FAILED') unless steam_live?(snapshot) == steam_block?(new_config['rules'])
+          atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n")
+          status(nil, snapshot, new_config)
         rescue StandardError => error
           restore(file, saved, old_config, reloaded) if changed
           raise error
@@ -949,14 +1051,17 @@ module R3MiniChatGPT
         fail!('ARGUMENT_INVALID') unless argv.length == 2
         mutate(command, argv[1])
       when 'benchmark', 'benchmark-status'
-        fail!('ARGUMENT_INVALID') unless argv.length == 2
-        command == 'benchmark' ? benchmark(argv[1], 'start') : benchmark_status(argv[1])
+        fail!('ARGUMENT_INVALID') unless argv.length.between?(2, 62)
+        command == 'benchmark' ? benchmark(argv[1], 'start', argv[2..-1]) : benchmark_status(argv[1])
       when 'set-enabled'
         fail!('ARGUMENT_INVALID') unless argv.length == 3
         mutate(command, argv[1], argv[2])
       when 'disable'
         fail!('ARGUMENT_INVALID') unless argv.length == 1
         mutate('disable')
+      when 'steam-direct'
+        fail!('ARGUMENT_INVALID') unless argv.length == 2
+        steam_direct(argv[1])
       when 'hook'
         fail!('ARGUMENT_INVALID') unless argv.length == 2
         mutate('hook', nil, nil, argv[1])

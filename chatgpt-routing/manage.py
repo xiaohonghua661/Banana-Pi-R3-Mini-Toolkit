@@ -9,6 +9,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -64,11 +65,32 @@ def dpapi(data, decrypt=False):
     return win32crypt.CryptProtectData(data, "R3 Mini ChatGPT routing backup", None, None, None, 0)
 
 
-def connect(host):
+def connect(host, key=None):
     import paramiko
     known = Path.home() / ".ssh" / "known_hosts"
     if not known.is_file() or host not in paramiko.HostKeys(str(known)):
         fail("PINNED_HOST_KEY_MISSING")
+    if key is not None:
+        # Key mode: that key only. No password, agent, default keys or private-doc read.
+        if not Path(key).is_file():
+            fail("SSH_KEY_MISSING")
+        try:
+            paramiko.PKey.from_path(str(key))
+        except Exception:
+            fail("SSH_KEY_INVALID")
+        client = paramiko.SSHClient()
+        client.load_host_keys(str(known))
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        try:
+            client.connect(host, username="root", key_filename=str(key), look_for_keys=False,
+                           allow_agent=False, timeout=8, banner_timeout=8, auth_timeout=8)
+            return client
+        except paramiko.AuthenticationException:
+            client.close()
+            fail("SSH_KEY_LOGIN_FAILED")
+        except Exception:
+            client.close()
+            fail("SSH_CONNECTION_OR_PIN_FAILED")
     private = (ROOT / "docs" / "私密" / "商家交付信息.md").read_text(encoding="utf-8")
     for password in dict.fromkeys([""] + re.findall(r"`([^`\s]{1,80})`", private)):
         client = paramiko.SSHClient()
@@ -623,6 +645,8 @@ for p in /tmp/luci-indexcache.*.json; do [ ! -f "$p" ] || { printf '@@INDEX\\n';
                                  (CLI + " benchmark source.yaml", True), (CLI + " benchmark-status source.yaml", True),
                                  (CLI + " save {}", True), (CLI + " remove " + "a" * 12, True),
                                  (CLI + " set-enabled " + "a" * 12 + " 0", True),
+                                 (CLI + " steam-direct 0", True), (CLI + " steam-direct 1", True),
+                                 (CLI + " steam-direct 2", False),
                                  (CLI + " disable", True), (CLI + " hook x.yaml", False), ("/bin/true", False)):
             access = ubus("access", {"ubus_rpc_session": session, "scope": "file", "object": command, "function": "exec"})
             if bool(access.get("access")) != allowed:
@@ -667,13 +691,18 @@ def verify(client, host, args, manifest=None):
     status = json.loads(text(client, CLI + " status", timeout=60))
     if not isinstance(status, dict) or not status.get("ok") or status.get("enabled") != settings["enabled"]:
         fail("STATUS_SCHEMA_INVALID")
-    if status.get("error") or bool(status.get("applied")) != settings["enabled"]:
+    steam = status.get("steam_direct")
+    if not isinstance(steam, dict) or steam.get("enabled") is not settings.get("steam_direct", False) or \
+            not isinstance(steam.get("applied"), bool):
+        fail("STATUS_SCHEMA_INVALID")
+    if status.get("error") or bool(status.get("applied")) != settings["enabled"] or steam["applied"] != steam["enabled"]:
         fail("LIVE_ROUTING_STATE_MISMATCH")
     if health(client, runtime) != manifest["health"]:
         fail("ORIGINAL_SERVICES_OR_CORE_CHANGED")
     luci_checks(client)
     print("PROTECTED_FILES_AND_CORE_OK", flush=True)
-    print("VERIFY_OK files=" + str(len(OWNED)) + " enabled=" + str(settings["enabled"]).lower(), flush=True)
+    print("VERIFY_OK files=" + str(len(OWNED)) + " enabled=" + str(settings["enabled"]).lower() +
+          " steam_direct=" + str(steam["enabled"]).lower(), flush=True)
 
 
 def install(client, host, args):
@@ -736,6 +765,9 @@ def main(argv=None):
     parser.add_argument("--host", action="append", default=[], help="explicit IPv4 target; repeat for a batch")
     parser.add_argument("--backup", type=Path, help="specific local backup for one target; install checks age and unchanged baseline")
     parser.add_argument("--expected-mac", help="optional additional eth0 identity constraint (one target)")
+    parser.add_argument("--key", type=Path, default=os.environ.get("R3MINI_SSH_KEY") or None,
+                        help="root SSH private key (default: env R3MINI_SSH_KEY); when set, log in with this key only: "
+                             "no password, agent or default keys; the pinned known_hosts check still applies")
     args = parser.parse_args(argv)
     targets = args.targets + args.host
     if not targets:
@@ -750,7 +782,7 @@ def main(argv=None):
             check_backup(path)
             continue
         host = str(ipaddress.IPv4Address(target))
-        client = connect(host)
+        client = connect(host, args.key)
         try:
             if args.expected_mac and identity(client, host)["mac"] != args.expected_mac.lower():
                 fail("EXPECTED_MAC_MISMATCH")

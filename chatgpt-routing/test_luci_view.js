@@ -477,13 +477,121 @@ async function run() {
 		assert.equal(h.view.selected, N1.id);
 		assert.equal(h.view.saveBtn.disabled, true);
 	});
+	const STEAM_ON = { enabled: true, applied: true }, STEAM_OFF = { enabled: false, applied: false };
+	const flipSteam = (h, checked) => { h.view.steamSwitch.checked = checked; return h.view.steamSwitch.events.change({ target: h.view.steamSwitch }); };
+	await test('Steam直连卡片位于网站操作之前并显示三种状态', async () => {
+		const h = harness(status({ steam_direct: STEAM_OFF })), kids = h.view.root.children;
+		const cardAt = kids.indexOf(h.view.steamCard), actionsAt = kids.findIndex(c => c.children.includes(h.view.addBtn));
+		assert.ok(kids.findIndex(c => c.className === 'r3cg-intro') < cardAt && cardAt < actionsAt);
+		assert.match(h.view.steamCard.textContent, /^Steam 直连/);
+		assert.ok(h.view.steamCard.textContent.includes('Steam 联机（Valve 服务器和中继 IP）、登录接口、下载走直连，不经过代理节点；商店和社区网页不变。'));
+		assert.equal(h.view.steamSwitch.attributes.type, 'checkbox');
+		assert.equal(h.view.steamSwitch.attributes.role, 'switch');
+		assert.equal(h.view.steamSwitch.attributes['aria-describedby'], 'r3cg-steam-state r3cg-steam-hint');
+		assert.equal(h.view.steamSwitch.disabled, false);
+		for (const [steam, text, checked, cls] of [[STEAM_OFF, '未生效', false, ''], [STEAM_ON, '已生效', true, 'ok'],
+			[{ enabled: true, applied: false }, '开启了但配置里没找到——重新打开一次', false, 'bad'], [STEAM_OFF, '未生效', false, '']]) {
+			h.queue(reply(status({ steam_direct: steam })));
+			await h.view.refreshStatus(true);
+			assert.equal(h.view.steamState.textContent, text);
+			assert.equal(h.view.steamSwitch.checked, checked);
+			assert.equal(h.view.steamState.className.trim(), ('r3cg-state ' + cls).trim());
+		}
+	});
+	await test('Steam开关精确调用steam-direct 1/0，期间禁用并回读核验', async () => {
+		const h = harness(status({ steam_direct: STEAM_OFF })), pending = deferred();
+		h.queue(pending.promise);
+		h.queue(reply(status({ steam_direct: STEAM_ON })));
+		const result = flipSteam(h, true);
+		assert.deepEqual(h.calls[0], ['steam-direct', '1']);
+		assert.equal(h.view.steamSwitch.disabled, true);
+		assert.equal(h.view.steamSwitch.checked, true);
+		assert.equal(h.view.steamState.textContent, '正在开启…');
+		assert.equal(h.view.root.attributes['aria-busy'], 'true');
+		for (const control of [h.view.addBtn, h.view.presetBtn, h.view.disableBtn, h.view.refreshBtn])
+			assert.equal(control.disabled, true);
+		await h.view.toggleSteam(false); await h.polls[0].fn();
+		assert.equal(h.calls.length, 1);
+		pending.resolve(reply({ ok: true })); await result;
+		assert.deepEqual(h.calls[1], ['status']);
+		assert.equal(h.view.message.textContent, 'Steam 直连已开启。');
+		assert.equal(h.view.noticeTone, 'ok');
+		assert.equal(h.view.steamState.textContent, '已生效');
+		assert.equal(h.view.steamSwitch.checked, true);
+		assert.equal(h.view.steamSwitch.disabled, false);
+		h.queue(reply({ ok: true })); h.queue(reply(status({ steam_direct: STEAM_OFF })));
+		await flipSteam(h, false);
+		assert.deepEqual(h.calls[2], ['steam-direct', '0']);
+		assert.equal(h.view.message.textContent, 'Steam 直连已关闭。');
+		assert.equal(h.view.steamState.textContent, '未生效');
+		assert.equal(h.view.steamSwitch.checked, false);
+	});
+	await test('开启但配置里没找到时开关显示关闭，打开一次即重新应用', async () => {
+		const h = harness(status({ steam_direct: { enabled: true, applied: false } }));
+		assert.equal(h.view.steamSwitch.checked, false);
+		assert.equal(h.view.steamSwitch.disabled, false);
+		h.queue(reply({ ok: true })); h.queue(reply(status({ steam_direct: STEAM_ON })));
+		await flipSteam(h, true);
+		assert.deepEqual(h.calls[0], ['steam-direct', '1']);
+		assert.equal(h.view.steamState.textContent, '已生效');
+		assert.equal(h.view.message.textContent, 'Steam 直连已开启。');
+	});
+	await test('Steam失败显示中文错误并恢复开关，回读不符不虚报', async () => {
+		const h = harness(status({ steam_direct: STEAM_OFF }));
+		h.queue(reply({ ok: false, error: 'CONFIG_TEST_FAILED', message: 'Mihomo 未通过候选配置校验，原配置已保留。' }, 1));
+		await flipSteam(h, true);
+		assert.equal(h.view.message.textContent, 'Mihomo 未通过候选配置校验，原配置已保留。');
+		assert.equal(h.view.noticeTone, 'bad');
+		assert.equal(h.view.steamSwitch.checked, false);
+		assert.equal(h.view.steamSwitch.disabled, false);
+		assert.equal(h.view.steamState.textContent, '未生效');
+		h.queue(reply({ ok: true })); h.queue(reply(status({ steam_direct: { enabled: true, applied: false } })));
+		await flipSteam(h, true);
+		assert.equal(h.view.noticeTone, 'bad');
+		assert.match(h.view.message.textContent, /尚未确认/);
+		assert.equal(h.view.steamSwitch.checked, false);
+		assert.doesNotMatch(h.view.root.textContent, /CONFIG_TEST_FAILED/);
+	});
+	await test('状态读取失败或缺少Steam字段时开关禁用且不发命令', async () => {
+		const h = harness(status());
+		assert.equal(h.view.steamSwitch.disabled, true);
+		assert.equal(h.view.steamState.textContent, '状态待确认');
+		await flipSteam(h, true);
+		assert.equal(h.calls.length, 0);
+		assert.equal(h.view.steamSwitch.checked, false);
+		h.queue(reply(status({ steam_direct: STEAM_ON })));
+		await h.view.refreshStatus(true);
+		assert.equal(h.view.steamSwitch.disabled, false);
+		h.queue({ code: 0, stdout: '<html>错误</html>' });
+		await h.view.refreshStatus(true);
+		assert.equal(h.view.steamSwitch.disabled, true);
+		assert.equal(h.view.steamState.textContent, '状态待确认');
+		assert.equal(harness(null).view.steamSwitch.disabled, true);
+	});
+	await test('只开Steam时也可恢复原分流并回读确认已关闭', async () => {
+		const h = harness(status({ steam_direct: STEAM_ON }));
+		assert.equal(h.view.disableBtn.disabled, false);
+		h.queue(reply({ ok: true })); h.queue(reply(status({ steam_direct: STEAM_OFF })));
+		await h.view.mutate('disable');
+		assert.deepEqual(h.calls[0], ['disable']);
+		assert.match(h.view.message.textContent, /全部网站规则已停用，Steam 直连已关闭/);
+		assert.equal(h.view.noticeTone, 'ok');
+		assert.equal(h.view.steamState.textContent, '未生效');
+		assert.equal(h.view.disableBtn.disabled, true);
+		const stale = harness(status({ steam_direct: STEAM_ON }));
+		stale.queue(reply({ ok: true })); stale.queue(reply(status({ steam_direct: STEAM_ON })));
+		await stale.view.mutate('disable');
+		assert.equal(stale.view.noticeTone, 'bad');
+	});
 	await test('菜单为网站分流且ACL仅开放规定命令', () => {
 		const menu = JSON.parse(fs.readFileSync(path.join(ROOT, 'router/usr/share/luci/menu.d/luci-app-r3mini-chatgpt.json'), 'utf8'));
 		assert.equal(menu['admin/services/r3mini-chatgpt'].title, '网站分流');
 		assert.equal(menu['admin/services/r3mini-chatgpt'].action.path, 'services/r3mini-chatgpt');
 		const acl = JSON.parse(fs.readFileSync(path.join(ROOT, 'router/usr/share/rpcd/acl.d/luci-app-r3mini-chatgpt.json'), 'utf8'))['luci-app-r3mini-chatgpt'];
 		assert.deepEqual(Object.keys(acl.read.file).sort(), ['benchmark-status *', 'status', 'status *'].map(s => '/usr/sbin/r3mini-chatgpt ' + s));
-		assert.deepEqual(Object.keys(acl.write.file).sort(), ['apply *', 'benchmark *', 'disable', 'remove *', 'save *', 'set-enabled *'].map(s => '/usr/sbin/r3mini-chatgpt ' + s).sort());
+		// Steam: only the two exact commands the page sends, no wildcard.
+		assert.deepEqual(Object.keys(acl.write.file).sort(), ['apply *', 'benchmark *', 'disable', 'remove *', 'save *', 'set-enabled *',
+			'steam-direct 0', 'steam-direct 1'].map(s => '/usr/sbin/r3mini-chatgpt ' + s).sort());
 		assert.deepEqual(acl.read.ubus, { file: ['exec'] });
 		assert.deepEqual(acl.write.ubus, { file: ['exec'] });
 		assert.ok(!JSON.stringify(acl).includes('hook'));
