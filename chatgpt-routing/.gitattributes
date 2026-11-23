@@ -1,2 +1,4 @@
 # 部署到路由器的文件必须保持 LF：Windows 检出（core.autocrlf）也不转换
 router/** text eol=lf
+# 上传到路由器沙箱里跑的测试套件同样必须是 LF（模拟脚本的 #! 行带 CR 就找不到解释器）
+test_router_suite.rb text eol=lf

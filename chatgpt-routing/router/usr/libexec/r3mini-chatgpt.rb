@@ -41,6 +41,18 @@ module R3MiniChatGPT
   # The controller's /rules payload omits the no-resolve flag.
   STEAM_LIVE = STEAM_RULES.map { |rule| kind, payload, target = rule.split(','); [LIVE_TYPES[kind], payload, target] }.freeze
   PRESET_ID = Digest::SHA256.hexdigest('r3mini-chatgpt-preset')[0, 12]
+  # Transaction backups live in RAM: they only matter until the reload is verified,
+  # and a copy per save used to fill the flash overlay (85 copies, 37 MB, 2026-11-23).
+  BACKUP_KEEP = 5
+  # Live edits are validated by the controller's own parser (PUT /configs answers
+  # 400 and keeps the old config), so the 5-7 s `mihomo -t` pass is skipped there.
+  RELOAD_SECONDS = 6
+  # mihomo /rules entries keep the Go struct field order: index, type, payload, proxy.
+  RULE_RE = /\{(?:"index":\d+,)?"type":"((?:[^"\\]|\\.)*)","payload":"((?:[^"\\]|\\.)*)","proxy":"((?:[^"\\]|\\.)*)"/
+  OWNED_NAME_RE = /"name":"(R3Site-[0-9a-f]{12}|r3mini-site-node-[0-9a-f]{12}-[0-9a-f]{16}|r3mini-chatgpt-node-[0-9a-f]{16}|ChatGPT-LianLi)"/
+  # Only a verdict about the node itself revokes saved evidence; an interrupted or
+  # overloaded benchmark says nothing about the node.
+  VERDICT_ERRORS = %w[UNSUPPORTED_REGION REGION_CHANGED TLS_FAILED TRACE_FAILED API_UNAVAILABLE SITE_FAILED NODE_DEPENDENCY].freeze
   ERRORS = {
     'ARGUMENT_INVALID' => '命令参数无效，请刷新页面后重试。',
     'BUSY' => '另一个操作正在进行，请稍后重试。',
@@ -54,6 +66,7 @@ module R3MiniChatGPT
     'RULE_MISSING' => '网站规则不存在，请刷新页面。',
     'DOMAIN_INVALID' => '网站地址无效，请填写域名或 HTTP/HTTPS 链接，不含端口或账号。',
     'DOMAIN_CONFLICT' => '此域名与另一条网站规则重叠，请修改原规则。',
+    'TARGET_INVALID' => '测速目标无效，请刷新页面后重试。',
     'BENCHMARK_UNAVAILABLE' => '节点实测服务尚不可用。',
     'BENCHMARK_REQUIRED' => '此节点尚未通过支持地区及至少三轮 HTTPS 实测，请先测速。',
     'NODE_CHANGED' => '节点连接参数已变化，请重新实测后再启用。',
@@ -73,6 +86,8 @@ module R3MiniChatGPT
     'IO_FAILED' => '读取或保存失败，改前备份已保留。',
     'INTERNAL_ERROR' => '操作失败，未输出任何订阅凭据。'
   }.freeze
+  ESCAPES = {'"' => '\\"', '\\' => '\\\\'}.freeze
+  JSON_ESCAPES = {'b' => "\b", 'f' => "\f", 'n' => "\n", 'r' => "\r", 't' => "\t"}.freeze
 
   class Failure < StandardError
     attr_reader :token
@@ -88,14 +103,7 @@ module R3MiniChatGPT
     when Hash
       '{' + value.map { |k, v| json(k.to_s) + ':' + json(v) }.join(',') + '}'
     when Array then '[' + value.map { |v| json(v) }.join(',') + ']'
-    when String
-      '"' + value.each_codepoint.map { |c|
-        if c == 34 then '\\"'
-        elsif c == 92 then '\\\\'
-        elsif c < 32 then format('\\u%04x', c)
-        else c.chr(Encoding::UTF_8)
-        end
-      }.join + '"'
+    when String then '"' + value.gsub(/["\\\x00-\x1f]/) { |c| ESCAPES[c] || format('\\u%04x', c.ord) } + '"'
     when true then 'true'
     when false then 'false'
     when nil then 'null'
@@ -103,6 +111,11 @@ module R3MiniChatGPT
     when Float then value.finite? ? value.to_s : 'null'
     else raise Failure, 'INTERNAL_ERROR'
     end
+  end
+
+  def self.unescape(text)
+    return text unless text.include?('\\')
+    text.gsub(/\\(?:u([0-9a-fA-F]{4})|(.))/m) { $1 ? [$1.hex].pack('U') : JSON_ESCAPES.fetch($2, $2) }
   end
 
   class App
@@ -115,10 +128,27 @@ module R3MiniChatGPT
       @state = path('/etc/r3mini-chatgpt')
       @settings_path = @state + '/settings.json'
       @temp = path('/tmp/r3mini-chatgpt')
+      @started = monotonic
+      @timings = {}
     end
 
     def path(absolute)
       @root + absolute
+    end
+
+    def monotonic
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def timed(key)
+      start = monotonic
+      yield
+    ensure
+      @timings[key] = ((monotonic - start) * 1000).round
+    end
+
+    def utc_now
+      Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
     end
 
     def fail!(token)
@@ -206,13 +236,18 @@ module R3MiniChatGPT
       value
     end
 
+    def display_text?(value)
+      value.nil? || value.is_a?(String) && value.bytesize <= 512 && value.valid_encoding? && value !~ /[\x00-\x1f\x7f]/
+    end
+
     def validate_rule(rule)
       fail!('SETTINGS_INVALID') unless rule.is_a?(Hash) && rule['id'].is_a?(String) &&
         rule['id'].match?(/\A[0-9a-f]{12}\z/) && rule['label'].is_a?(String) &&
         rule['label'].bytesize.between?(1, 160) && rule['label'] !~ /[\x00-\x1f\x7f]/ &&
         rule['domains'].is_a?(Array) && rule['domains'].length.between?(1, 30) &&
         [true, false].include?(rule['enabled']) && rule['selected'].is_a?(String) &&
-        rule['selected'].match?(/\A[0-9a-f]{16}\z/) && ['', 'chatgpt', nil].include?(rule['preset'])
+        rule['selected'].match?(/\A[0-9a-f]{16}\z/) && ['', 'chatgpt', nil].include?(rule['preset']) &&
+        display_text?(rule['selected_name']) && display_text?(rule['updated_at'])
       source_name(rule['source'])
       rule['domains'].each { |domain| fail!('DOMAIN_INVALID') unless normalize_domain(domain) == domain }
     end
@@ -254,6 +289,25 @@ module R3MiniChatGPT
 
     def generated_rules(rule)
       domain_pairs(rule).map { |kind, domain| "#{kind},#{domain},#{group_name(rule)}" }
+    end
+
+    # The ChatGPT preset is measured against chatgpt.com and its supported
+    # regions; every other site is measured against its own first domain.
+    def target_of(rule)
+      rule['preset'] == 'chatgpt' ? 'chatgpt' : 'site:' + rule['domains'][0]
+    end
+
+    def target_arg(value)
+      return 'chatgpt' if value == 'chatgpt'
+      fail!('TARGET_INVALID') unless value.is_a?(String) && value.start_with?('site:')
+      domain = value[5..-1]
+      normalized = begin
+        normalize_domain(domain)
+      rescue Failure
+        nil
+      end
+      fail!('TARGET_INVALID') unless normalized == domain
+      value
     end
 
     def source_name(name)
@@ -309,11 +363,54 @@ module R3MiniChatGPT
       source_snapshot(name)['nodes']
     end
 
+    def dependent?(node)
+      node.key?('dialer-proxy') && ![nil, ''].include?(node['dialer-proxy'])
+    end
+
+    # id/name/type/fingerprint of every node, cached per subscription digest so a
+    # page read never re-parses a 450 KB subscription.
+    def source_index(name)
+      @source_index ||= {}
+      return @source_index[name] if @source_index.key?(name)
+      sha = Digest::SHA256.file(source_path(name)).hexdigest
+      cache = "#{@temp}/index-#{Digest::SHA256.hexdigest(name)[0, 16]}.json"
+      index = nil
+      if File.file?(cache) && !File.symlink?(cache)
+        begin
+          loaded = parse(read(cache, 'IO_FAILED', 8 * 1024 * 1024), 'IO_FAILED')
+          index = loaded if loaded.is_a?(Hash) && loaded['version'] == 1 && loaded['source'] == name &&
+                            loaded['sha256'] == sha && loaded['nodes'].is_a?(Array)
+        rescue Failure
+          index = nil
+        end
+      end
+      unless index
+        snapshot = source_snapshot(name)
+        index = {'version' => 1, 'source' => name, 'sha256' => snapshot['sha256'], 'nodes' => snapshot['nodes'].map { |id, node|
+          {'id' => id, 'name' => node['name'], 'type' => node['type'], 'node_hash' => node_hash(node), 'dependent' => dependent?(node)}
+        }}
+        begin
+          mkdir_private(@temp)
+          atomic_write(cache, R3MiniChatGPT.json(index))
+        rescue Failure, SystemCallError
+          nil
+        end
+      end
+      @source_index[name] = index
+    end
+
+    def index_entry(rule)
+      entry = source_index(rule['source'])['nodes'].find { |node| node['id'] == rule['selected'] }
+      fail!('NODE_MISSING') unless entry
+      fail!('NODE_DEPENDENCY') if entry['dependent']
+      entry
+    end
+
     def selected_node(s)
       found = nodes(s['source']).find { |id, _node| id == s['selected'] }
       fail!('NODE_MISSING') unless found
       node = found[1]
-      fail!('NODE_DEPENDENCY') if node.key?('dialer-proxy') && ![nil, ''].include?(node['dialer-proxy'])
+      fail!('NODE_DEPENDENCY') if dependent?(node)
       node
     end
 
@@ -331,13 +428,35 @@ module R3MiniChatGPT
       @node_hashes[node] ||= Digest::SHA256.hexdigest(YAML.dump(canonical(node.reject { |key, _| key == 'name' })))
     end
 
-    def benchmark(source, operation = 'status', only = [])
+    def bench
+      @bench ||= begin
+        helper = path('/usr/libexec/r3mini-site-bench.rb')
+        fail!('BENCHMARK_UNAVAILABLE') unless File.lstat(helper).file?
+        require helper
+        R3MiniSiteBench.new
+      rescue LoadError, SystemCallError
+        fail!('BENCHMARK_UNAVAILABLE')
+      end
+    end
+
+    def bench_report(source, target = 'chatgpt')
+      @bench_reports ||= {}
+      @bench_reports[source + "\n" + target] ||= begin
+        index = source_index(source)
+        bench.report(source, target, index['sha256'], index['nodes'])
+      rescue Failure => error
+        {'ok' => false, 'error' => error.token, 'nodes' => [], 'results' => [], 'best' => nil, 'running' => false}
+      rescue StandardError => error
+        token = defined?(R3MiniSiteBench::Failure) && error.is_a?(R3MiniSiteBench::Failure) ? error.message : 'BENCHMARK_UNAVAILABLE'
+        {'ok' => false, 'error' => token, 'nodes' => [], 'results' => [], 'best' => nil, 'running' => false}
+      end
+    end
+
+    def start_benchmark(source, target, ids)
       source_path(source)
       helper = path('/usr/libexec/r3mini-site-bench.rb')
       fail!('BENCHMARK_UNAVAILABLE') unless File.lstat(helper).file?
-      only = Array(only).select { |id| id.is_a?(String) && id.match?(/\A[0-9a-f]{16}\z/) }
-      fail!('ARGUMENT_INVALID') if only.length > 60
-      argv = ['/usr/bin/ruby', helper, operation, source] + only
+      argv = ['/usr/bin/ruby', helper, 'start', source, target] + ids
       output = IO.popen(argv, err: '/dev/null') { |io| io.read(4 * 1024 * 1024 + 1) } || ''
       fail!('BENCHMARK_UNAVAILABLE') if output.bytesize > 4 * 1024 * 1024
       result = parse(output, 'BENCHMARK_UNAVAILABLE')
@@ -347,90 +466,75 @@ module R3MiniChatGPT
       fail!('BENCHMARK_UNAVAILABLE')
     end
 
-    def benchmark_status(source)
-      @bench_cache ||= {}
-      @bench_cache[source] ||= benchmark(source)
-    rescue Failure => error
-      @bench_cache[source] ||= {'ok' => false, 'error' => error.token, 'nodes' => [], 'results' => [], 'best' => nil, 'running' => false}
-    end
-
-    def measured_node(source, id)
+    def measured_node(source, id, target = 'chatgpt')
       @bench_indexes ||= {}
-      @bench_indexes[source] ||= begin
-        report = benchmark_status(source)
-        (report['nodes'] || report['results'] || []).each_with_object({}) do |entry, index|
-          index[entry['id']] = entry if entry.is_a?(Hash) && entry['id'].is_a?(String)
-        end
+      @bench_indexes[source + "\n" + target] ||= (bench_report(source, target)['results'] || []).each_with_object({}) do |entry, index|
+        index[entry['id']] = entry if entry.is_a?(Hash) && entry['id'].is_a?(String)
       end
-      @bench_indexes[source][id]
+      @bench_indexes[source + "\n" + target][id]
     end
 
-    def valid_proof?(proof, fingerprint)
-      proof.is_a?(Hash) && proof['eligible'] == true && proof['node_hash'] == fingerprint &&
-        proof['country'].is_a?(String) && proof['country'].match?(/\A[A-Z]{2}\z/) &&
-        supported_regions.include?(proof['country']) &&
+    def valid_proof?(proof, fingerprint, chatgpt = true)
+      return false unless proof.is_a?(Hash) && proof['eligible'] == true && proof['node_hash'] == fingerprint &&
         proof['samples_ms'].is_a?(Array) && proof['samples_ms'].length == 3 &&
         proof['samples_ms'].all? { |v| v.is_a?(Numeric) && v > 0 && v.finite? } &&
         proof['median_ms'].is_a?(Numeric) && proof['median_ms'] > 0 && proof['median_ms'].finite? &&
         proof['median_ms'] == proof['samples_ms'].sort[1]
+      return true unless chatgpt
+      [nil, 'chatgpt'].include?(proof['target']) &&
+        proof['country'].is_a?(String) && proof['country'].match?(/\A[A-Z]{2}\z/) &&
+        supported_regions.include?(proof['country'])
     end
 
     def supported_regions
       @supported_regions ||= begin
-        helper = path('/usr/libexec/r3mini-site-bench.rb')
-        require helper
-        R3MiniSiteBench.new.supported_regions
-      rescue LoadError, StandardError
+        bench.supported_regions
+      rescue StandardError
         []
       end
     end
 
     def core_gid
-      helper = path('/usr/libexec/r3mini-site-bench.rb')
-      fail!('CORE_GROUP_MISSING') unless File.lstat(helper).file?
-      require helper
-      gid = R3MiniSiteBench.new.core_gid
+      gid = bench.core_gid
       fail!('CORE_GROUP_MISSING') unless gid.is_a?(Integer) && gid.between?(1, 4_294_967_294)
       gid
+    rescue Failure
+      fail!('CORE_GROUP_MISSING')
     rescue LoadError, StandardError
       fail!('CORE_GROUP_MISSING')
     end
 
-    def node_proof(source, node, s)
-      fingerprint = node_hash(node)
-      selected_id = Digest::SHA256.hexdigest(node['name'])[0, 16]
-      matching_rules = (s['rules'] || []).select { |rule| rule['source'] == source && rule['selected'] == selected_id }
-      persisted = matching_rules.map { |rule| rule['node_validation'] }.find { |proof| valid_proof?(proof, fingerprint) }
+    def node_proof(source, id, fingerprint, s, target = 'chatgpt')
+      chatgpt = target == 'chatgpt'
+      matching_rules = (s['rules'] || []).select { |rule| rule['source'] == source && rule['selected'] == id }
+      persisted = matching_rules.map { |rule| rule['node_validation'] }.find { |proof| valid_proof?(proof, fingerprint, chatgpt) }
       known_failed = matching_rules.any? { |rule|
         ['BENCHMARK_REQUIRED', 'NODE_CHANGED'].include?((s['rule_errors'] || {})[rule['id']])
       }
-      report = benchmark_status(source)
-      actual_source_hash = source_snapshot(source)['sha256']
-      result = measured_node(source, selected_id)
-      # A completed, current retest supersedes saved proof even when it fails.
-      # Empty/expired caches and a still-pending row may use saved validation.
-      current = report['ok'] && report['source_sha256'] == actual_source_hash &&
-        report['error'] != 'BENCH_EXPIRED' && result.is_a?(Hash) && result['node_hash'] == fingerprint
-      completed = result.is_a?(Hash) && (result['eligible'] == true ||
-        result['error'].is_a?(String) && !['', 'PENDING', 'BENCH_PENDING'].include?(result['error']) ||
-        report['running'] == false && report['finished_at'].is_a?(String))
-      return known_failed ? nil : persisted unless current && completed
-      return nil unless !report['error'] && valid_proof?(result, fingerprint)
+      report = bench_report(source, target)
+      result = measured_node(source, id, target)
+      # A finished, current retest supersedes saved proof even when it fails;
+      # untested, stale or interrupted rows leave the saved proof in place.
+      current = report['ok'] && result.is_a?(Hash) && result['node_hash'] == fingerprint && !result['stale']
+      completed = current && (result['eligible'] == true || VERDICT_ERRORS.include?(result['error']))
+      return known_failed ? nil : persisted unless completed
+      return nil unless valid_proof?(result.merge('target' => target), fingerprint, chatgpt)
       {'eligible' => true, 'node_hash' => fingerprint, 'country' => result['country'],
-       'samples_ms' => result['samples_ms'], 'median_ms' => result['median_ms'],
-       'source_sha256' => actual_source_hash, 'tested_at' => report['finished_at'] || report['completed_at'] || report['updated_at'] || report['time']}
+       'samples_ms' => result['samples_ms'], 'median_ms' => result['median_ms'], 'target' => target,
+       'source_sha256' => report['source_sha256'], 'tested_at' => result['tested_at'] || report['finished_at']}
     end
 
     def require_node_proof(rule, s)
       # Explicit operator opt-out: keep the node without a probe, marked so the
       # UI and status output can show it as unverified instead of gating it.
       return {'unverified' => true} if rule['unverified'] == true
-      node = selected_node(rule)
-      proof = node_proof(rule['source'], node, s)
+      entry = index_entry(rule)
+      proof = node_proof(rule['source'], rule['selected'], entry['node_hash'], s, target_of(rule))
       unless proof
         previous = (s['rules'] || []).find { |r| r['id'] == rule['id'] }
         old = rule['node_validation'] || previous && previous['node_validation']
-        fail!(old.is_a?(Hash) && old['node_hash'] != node_hash(node) ? 'NODE_CHANGED' : 'BENCHMARK_REQUIRED')
+        changed = old.is_a?(Hash) && old['node_hash'].is_a?(String) && old['node_hash'] != entry['node_hash']
+        fail!(changed ? 'NODE_CHANGED' : 'BENCHMARK_REQUIRED')
       end
       proof
     end
@@ -468,6 +572,22 @@ module R3MiniChatGPT
           config[key].is_a?(Array) && config[key].all? { |item| item.is_a?(type) }
       end
       config
+    end
+
+    # The two top-level scalars the controller needs, without parsing the whole
+    # runtime; anything unusual falls back to the full parse.
+    def controller_config(file)
+      found = {}
+      File.foreach(file, encoding: 'UTF-8') do |line|
+        key = line[/\A(external-controller|secret):/, 1]
+        next unless key
+        value = parse(line, 'RUNTIME_INVALID')
+        found[key] = value[key] if value.is_a?(Hash)
+        break if found.length == 2
+      end
+      found['external-controller'].is_a?(String) ? found : runtime(file)
+    rescue SystemCallError
+      fail!('RUNTIME_MISSING')
     end
 
     def owned_node?(name)
@@ -573,9 +693,9 @@ module R3MiniChatGPT
               select do |id, sibling|
                 next false unless node_region(sibling['name']) == region &&
                   !sibling.key?('dialer-proxy') && !sibling.key?('proxy')
-                # Only promote siblings the benchmark actually proved usable.
-                measured = measured_node(rule['source'], id)
-                measured.is_a?(Hash) && measured['eligible'] == true
+                # Only promote siblings a current benchmark actually proved usable.
+                measured = measured_node(rule['source'], id, target_of(rule))
+                measured.is_a?(Hash) && measured['eligible'] == true && !measured['stale']
               end.first(2)
             siblings.each do |id, sibling|
               copy = sibling.dup
@@ -602,7 +722,7 @@ module R3MiniChatGPT
       result
     end
 
-    def controller(config, method, route, body = nil)
+    def controller_call(config, method, route, body = nil, seconds = 2)
       address = config['external-controller']
       fail!('CONTROLLER_INVALID') unless address.is_a?(String) &&
         address.match?(/\A(?:\[[0-9a-fA-F:]+\]|[A-Za-z0-9_.-]+):[0-9]{1,5}\z/)
@@ -616,24 +736,56 @@ module R3MiniChatGPT
       bodyfile = temporary(@temp, '.body') { |f| f.write(R3MiniChatGPT.json(body)) } if body
       curl = path('/usr/bin/curl')
       fail!('CONTROLLER_UNAVAILABLE') unless File.executable?(curl)
-      argv = [curl, '-q', '--silent', '--fail', '--noproxy', '*', '--connect-timeout', '2',
-              '--max-time', '2', '--header', '@' + header, '--request', method]
+      argv = [curl, '-q', '--silent', '--noproxy', '*', '--connect-timeout', '2', '--max-time', seconds.to_s,
+              '--header', '@' + header, '--request', method, '--write-out', "\n%{http_code}"]
       argv += ['--data-binary', '@' + bodyfile] if bodyfile
       argv << "http://#{host}:#{port}#{route}"
-      output = IO.popen(argv, err: '/dev/null') { |io| io.read(2 * 1024 * 1024 + 1) } || ''
-      fail!('CONTROLLER_UNAVAILABLE') unless $?.success? && output.bytesize <= 2 * 1024 * 1024
-      return {} if output.strip.empty?
-      result = parse(output, 'CONTROLLER_UNAVAILABLE')
-      fail!('CONTROLLER_UNAVAILABLE') unless result.is_a?(Hash)
-      result
+      output = IO.popen(argv, err: '/dev/null') { |io| io.read(16 * 1024 * 1024 + 16) } || ''
+      success = $?.success?
+      fail!('CONTROLLER_UNAVAILABLE') if output.bytesize > 16 * 1024 * 1024
+      text, _, code = output.rpartition("\n")
+      [success, code.to_i, text]
     ensure
       [header, bodyfile].compact.each { |f| File.unlink(f) if File.exist?(f) }
     end
 
+    def controller(config, method, route, raw = false)
+      success, code, text = controller_call(config, method, route)
+      fail!('CONTROLLER_UNAVAILABLE') unless success && code.between?(200, 299)
+      return text if raw
+      return {} if text.strip.empty?
+      result = parse(text, 'CONTROLLER_UNAVAILABLE')
+      fail!('CONTROLLER_UNAVAILABLE') unless result.is_a?(Hash)
+      result
+    end
+
+    # Scans the 800 KB /rules body instead of parsing it (2.6 s -> 0.1 s on the
+    # router); any entry the pattern misses falls back to the exact parser.
+    def parse_rules(raw)
+      rules = []
+      raw.scan(RULE_RE) do |type, payload, proxy|
+        rules << {'type' => R3MiniChatGPT.unescape(type), 'payload' => R3MiniChatGPT.unescape(payload),
+                  'proxy' => R3MiniChatGPT.unescape(proxy)}
+      end
+      return rules if raw.lstrip.start_with?('{') && rules.length == raw.scan('"payload":').length
+      data = parse(raw, 'CONTROLLER_UNAVAILABLE')
+      fail!('CONTROLLER_UNAVAILABLE') unless data.is_a?(Hash) && data['rules'].is_a?(Array)
+      data['rules']
+    end
+
+    # Only this module's names matter for verification: list them from /proxies
+    # and fetch each owned group on its own instead of parsing every proxy.
     def live_snapshot(config)
-      proxies = controller(config, 'GET', '/proxies')['proxies']
-      rules = controller(config, 'GET', '/rules')['rules']
-      fail!('CONTROLLER_UNAVAILABLE') unless proxies.is_a?(Hash) && rules.is_a?(Array)
+      rules = parse_rules(controller(config, 'GET', '/rules', true))
+      raw = controller(config, 'GET', '/proxies', true)
+      fail!('CONTROLLER_UNAVAILABLE') unless raw.lstrip.start_with?('{')
+      proxies = {}
+      raw.scan(OWNED_NAME_RE) { |(name)| proxies[name] ||= {} }
+      proxies.keys.select { |name| owned_group?(name) }.each do |name|
+        group = controller(config, 'GET', '/proxies/' + name)
+        fail!('CONTROLLER_UNAVAILABLE') unless group.is_a?(Hash)
+        proxies[name] = group
+      end
       {'proxies' => proxies, 'rules' => rules}
     end
 
@@ -678,84 +830,128 @@ module R3MiniChatGPT
         snapshot['rules'].count { |r| r.is_a?(Hash) && owned_group?(r['proxy']) } == expected.length
     end
 
-    def live_matches?(config, s)
-      snapshot_matches?(live_snapshot(config), s)
+    def rule_view(rule, s)
+      entry = nil
+      error = nil
+      begin
+        entry = index_entry(rule)
+      rescue Failure => e
+        error = e.token
+      end
+      proof = nil
+      if rule['enabled'] && entry
+        begin
+          proof = require_node_proof(rule, s)
+        rescue Failure => e
+          error = e.token
+        end
+      end
+      error = rule['enabled'] ? (s['rule_errors'] || {})[rule['id']] || error : nil
+      target = target_of(rule)
+      shown = proof if proof.is_a?(Hash) && proof['eligible'] == true
+      saved = rule['node_validation']
+      shown ||= saved if entry && saved.is_a?(Hash) && saved['eligible'] == true && saved['node_hash'] == entry['node_hash']
+      measured = entry && measured_node(rule['source'], rule['selected'], target)
+      measured = nil unless measured.is_a?(Hash) && measured['eligible'] == true && !measured['stale']
+      latest = [shown, measured].compact.max_by { |p| p['tested_at'].to_s }
+      {'id' => rule['id'], 'label' => rule['label'], 'domains' => rule['domains'], 'preset' => rule['preset'] || '',
+       'source' => rule['source'], 'selected' => rule['selected'],
+       'selected_name' => entry ? entry['name'] : rule['selected_name'],
+       'enabled' => rule['enabled'], 'applied' => false, 'error' => error,
+       'verified' => !shown.nil?, 'unverified' => rule['unverified'] == true, 'target' => target,
+       'median_ms' => latest && latest['median_ms'], 'country' => latest && latest['country'],
+       'tested_at' => latest && latest['tested_at']}
     end
 
-    def status(source = nil, verified_snapshot = nil, written = nil)
+    # Light state for the page: no subscription parse, no helper process, no node list.
+    def summary(snapshot = nil)
       s = settings
-      candidate_source = source || s['source']
-      source_name(candidate_source)
-      source_error = nil
-      begin
-        candidates = nodes(candidate_source)
-      rescue Failure => e
-        candidates = []
-        source_error = e.token
-      end
-      site_status = s['rules'].map do |rule|
-        selected_name = nil
-        rule_error = nil
+      live_error = nil
+      if snapshot.nil?
         begin
-          selected_name = selected_node(rule)['name']
-          require_node_proof(rule, s) if rule['enabled']
+          snapshot = timed('live_ms') { live_snapshot(controller_config(runtime_path)) }
         rescue Failure => e
-          rule_error = e.token if rule['enabled']
+          live_error = e.token
+          snapshot = false
         end
-        rule_error = (s['rule_errors'] || {})[rule['id']] || rule_error if rule['enabled']
-        {'id' => rule['id'], 'label' => rule['label'], 'domains' => rule['domains'], 'preset' => rule['preset'] || '',
-         'source' => rule['source'], 'selected' => rule['selected'], 'selected_name' => selected_name,
-         'enabled' => rule['enabled'], 'applied' => false, 'error' => rule_error}
+      elsif snapshot == false
+        live_error = 'CONTROLLER_UNAVAILABLE'
       end
-      applied = false
-      error = site_status.find { |r| r['enabled'] && r['error'] }
+      rules = s['rules'].map { |rule| rule_view(rule, s) }
+      error = rules.find { |r| r['enabled'] && r['error'] }
       error = error && error['error']
-      pending_restart = s['pending_restart'] == true
-      runtime_error = nil
-      begin
-        # Parsed once: the Steam check reads the file, the live check its controller.
-        written ||= runtime(runtime_path)
-      rescue Failure => e
-        runtime_error = e.token
-      end
-      begin
-        fail!('CONTROLLER_UNAVAILABLE') if verified_snapshot == false
-        fail!(runtime_error) if runtime_error && !verified_snapshot
-        snapshot = verified_snapshot || live_snapshot(written)
+      matches = false
+      if snapshot
         matches = snapshot_matches?(snapshot, s)
-        pending_restart = false if matches
-        site_status.each_with_index do |site, index|
-          next unless site['enabled']
-          site['applied'] = !site['error'] && live_rule_matches?(snapshot, s['rules'][index])
-          site['error'] ||= 'STATE_MISMATCH' unless site['applied']
+        rules.each_with_index do |view, index|
+          next unless view['enabled']
+          view['applied'] = !view['error'] && live_rule_matches?(snapshot, s['rules'][index])
+          view['error'] ||= 'STATE_MISMATCH' unless view['applied']
         end
-        applied = s['enabled'] && matches && site_status.select { |r| r['enabled'] }.all? { |r| r['applied'] }
         error ||= 'STATE_MISMATCH' unless matches
-      rescue Failure => e
-        error ||= e.token
-        site_status.each { |r| r['error'] ||= e.token if r['enabled'] }
+      else
+        error ||= live_error
+        rules.each { |view| view['error'] ||= live_error if view['enabled'] }
       end
+      pending_restart = s['pending_restart'] == true && !matches
       error = nil if pending_restart && !s['enabled'] && error == 'CONTROLLER_UNAVAILABLE'
-      selected_site = site_status.find { |r| r['preset'] == 'chatgpt' } ||
-        site_status.find { |r| r['enabled'] } || site_status.first
-      backups = @state + '/backups'
-      bench = benchmark_status(candidate_source)
-      {'ok' => true, 'enabled' => s['enabled'], 'applied' => applied, 'source' => s['source'],
-       'selected' => selected_site && selected_site['selected'], 'selected_name' => selected_site && selected_site['selected_name'],
-       'site_rules' => site_status,
-       'steam_direct' => {'enabled' => s['steam_direct'], 'applied' => !written.nil? && steam_block?(written['rules'])},
-       'sources' => source_files, 'nodes' => candidates.map { |id, n|
-         proof = node_proof(candidate_source, n, s)
-         measured = measured_node(candidate_source, id)
-         display = proof || measured || {}
-         {'id' => id, 'name' => n['name'], 'type' => n['type'], 'eligible' => !proof.nil?,
-          'median_ms' => display['median_ms'], 'samples_ms' => display['samples_ms'] || [],
-          'country' => display['country']}
-       },
-       'benchmark' => bench,
+      applied = s['enabled'] && matches && rules.select { |r| r['enabled'] }.all? { |r| r['applied'] }
+      {'ok' => true, 'enabled' => s['enabled'], 'applied' => applied == true, 'error' => error,
+       'pending_restart' => pending_restart,
+       'steam_direct' => {'enabled' => s['steam_direct'], 'applied' => snapshot ? steam_live?(snapshot) : false},
+       'source' => s['source'], 'sources' => source_files, 'rules' => rules,
+       'last_action' => s['last_action'], 'last_time' => s['last_time']}
+    end
+
+    # Node picker data for one subscription, measured against one target.
+    def nodes_view(source, target = 'chatgpt')
+      s = settings
+      index = source_index(source)
+      report = bench_report(source, target)
+      rows = index['nodes'].map do |entry|
+        result = measured_node(source, entry['id'], target)
+        result = nil unless result.is_a?(Hash) && result['node_hash'] == entry['node_hash']
+        proof = node_proof(source, entry['id'], entry['node_hash'], s, target)
+        shown = result && (result['eligible'] == true || result['error'] != 'PENDING') ? result : proof || {}
+        {'id' => entry['id'], 'name' => entry['name'], 'type' => entry['type'], 'dependent' => entry['dependent'] == true,
+         'eligible' => !proof.nil?, 'median_ms' => shown['median_ms'], 'samples_ms' => shown['samples_ms'] || [],
+         'country' => shown['country'], 'error' => result && result['error'], 'tested_at' => shown['tested_at'],
+         'stale' => result ? result['stale'] == true : false}
+      end
+      {'ok' => true, 'source' => source, 'target' => target, 'source_sha256' => index['sha256'], 'nodes' => rows,
+       'benchmark' => {'ok' => report['ok'], 'running' => report['running'] == true, 'done' => report['done'] || 0,
+                       'total' => report['total'] || 0, 'run_ids' => report['run_ids'] || [],
+                       'started_at' => report['started_at'], 'finished_at' => report['finished_at'],
+                       'error' => report['error']},
+       'supported_regions' => target == 'chatgpt' ? supported_regions : nil}
+    end
+
+    # Unchanged output contract for gpt-night and manage.py verify.
+    def status(source = nil)
+      s = settings
+      candidate = source || s['source']
+      source_name(candidate)
+      base = summary
+      source_error = nil
+      view = begin
+        nodes_view(candidate, 'chatgpt')
+      rescue Failure => e
+        source_error = e.token
+        nil
+      end
+      rules = base['rules']
+      selected_site = rules.find { |r| r['preset'] == 'chatgpt' } || rules.find { |r| r['enabled'] } || rules.first
+      backups = @temp + '/backups'
+      {'ok' => true, 'enabled' => base['enabled'], 'applied' => base['applied'], 'source' => s['source'],
+       'selected' => selected_site && selected_site['selected'],
+       'selected_name' => selected_site && selected_site['selected_name'],
+       'site_rules' => rules, 'steam_direct' => base['steam_direct'], 'sources' => base['sources'],
+       'nodes' => view ? view['nodes'] : [],
+       'benchmark' => view ? bench_report(candidate, 'chatgpt') : {'ok' => false, 'error' => source_error, 'nodes' => [],
+                                                                   'results' => [], 'best' => nil, 'running' => false},
        'backup_count' => File.directory?(backups) ? Dir.children(backups).count { |n| File.directory?(backups + '/' + n) } : 0,
-       'last_action' => s['last_action'], 'last_time' => s['last_time'], 'error' => error,
-       'source_error' => source_error, 'pending_restart' => pending_restart,
+       'last_action' => s['last_action'], 'last_time' => s['last_time'], 'error' => base['error'],
+       'source_error' => source_error, 'pending_restart' => base['pending_restart'],
        'runtime_group' => selected_site ? 'R3Site-' + selected_site['id'] : 'R3Site'}
     end
 
@@ -773,10 +969,22 @@ module R3MiniChatGPT
       end
     end
 
+    def erase(dir)
+      return unless File.directory?(dir) && !File.symlink?(dir)
+      Dir.children(dir).each do |name|
+        file = dir + '/' + name
+        File.unlink(file) if File.file?(file) || File.symlink?(file)
+      end
+      Dir.rmdir(dir)
+    rescue SystemCallError
+      nil
+    end
+
     def backup(file)
-      dir = @state + '/backups'
-      mkdir_private(dir)
-      dir += '/' + Time.now.utc.strftime('%Y%m%dT%H%M%SZ') + "-#{Process.pid}-#{random_suffix}"
+      mkdir_private(@temp)
+      root = @temp + '/backups'
+      mkdir_private(root)
+      dir = root + '/' + Time.now.utc.strftime('%Y%m%dT%H%M%SZ') + "-#{Process.pid}-#{random_suffix}"
       mkdir_private(dir)
       atomic_write(dir + '/runtime.yaml', File.binread(file))
       atomic_write(dir + '/runtime.mode', (File.stat(file).mode & 0777).to_s)
@@ -785,6 +993,8 @@ module R3MiniChatGPT
       else
         atomic_write(dir + '/settings.absent', '')
       end
+      older = Dir.children(root).select { |n| n.match?(/\A\d{8}T\d{6}Z-\d+-[0-9a-f]{16}\z/) } - [File.basename(dir)]
+      older.sort.reverse.drop(BACKUP_KEEP - 1).each { |name| erase(root + '/' + name) }
       dir
     end
 
@@ -816,9 +1026,14 @@ module R3MiniChatGPT
       end
     end
 
+    # 400 means the controller's parser rejected the file and kept the running
+    # config; anything else (timeout, offline) leaves the outcome unknown.
     def reload(config, file)
-      controller(config, 'PUT', '/configs?force=true', {'path' => file})
-    rescue Failure
+      success, code, = controller_call(config, 'PUT', '/configs?force=true', {'path' => file}, RELOAD_SECONDS)
+      return if success && code.between?(200, 299)
+      fail!(success && code == 400 ? 'CONFIG_TEST_FAILED' : 'RELOAD_FAILED')
+    rescue Failure => error
+      raise if error.token == 'CONFIG_TEST_FAILED'
       fail!('RELOAD_FAILED')
     end
 
@@ -833,6 +1048,93 @@ module R3MiniChatGPT
       reload(old_config, file) if do_reload
     rescue StandardError
       fail!('ROLLBACK_FAILED')
+    end
+
+    def finish_settings(desired, s, hook_errors, action, offline)
+      desired['error'] = nil
+      # Disabling a failed rule must not erase its revocation marker.
+      # A newly successful validation for that same source/node clears it.
+      successful_pairs = desired['rules'].select { |rule| rule['enabled'] && !hook_errors[rule['id']] }.
+        map { |rule| [rule['source'], rule['selected']] }
+      desired['rule_errors'] = (s['rule_errors'] || {}).select do |id, _error|
+        rule = desired['rules'].find { |entry| entry['id'] == id }
+        rule && !successful_pairs.include?([rule['source'], rule['selected']])
+      end.merge(hook_errors)
+      desired['owned'] = true
+      desired['pending_restart'] = offline
+      desired['last_action'] = hook_errors.empty? ? action : 'hook_failed'
+      desired['last_time'] = utc_now
+      atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n")
+    end
+
+    def response(snapshot, affected_id, reloaded)
+      result = summary(snapshot)
+      result['site_rules'] = result['rules']
+      result['id'] = affected_id if affected_id
+      result['reloaded'] = reloaded
+      result['timings'] = @timings
+      result['elapsed_ms'] = ((monotonic - @started) * 1000).round
+      result
+    end
+
+    # Used when nothing will load the file right now (OpenClash start hook,
+    # controller offline): only here does `mihomo -t` guard the write.
+    def write_validated(file, new_config, s, desired, hook_errors, action, offline, affected_id)
+      saved = backup(file)
+      changed = false
+      begin
+        candidate = temporary(File.dirname(file), '.yaml') { |f| f.write(YAML.dump(new_config)); f.flush; f.fsync }
+        timed('validate_ms') { validate(candidate) }
+        File.rename(candidate, file)
+        changed = true
+        File.chmod(0600, file)
+        finish_settings(desired, s, hook_errors, action, offline)
+      rescue StandardError => error
+        restore(file, saved, nil, false) if changed
+        raise error
+      ensure
+        File.unlink(candidate) if candidate && File.exist?(candidate)
+      end
+      unless hook_errors.empty?
+        # Fail-closed fallback is intentional and must survive this error.
+        hook_error = hook_errors.values.first
+        return {'ok' => false, 'error' => hook_error, 'message' => ERRORS[hook_error], 'fail_closed' => true}
+      end
+      return {'ok' => true, 'action' => 'hook', 'changed' => true} if action == 'hook'
+      result = response(false, affected_id, false)
+      result['error'] = nil
+      result['message'] = '已恢复磁盘规则，控制接口离线，OpenClash 下次启动时生效。'
+      result
+    end
+
+    def apply_live(file, old_config, new_config, desired, s, action, affected_id)
+      saved = backup(file)
+      changed = false
+      reloaded = false
+      begin
+        if new_config != old_config
+          candidate = temporary(File.dirname(file), '.yaml') { |f| f.write(YAML.dump(new_config)); f.flush; f.fsync }
+          File.rename(candidate, file)
+          changed = true
+          File.chmod(0600, file)
+        end
+        # Reload can fail after the controller has already loaded the file.
+        reloaded = true
+        timed('reload_ms') { reload(old_config, file) }
+        snapshot = timed('verify_ms') { live_snapshot(new_config) }
+        fail!('VERIFY_FAILED') unless snapshot_matches?(snapshot, desired) &&
+          steam_live?(snapshot) == steam_block?(new_config['rules'])
+        finish_settings(desired, s, {}, action, false)
+        result = response(snapshot, affected_id, true)
+        fail!('VERIFY_FAILED') if desired['enabled'] && !result['applied']
+        result
+      rescue StandardError => error
+        rejected = error.is_a?(Failure) && error.token == 'CONFIG_TEST_FAILED'
+        restore(file, saved, old_config, reloaded && !rejected) if changed || reloaded && !rejected
+        raise error
+      ensure
+        File.unlink(candidate) if candidate && File.exist?(candidate)
+      end
     end
 
     def mutate(action, source = nil, node_id = nil, hook_path = nil)
@@ -867,14 +1169,20 @@ module R3MiniChatGPT
             previous = {}
           end
           fail!('DOMAIN_INVALID') unless payload['domains'].is_a?(Array) && payload['domains'].length.between?(1, 30)
-          rule = {'id' => affected_id, 'label' => payload['label'],
-                  'domains' => payload['domains'].map { |d| normalize_domain(d) }.uniq,
+          domains = payload['domains'].map { |d| normalize_domain(d) }.uniq
+          label = payload['label'].is_a?(String) ? payload['label'].strip : payload['label']
+          # The page calls the name optional; a blank one used to fail as SETTINGS_INVALID.
+          label = domains[0][0, 160] if label.nil? || label == ''
+          rule = {'id' => affected_id, 'label' => label, 'domains' => domains,
                   'preset' => payload.key?('preset') ? payload['preset'] : previous['preset'] || '',
                   'source' => payload['source'], 'selected' => payload['selected'],
                   'unverified' => payload['unverified'] == true,
                   'enabled' => payload.key?('enabled') ? payload['enabled'] : true}
           validate_rule(rule)
-          selected_node(rule)
+          # Input errors first: a clashing domain is reported before any node or benchmark check.
+          check_domains(desired['rules'].reject { |r| r['id'] == affected_id } + [rule])
+          rule['selected_name'] = index_entry(rule)['name']
+          rule['updated_at'] = utc_now
           rule['node_validation'] = require_node_proof(rule, s)
           index ? desired['rules'][index] = rule : desired['rules'] << rule
           desired['source'] = rule['source']
@@ -898,98 +1206,43 @@ module R3MiniChatGPT
         desired['version'] = 2
         check_domains(desired['rules'])
         file = runtime_path(hook_path, action == 'hook')
-        old_config = runtime(file)
+        old_config = timed('parse_ms') { runtime(file) }
         check_namespace(old_config, s)
         hook_errors = {}
-        if action == 'hook'
-          desired['rules'].select { |r| r['enabled'] }.each do |rule|
-            begin
-              rule['node_validation'] = require_node_proof(rule, s)
-            rescue Failure => error
-              hook_errors[rule['id']] = error.token
-              rule.delete('node_validation') if ['BENCHMARK_REQUIRED', 'NODE_CHANGED'].include?(error.token)
-            end
-          end
-        else
-          desired['rules'].select { |r| r['enabled'] }.each do |rule|
+        desired['rules'].select { |r| r['enabled'] }.each do |rule|
+          begin
             rule['node_validation'] = require_node_proof(rule, s)
+          rescue Failure => error
+            raise unless action == 'hook'
+            hook_errors[rule['id']] = error.token
+            rule.delete('node_validation') if ['BENCHMARK_REQUIRED', 'NODE_CHANGED'].include?(error.token)
           end
         end
         # OpenClash ignores hook exit status: failed sites use a sole REJECT
         # target while every unaffected site retains its chosen independent node.
-        new_config = transform(old_config, desired, hook_errors)
-        if action == 'hook' && hook_errors.empty? && new_config == old_config
-          return {'ok' => true, 'action' => 'hook', 'changed' => false}
+        new_config = timed('transform_ms') { transform(old_config, desired, hook_errors) }
+        if action == 'hook'
+          return {'ok' => true, 'action' => 'hook', 'changed' => false} if hook_errors.empty? && new_config == old_config
+          return write_validated(file, new_config, s, desired, hook_errors, action, false, nil)
         end
-        offline_disable = false
-        if action != 'hook' && !desired['enabled']
-          begin
-            controller(old_config, 'GET', '/proxies')
-          rescue Failure => error
-            raise unless error.token == 'CONTROLLER_UNAVAILABLE'
-            offline_disable = true
-          end
+        live = begin
+          timed('live_ms') { live_snapshot(old_config) }
+        rescue Failure => error
+          raise unless error.token == 'CONTROLLER_UNAVAILABLE'
+          nil
         end
-        saved = backup(file)
-        changed = false
-        reloaded = false
-        begin
-          candidate = temporary(File.dirname(file), '.yaml') { |f| f.write(YAML.dump(new_config)); f.flush; f.fsync }
-          validate(candidate)
-          File.rename(candidate, file)
-          changed = true
-          File.chmod(0600, file)
-          unless action == 'hook' || offline_disable
-            # Reload can fail after the controller has already loaded the file.
-            reloaded = true
-            reload(old_config, file)
-            verified_snapshot = live_snapshot(new_config)
-            fail!('VERIFY_FAILED') unless snapshot_matches?(verified_snapshot, desired) &&
-              steam_live?(verified_snapshot) == steam_block?(new_config['rules'])
-          end
-          desired['error'] = nil
-          # Disabling a failed rule must not erase its revocation marker.
-          # A newly successful validation for that same source/node clears it.
-          successful_pairs = desired['rules'].select { |rule| rule['enabled'] && !hook_errors[rule['id']] }.
-            map { |rule| [rule['source'], rule['selected']] }
-          desired['rule_errors'] = (s['rule_errors'] || {}).select do |id, _error|
-            rule = desired['rules'].find { |entry| entry['id'] == id }
-            rule && !successful_pairs.include?([rule['source'], rule['selected']])
-          end.merge(hook_errors)
-          desired['owned'] = true
-          desired['pending_restart'] = offline_disable
-          desired['last_action'] = hook_errors.empty? ? action : 'hook_failed'
-          desired['last_time'] = Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-          atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n")
-          verified_snapshot = false if offline_disable
-          unless hook_errors.empty?
-            # Fail-closed fallback is intentional and must survive this error.
-            hook_error = hook_errors.values.first
-            result = {'ok' => false, 'error' => hook_error, 'message' => ERRORS[hook_error],
-             'fail_closed' => true}
-          else
-            result = nil
-          end
-          if result
-            result
-          elsif action == 'hook'
-            {'ok' => true, 'action' => 'hook', 'changed' => true}
-          else
-            result = status(nil, verified_snapshot, new_config)
-            fail!('VERIFY_FAILED') if desired['enabled'] && !result['applied']
-            result['id'] = affected_id if affected_id
-            if offline_disable
-              result['error'] = nil
-              result['message'] = '已恢复磁盘规则，控制接口离线，OpenClash 下次启动时生效。'
-            end
-            result
-          end
-        rescue StandardError => error
-          restore(file, saved, old_config, reloaded) if changed
-          raise error
-        ensure
-          File.unlink(candidate) if candidate && File.exist?(candidate)
+        unless live
+          # Offline, only switching every site off is written; it loads at next start.
+          fail!('CONTROLLER_UNAVAILABLE') if desired['enabled']
+          return write_validated(file, new_config, s, desired, {}, action, true, affected_id)
         end
+        if new_config == old_config && snapshot_matches?(live, desired) &&
+           steam_live?(live) == steam_block?(old_config['rules'])
+          # Labels, an identical save or a disabled rule's removal: settings only, no reload.
+          finish_settings(desired, s, {}, action, false)
+          return response(live, affected_id, false)
+        end
+        apply_live(file, old_config, new_config, desired, s, action, affected_id)
       end
     end
 
@@ -1001,36 +1254,37 @@ module R3MiniChatGPT
       with_lock do
         s = settings
         file = runtime_path
-        old_config = runtime(file)
+        old_config = timed('parse_ms') { runtime(file) }
         routing_mode!(old_config) if enabled
         new_config = old_config.merge('rules' => (enabled ? STEAM_RULES : []) + without_steam(old_config['rules'] || []))
         # Read-only first: an offline controller fails here before anything is written.
-        current = live_snapshot(old_config)
-        if new_config == old_config && s['steam_direct'] == enabled &&
-           steam_live?(current) == steam_block?(old_config['rules'])
-          # Saved, on disk and loaded already: no backup, write or reload.
-          return status(nil, current, old_config)
-        end
+        current = timed('live_ms') { live_snapshot(old_config) }
         # A successful reload from disk leaves no change waiting for a restart.
         desired = s.merge('steam_direct' => enabled, 'pending_restart' => false, 'last_action' => 'steam-direct',
-                          'last_time' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'))
+                          'last_time' => utc_now)
+        if new_config == old_config && steam_live?(current) == steam_block?(old_config['rules'])
+          atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n") unless s['steam_direct'] == enabled
+          return response(current, nil, false)
+        end
         saved = backup(file)
         changed = false
         reloaded = false
         begin
-          candidate = temporary(File.dirname(file), '.yaml') { |f| f.write(YAML.dump(new_config)); f.flush; f.fsync }
-          validate(candidate)
-          File.rename(candidate, file)
-          changed = true
-          File.chmod(0600, file)
+          if new_config != old_config
+            candidate = temporary(File.dirname(file), '.yaml') { |f| f.write(YAML.dump(new_config)); f.flush; f.fsync }
+            File.rename(candidate, file)
+            changed = true
+            File.chmod(0600, file)
+          end
           reloaded = true
-          reload(old_config, file)
-          snapshot = live_snapshot(new_config)
+          timed('reload_ms') { reload(old_config, file) }
+          snapshot = timed('verify_ms') { live_snapshot(new_config) }
           fail!('VERIFY_FAILED') unless steam_live?(snapshot) == steam_block?(new_config['rules'])
           atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n")
-          status(nil, snapshot, new_config)
+          response(snapshot, nil, true)
         rescue StandardError => error
-          restore(file, saved, old_config, reloaded) if changed
+          rejected = error.is_a?(Failure) && error.token == 'CONFIG_TEST_FAILED'
+          restore(file, saved, old_config, reloaded && !rejected) if changed || reloaded && !rejected
           raise error
         ensure
           File.unlink(candidate) if candidate && File.exist?(candidate)
@@ -1038,9 +1292,24 @@ module R3MiniChatGPT
       end
     end
 
+    def bench_args(argv)
+      fail!('ARGUMENT_INVALID') unless argv.length.between?(2, 67)
+      rest = argv[2..-1]
+      target = rest.first && !rest.first.match?(/\A[0-9a-f]{16}\z/) ? target_arg(rest.shift) : 'chatgpt'
+      fail!('ARGUMENT_INVALID') unless rest.length <= 64 && rest.all? { |id| id.match?(/\A[0-9a-f]{16}\z/) }
+      [argv[1], target, rest]
+    end
+
     def run(argv)
       command = argv[0]
       case command
+      when 'summary'
+        fail!('ARGUMENT_INVALID') unless argv.length == 1
+        summary
+      when 'nodes'
+        fail!('ARGUMENT_INVALID') unless argv.length.between?(2, 3)
+        source_path(argv[1])
+        nodes_view(argv[1], argv[2] ? target_arg(argv[2]) : 'chatgpt')
       when 'status'
         fail!('ARGUMENT_INVALID') unless argv.length.between?(1, 2)
         status(argv[1])
@@ -1050,9 +1319,14 @@ module R3MiniChatGPT
       when 'save', 'remove'
         fail!('ARGUMENT_INVALID') unless argv.length == 2
         mutate(command, argv[1])
-      when 'benchmark', 'benchmark-status'
-        fail!('ARGUMENT_INVALID') unless argv.length.between?(2, 62)
-        command == 'benchmark' ? benchmark(argv[1], 'start', argv[2..-1]) : benchmark_status(argv[1])
+      when 'benchmark'
+        source, target, ids = bench_args(argv)
+        start_benchmark(source, target, ids)
+      when 'benchmark-status'
+        source, target, ids = bench_args(argv)
+        fail!('ARGUMENT_INVALID') unless ids.empty?
+        source_path(source)
+        bench_report(source, target)
       when 'set-enabled'
         fail!('ARGUMENT_INVALID') unless argv.length == 3
         mutate(command, argv[1], argv[2])
