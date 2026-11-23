@@ -1,0 +1,2 @@
+# 这些文件原样上传到路由器（sh、ruby、json、js），检出时必须保持 LF。
+* text=auto eol=lf

@@ -1,0 +1,35 @@
+{
+	"luci-app-r3mini-socks5": {
+		"description": "SOCKS5 出口：订阅、出口节点、仅 IPv4、账号密码与端口",
+		"read": {
+			"file": {
+				"/usr/sbin/r3mini-socks5 status": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 targets": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 targets *": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 check-port *": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 probe": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 verify": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 delay": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 delay *": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 delay-all": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/r3mini-socks5 use *": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 ipv4 *": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 save *": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 apply": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 enable": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 disable": [ "exec" ],
+				"/usr/sbin/r3mini-socks5 reset": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			}
+		}
+	}
+}

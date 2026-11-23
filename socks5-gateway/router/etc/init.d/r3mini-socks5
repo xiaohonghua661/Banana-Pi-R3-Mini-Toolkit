@@ -1,0 +1,33 @@
+#!/bin/sh /etc/rc.common
+# SOCKS5 出口：本模块自己的 Mihomo（SOCKS5 入站 + 所选订阅的节点）和「仅 IPv4」用的 sing-box。
+# 配置由后端写在 /tmp/r3mini-socks5/；设置里停用时不起任何进程。和 OpenClash 互不依赖。
+USE_PROCD=1
+START=99
+STOP=10
+
+DIR=/tmp/r3mini-socks5
+CORE_DIR=$DIR/core
+PROFILE=$DIR/ipv4.json
+
+start_service() {
+	local core=/etc/openclash/core/clash_meta shim=/usr/bin/sing-box
+	[ -x "$core" ] || core=/etc/openclash/core/mihomo
+	[ -x "$core" ] || return 0
+	# 开机时 /tmp 是空的，按设置生成；运行中由后端先写好再启动，这里不覆盖。
+	[ -s "$CORE_DIR/config.yaml" ] || /usr/sbin/r3mini-socks5 prepare >/dev/null 2>&1
+	[ -s "$CORE_DIR/config.yaml" ] || return 0
+	# nogroup：OpenClash 的透明代理规则放行这个组，两个进程自己的出站不会被它再接管一次。
+	procd_open_instance core
+	procd_set_param command "$core" -d "$CORE_DIR" -f "$CORE_DIR/config.yaml"
+	procd_set_param env SAFE_PATHS="$CORE_DIR"
+	procd_set_param group nogroup
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+	[ -x "$shim" ] || shim=/mnt/mmcblk0p6/r3mini-socks5/sing-box
+	[ -x "$shim" ] && [ -s "$PROFILE" ] || return 0
+	procd_open_instance shim
+	procd_set_param command "$shim" run -c "$PROFILE"
+	procd_set_param group nogroup
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}

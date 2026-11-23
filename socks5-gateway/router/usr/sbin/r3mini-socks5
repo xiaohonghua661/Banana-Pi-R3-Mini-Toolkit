@@ -1,0 +1,5 @@
+#!/bin/sh
+# 只有直接以 ruby 调用时才允许沙箱根，避免页面请求伪造环境变量。
+unset R3MINI_SOCKS5_ROOT RUBYOPT RUBYLIB
+umask 077
+exec /usr/bin/ruby /usr/libexec/r3mini-socks5.rb "$@"
