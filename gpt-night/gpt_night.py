@@ -29,7 +29,8 @@ LOG_DIR = ROOT / "tmp" / "gpt-night"
 CODEX_HOME = pathlib.Path.home() / ".codex"
 
 HOST = "192.168.0.242"
-RULE_ID = "6c30a15270ea"
+# 按预设找规则：规则编号会变（写死的 6c30a15270ea 早已不在，11-08 起夜间任务一直 RULE_NOT_ACTIVE）。
+PRESET = "chatgpt"
 CLI = "/usr/sbin/r3mini-chatgpt"
 MARKER = "/etc/r3mini-gpt-night.json"
 ROUTER_LOG = "/mnt/mmcblk0p6/r3mini-gpt-night.log"
@@ -47,19 +48,19 @@ HEADER_TIMEOUT = 45         # 同期 MESL 31 个大请求都在 7–21 秒内拿
 FAIL_LIMIT, FAIL_WINDOW = 2, 600
 GRACE = 30                  # 切换并断开旧连接后，正在飞的请求会失败一次，不算
 PROBE_EVERY, MARKER_EVERY, TICK = 300, 60, 10
-# 模块保存前用核心校验候选配置。MESL 配置实测校验要 5.3–7.0 秒，原 7 秒上限曾在 2026-10-26 夜里连续以
-# CONFIG_TEST_FAILED 拒绝恢复（现已放宽到 20 秒）。这类偶发失败隔 30 秒重试；缺测速证明重试也没用，改去测速。
+# 模块保存时控制接口重载失败（CONFIG_TEST_FAILED、RELOAD_FAILED 等）可能是偶发的，隔 30 秒重试；
+# 缺测速证明重试也没用，改去测速（只测这一个节点）。
 TRIES, RETRY_WAIT = 3, 30
 PROOF_ERRORS = ("BENCHMARK_REQUIRED", "NODE_CHANGED")
 TASKS = {"r3mini-gpt-night": ("00:00", "night", 9), "r3mini-gpt-day": ("07:30", "day", 1)}
 
 # 断开规则域名上不走当前分流的旧连接（路由切换只影响新连接，Codex 会长时间复用旧连接）：
-# 组存在时保留组成员上的连接；规则停用、组已移除时断开本规则专属节点上的连接。参数：域名（逗号分隔）[dry]
+# 组存在时保留组成员上的连接；规则停用、组已移除时断开本规则专属节点上的连接。参数：域名（逗号分隔） run|dry 规则编号
 CLOSE_SCRIPT = r"""
 T=$(mktemp -d /tmp/r3gn.XXXXXX) || exit 1; umask 077; H=$T/h
 printf 'Authorization: Bearer %s\n' "$(uci -q get openclash.config.dashboard_password)" > $H
 P=$(uci -q get openclash.config.cn_port || echo 9090)
-curl -s -m 10 -H @$H "http://127.0.0.1:$P/proxies/R3Site-RULE_ID" > $T/g.json
+curl -s -m 10 -H @$H "http://127.0.0.1:$P/proxies/R3Site-$3" > $T/g.json
 curl -s -m 10 -H @$H "http://127.0.0.1:$P/connections" > $T/c.json
 cat > $T/c.uc <<'UC'
 let fs = require('fs'), g = {}, d = {}, keep = {}, doms = split(ARGV[2], ',');
@@ -74,28 +75,28 @@ function ours(h) {
 }
 for (let x in d.connections || []) {
 	let m = x.metadata || {}, h = m.host || m.sniffHost || '', ch = (x.chains || [])[0] || '';
-	if (ours(h) && (grouped ? !keep[ch] : index(ch, 'r3mini-site-node-RULE_ID-') == 0)) print(x.id, '\n');
+	if (ours(h) && (grouped ? !keep[ch] : index(ch, 'r3mini-site-node-' + ARGV[3] + '-') == 0)) print(x.id, '\n');
 }
 UC
 n=0
-for id in $(ucode $T/c.uc $T/g.json $T/c.json "$1"); do
+for id in $(ucode $T/c.uc $T/g.json $T/c.json "$1" "$3"); do
 	[ "$2" = dry ] || curl -s -m 5 -o /dev/null -X DELETE -H @$H "http://127.0.0.1:$P/connections/$id"
 	n=$((n+1))
 done
 echo $n; rm -rf $T
-""".replace("RULE_ID", RULE_ID)
+"""
 
-# 当前组选中的节点经 chatgpt.com 能否连通；规则停用（没有组）时输出 NO_GROUP
+# 当前组选中的节点经 chatgpt.com 能否连通；规则停用（没有组）时输出 NO_GROUP。参数：规则编号
 PROBE_SCRIPT = r"""
 T=$(mktemp -d /tmp/r3gn.XXXXXX) || exit 1; umask 077; H=$T/h
 printf 'Authorization: Bearer %s\n' "$(uci -q get openclash.config.dashboard_password)" > $H
 P=$(uci -q get openclash.config.cn_port || echo 9090)
-now=$(curl -s -m 10 -H @$H "http://127.0.0.1:$P/proxies/R3Site-RULE_ID" | jsonfilter -e '@.now' 2>/dev/null)
+now=$(curl -s -m 10 -H @$H "http://127.0.0.1:$P/proxies/R3Site-$1" | jsonfilter -e '@.now' 2>/dev/null)
 if [ -z "$now" ]; then echo NO_GROUP
 else curl -s -m 15 -H @$H "http://127.0.0.1:$P/proxies/$now/delay?timeout=8000&expected=200&url=https%3A%2F%2Fchatgpt.com%2Fcdn-cgi%2Ftrace" | jsonfilter -e '@.delay' 2>/dev/null || echo FAIL
 fi
 rm -rf $T
-""".replace("RULE_ID", RULE_ID)
+"""
 
 
 def log_local(msg: str) -> None:
@@ -167,22 +168,34 @@ class Router:
         self._run("msg=$(cat); logger -t r3mini-gpt-night -- \"$msg\"; [ -d /mnt/mmcblk0p6 ] && "
                   f"printf '%s %s\\n' \"$(date '+%Y-%m-%dT%H:%M:%S')\" \"$msg\" >> {ROUTER_LOG}; true", data=msg.encode())
 
-    def close_stale(self, domains: list[str], dry: bool = False) -> int:
-        _, out = self._run(f"sh -s {shlex.quote(','.join(domains))}{' dry' if dry else ''}", data=CLOSE_SCRIPT.encode())
+    def close_stale(self, domains: list[str], rule_id: str, dry: bool = False) -> int:
+        args = " ".join(shlex.quote(a) for a in (",".join(domains), "dry" if dry else "run", rule_id))
+        _, out = self._run(f"sh -s {args}", data=CLOSE_SCRIPT.encode())
         return int(out.strip()) if out.strip().isdigit() else 0
 
-    def probe(self) -> bool:
-        _, out = self._run("sh -s", data=PROBE_SCRIPT.encode(), timeout=60)
+    def probe(self, rule_id: str) -> bool:
+        _, out = self._run(f"sh -s {shlex.quote(rule_id)}", data=PROBE_SCRIPT.encode(), timeout=60)
         out = out.strip()
         return out == "NO_GROUP" or out.isdigit() and int(out) > 0
 
 
-def find_rule(status: dict | None) -> dict | None:
-    return next((r for r in (status or {}).get("site_rules") or [] if r.get("id") == RULE_ID), None)
+def find_rule(status: dict | None, rule_id: str | None = None) -> dict | None:
+    """按编号找规则；不给编号时找 ChatGPT 预设规则。"""
+    rules = (status or {}).get("site_rules") or []
+    if rule_id:
+        return next((r for r in rules if r.get("id") == rule_id), None)
+    return next((r for r in rules if r.get("preset") == PRESET), None)
+
+
+def before_of(m: dict) -> dict:
+    """夜间标记里切换前的规则；旧版标记的规则编号只记在 m["rule"]。"""
+    before = dict(m.get("before") or {})
+    before.setdefault("id", m.get("rule"))
+    return before
 
 
 def payload(before: dict, source: str | None = None, selected: str | None = None) -> str:
-    p = {"id": RULE_ID, "label": before["label"], "domains": before["domains"],
+    p = {"id": before["id"], "label": before["label"], "domains": before["domains"],
          "source": source or before["source"], "selected": selected or before["selected"], "enabled": True}
     if before.get("preset"):
         p["preset"] = before["preset"]
@@ -193,22 +206,24 @@ def live(rule: dict | None) -> bool:
     return bool(rule and rule.get("enabled") and rule.get("applied") and not rule.get("error"))
 
 
-def applied(result: dict | None) -> bool:
-    return bool(result and result.get("ok") and live(find_rule(result)))
+def applied(rule_id: str):
+    return lambda result: bool(result and result.get("ok") and live(find_rule(result, rule_id)))
 
 
-def disabled(result: dict | None) -> bool:
-    rule = find_rule(result)
-    return bool(result and result.get("ok") and rule and not rule.get("enabled"))
+def disabled(rule_id: str):
+    def done(result: dict | None) -> bool:
+        rule = find_rule(result, rule_id)
+        return bool(result and result.get("ok") and rule and not rule.get("enabled"))
+    return done
 
 
-def change(router, clock, what: str, done, *args: str) -> dict:
+def change(router, clock, what: str, rule_id: str, done, *args: str) -> dict:
     """调用模块的 save / set-enabled，done(结果) 判断成功；每次失败记下模块错误码，偶发失败隔 RETRY_WAIT 秒重试。"""
     for attempt in range(1, TRIES + 1):
         r = router.cli(*args)
         if done(r):
             return r
-        r["error"] = r.get("error") or (find_rule(r) or {}).get("error") or "NOT_APPLIED"
+        r["error"] = r.get("error") or (find_rule(r, rule_id) or {}).get("error") or "NOT_APPLIED"
         router.log(f"{what}: {args[0]} 第 {attempt} 次失败 {r['error']}")
         if r["error"] in PROOF_ERRORS or attempt == TRIES:
             return r
@@ -225,12 +240,12 @@ def guard_end(now: datetime) -> datetime:
     return end + timedelta(days=1) if now.time() >= WINDOW_START else end
 
 
-def run_benchmark(router, clock, source: str, minutes: int) -> dict | None:
-    """重新测速 source（测速助手全局一次只跑一个源，忙时等待），测完返回该源的 status。"""
+def run_benchmark(router, clock, source: str, minutes: int, ids=()) -> dict | None:
+    """只测 source 里的 ids 这几个节点（测速助手全局一次只跑一个源，忙时等待），测完返回该源的 status。"""
     deadline, started = clock.monotonic() + minutes * 60, False
     while clock.monotonic() < deadline:
         if not started:
-            r = router.cli("benchmark", source)
+            r = router.cli("benchmark", source, *ids)
             started = bool(r.get("ok"))
             if not started and r.get("error") != "BENCH_BUSY":
                 router.log(f"测速 {source} 启动失败：{r.get('error')}")
@@ -244,13 +259,14 @@ def run_benchmark(router, clock, source: str, minutes: int) -> dict | None:
 
 def restore(router, clock, before: dict) -> bool:
     """把规则恢复为 before。模块要求所选节点有测速证明：先直接保存，缺证明就测速后再存；仍失败则停用规则回原分流。"""
-    r = change(router, clock, "restore", applied, "save", payload(before))
-    if applied(r):
+    rid, ok = before["id"], applied(before["id"])
+    r = change(router, clock, "restore", rid, ok, "save", payload(before))
+    if ok(r):
         return True
-    if r["error"] in PROOF_ERRORS and run_benchmark(router, clock, before["source"], 20) and \
-            applied(change(router, clock, "restore", applied, "save", payload(before))):
+    if r["error"] in PROOF_ERRORS and run_benchmark(router, clock, before["source"], 20, [before["selected"]]) and \
+            ok(change(router, clock, "restore", rid, ok, "save", payload(before))):
         return True
-    change(router, clock, "restore", disabled, "set-enabled", RULE_ID, "0")
+    change(router, clock, "restore", rid, disabled(rid), "set-enabled", rid, "0")
     return False
 
 
@@ -316,23 +332,24 @@ def rollback(router, clock, reason: str) -> str:
     if not m or m.get("mode") not in ("night", "rolled_back"):   # rolled_back：上次回退中途出错，接着恢复
         log_local(f"rollback: 不在夜间模式（标记 {m and m.get('mode')}），不动规则")
         return "NOT_IN_NIGHT_MODE"
-    before = m["before"]
-    r = change(router, clock, "rollback", disabled, "set-enabled", RULE_ID, "0")   # 立刻回原分流 🤖 AI，不等测速
-    closed = router.close_stale(before["domains"])
+    before = before_of(m)
+    rid = before["id"]
+    r = change(router, clock, "rollback", rid, disabled(rid), "set-enabled", rid, "0")   # 立刻回原分流 🤖 AI，不等测速
+    closed = router.close_stale(before["domains"], rid)
     m.update(mode="rolled_back", reason=reason, at=clock.epoch())
     router.put_marker(m)
-    router.log(f"rollback: {reason}；停用规则回原分流 ok={disabled(r)}，断开旧连接 {closed} 条")
+    router.log(f"rollback: {reason}；停用规则回原分流 ok={disabled(rid)(r)}，断开旧连接 {closed} 条")
     if not restore(router, clock, before):
         router.log(f"rollback: 恢复 {before['source']}:{before['selected_name']} 失败，保持原分流，等白天任务再试")
         return "ROLLED_BACK"
-    closed = router.close_stale(before["domains"])
+    closed = router.close_stale(before["domains"], rid)
     m.update(mode="restored", at=clock.epoch())
     router.put_marker(m)                        # 留着标记：今晚不再切换，白天任务清理
     router.log(f"rollback: 已恢复 {before['source']}:{before['selected_name']}，断开旧连接 {closed} 条")
     return "RESTORED"
 
 
-def guard(router, clock, end: datetime, judge: Judge | None) -> str:
+def guard(router, clock, end: datetime, judge: Judge | None, rule_id: str) -> str:
     last_probe = last_marker = clock.monotonic()
     probe_fails = 0
     while clock.now() < end:
@@ -344,7 +361,7 @@ def guard(router, clock, end: datetime, judge: Judge | None) -> str:
                 return rollback(router, clock, "本机守护：" + reason)
             if t - last_probe >= PROBE_EVERY:
                 last_probe = t
-                probe_fails = 0 if router.probe() else probe_fails + 1
+                probe_fails = 0 if router.probe(rule_id) else probe_fails + 1
                 if probe_fails >= 2:
                     return rollback(router, clock, "本机守护：经夜间节点连续 2 次连不上 chatgpt.com")
             if t - last_marker >= MARKER_EVERY:
@@ -376,40 +393,43 @@ def night(router, clock, logs: pathlib.Path | None = None, trial_minutes: int | 
     if m:
         if m.get("mode") == "night":
             router.log("night: 已在夜间模式，继续守护")
-            return guard(router, clock, end, Judge(db, max_log_id(db), 0) if db else None)
+            return guard(router, clock, end, Judge(db, max_log_id(db), 0) if db else None, before_of(m)["id"])
         log_local(f"night: 今晚已经 {m.get('mode')}（{m.get('reason')}），不再切换")
         return "ALREADY_" + str(m.get("mode")).upper()
     rule = find_rule(router.cli("status"))
     if not live(rule):
-        router.log("night: ChatGPT 规则没启用或没生效，不切换")
+        router.log("night: 没有 ChatGPT 预设规则，或规则没启用、没生效，不切换")
         return "RULE_NOT_ACTIVE"
     if rule.get("source") == NIGHT_SOURCE and rule.get("selected") in NIGHT_NODES:
         log_local("night: 规则已在夜间节点上，不切换")
         return "ALREADY_ON_NIGHT_NODE"
-    before = {k: rule.get(k) for k in ("source", "selected", "selected_name", "label", "domains", "preset")}
-    nodes = {n.get("id"): n for n in (run_benchmark(router, clock, NIGHT_SOURCE, 15) or {}).get("nodes") or []}
+    before = {k: rule.get(k) for k in ("id", "source", "selected", "selected_name", "label", "domains", "preset")}
+    rid, ok = before["id"], applied(before["id"])
+    # 只测两个夜间节点，几十秒；以前整个订阅 70 个节点要四分钟。
+    bench = run_benchmark(router, clock, NIGHT_SOURCE, 15, list(NIGHT_NODES))
+    nodes = {n.get("id"): n for n in (bench or {}).get("nodes") or []}
     node = next((i for i in NIGHT_NODES if nodes.get(i, {}).get("eligible")), None)
     if not node:
         router.log(f"night: {NIGHT_SOURCE} 的夜间节点测速都没通过，今晚不切换")
         return "NO_ELIGIBLE_NIGHT_NODE"
     start_id = max_log_id(db)
-    marker = {"mode": "night", "rule": RULE_ID, "since": clock.epoch(), "before": before,
+    marker = {"mode": "night", "rule": rid, "since": clock.epoch(), "before": before,
               "night": {"source": NIGHT_SOURCE, "selected": node, "name": NIGHT_NODES[node]}}
     router.put_marker(marker)   # 先写标记：保存中途出错时，兜底脚本与白天任务仍知道原规则
-    result = change(router, clock, "night", applied, "save", payload(before, NIGHT_SOURCE, node))
-    if not applied(result):
+    result = change(router, clock, "night", rid, ok, "save", payload(before, NIGHT_SOURCE, node))
+    if not ok(result):
         error = result["error"]
-        cur = find_rule(router.cli("status")) or {}
+        cur = find_rule(router.cli("status"), rid) or {}
         if (cur.get("source"), cur.get("selected")) == (before["source"], before["selected"]) and live(cur) or restore(router, clock, before):
             router.remove_marker()
             router.log(f"night: 切到 {NIGHT_NODES[node]} 失败（{error}），保持原规则")
         else:                   # 标记留给白天任务再恢复
             router.log(f"night: 切到 {NIGHT_NODES[node]} 失败（{error}），原规则也没恢复，已停用规则回原分流")
         return "SAVE_FAILED"
-    closed = router.close_stale(before["domains"])
+    closed = router.close_stale(before["domains"], rid)
     router.log(f"night: ChatGPT 分流切到 {NIGHT_SOURCE} {NIGHT_NODES[node]}，断开旧连接 {closed} 条；"
                f"原规则 {before['source']}:{before['selected_name']}；守护到 {end:%m-%d %H:%M}")
-    return guard(router, clock, end, Judge(db, start_id, clock.epoch() + GRACE) if db else None)
+    return guard(router, clock, end, Judge(db, start_id, clock.epoch() + GRACE) if db else None, rid)
 
 
 def day(router, clock) -> str:
@@ -417,8 +437,8 @@ def day(router, clock) -> str:
     if not m:
         log_local("day: 没有夜间标记，不用恢复")
         return "NOTHING"
-    before, nightly = m.get("before") or {}, m.get("night") or {}
-    rule = find_rule(router.cli("status")) or {}
+    before, nightly = before_of(m), m.get("night") or {}
+    rule = find_rule(router.cli("status"), before["id"]) or {}
     where = (rule.get("source"), rule.get("selected"))
     if m.get("mode") == "restored" or where == (before.get("source"), before.get("selected")) and live(rule):
         router.remove_marker()
@@ -429,7 +449,7 @@ def day(router, clock) -> str:
         router.log(f"day: 规则已被改成 {where[0]}:{rule.get('selected_name')}，不覆盖，清理夜间标记")
         return "USER_CHANGED"
     ok = restore(router, clock, before)
-    closed = router.close_stale(before["domains"])
+    closed = router.close_stale(before["domains"], before["id"])
     if ok:
         router.remove_marker()
         router.log(f"day: 恢复为 {before['source']}:{before['selected_name']}，断开旧连接 {closed} 条")
@@ -486,7 +506,7 @@ def uninstall(router, clock) -> None:
 
 def status(router) -> None:
     rule = find_rule(router.cli("status")) or {}
-    print("规则:", {k: rule.get(k) for k in ("source", "selected_name", "enabled", "applied", "error")})
+    print("规则:", {k: rule.get(k) for k in ("id", "label", "source", "selected_name", "enabled", "applied", "error")})
     print("夜间标记:", router.marker())
     names = ",".join(f"'{n}'" for n in TASKS)
     out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",

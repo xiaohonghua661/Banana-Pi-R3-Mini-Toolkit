@@ -16,25 +16,29 @@ g.log_local = lambda msg: None
 TW01, TOKYO07, TOKYO08 = "bd7cdc171723bbdd", "ec534e9910c8f868", "fd14ad7e7dbad6f9"
 NAMES = {TW01: "台湾 01 [0.3X]", TOKYO07: "东京07", TOKYO08: "东京08"}
 MESL, NIGHT = "MESL_yue.yaml", g.NIGHT_SOURCE
+RID = "ca7c4792460d"        # 设备上 ChatGPT 预设规则的编号（2026-11-23）；夜间任务不能写死它
+OTHER = {"id": "bbbbbbbbbbbb", "label": "Claude", "domains": ["claude.ai"], "preset": "", "source": MESL,
+         "selected": TW01, "selected_name": NAMES[TW01], "enabled": True, "applied": True, "error": None}
 
 
 class FakeRouter:
-    """save 只接受有测速证明的节点；测速跑两轮状态查询后完成，给 eligible 里的节点发证明。"""
+    """save 只接受有测速证明的节点；测速跑两轮状态查询后完成，给测到的 eligible 节点发证明。
+    规则表里另有一条非预设规则排在前面：夜间任务只能动 ChatGPT 预设那条。"""
 
     def __init__(self):
-        self.rule = {"id": g.RULE_ID, "label": "ChatGPT", "domains": ["chatgpt.com", "openai.com"], "preset": "",
+        self.rule = {"id": RID, "label": "ChatGPT", "domains": ["chatgpt.com", "openai.com"], "preset": "chatgpt",
                      "source": MESL, "selected": TW01, "selected_name": NAMES[TW01], "enabled": True, "applied": True, "error": None}
         self.mark = None
         self.eligible = {NIGHT: {TOKYO07, TOKYO08}, MESL: {TW01}}
         self.proof = {(MESL, TW01)}
-        self.running = {}
-        self.calls, self.logs, self.closes = [], [], []
+        self.running, self.measuring = {}, {}
+        self.calls, self.logs, self.closes, self.probes = [], [], [], []
         self.probe_ok = True
         self.save_error = None
         self.flaky = {}     # 命令 → 依次返回的偶发错误码，如 {"save": ["CONFIG_TEST_FAILED"]}
 
     def view(self):
-        return {"ok": True, "site_rules": [dict(self.rule)]}
+        return {"ok": True, "site_rules": [dict(OTHER), dict(self.rule)]}
 
     def cli(self, *args):
         self.calls.append(args)
@@ -47,21 +51,25 @@ class FakeRouter:
             return dict(self.view(), nodes=[{"id": i, "eligible": (src, i) in self.proof} for i in ids])
         if cmd == "benchmark":
             self.running[args[1]] = 2
+            self.measuring[args[1]] = set(args[2:]) or None     # 不带节点就是全部测
             return {"ok": True, "running": True}
         if cmd == "benchmark-status":
             left = self.running.get(args[1], 0) - 1
             self.running[args[1]] = left
             if left == 0:
-                self.proof |= {(args[1], i) for i in self.eligible.get(args[1], ())}
+                wanted = self.measuring.get(args[1])
+                self.proof |= {(args[1], i) for i in self.eligible.get(args[1], ()) if wanted is None or i in wanted}
             return {"ok": True, "running": left > 0}
         if cmd == "save":
             p = json.loads(args[1])
+            assert p["id"] == RID, p
             if self.save_error or (p["source"], p["selected"]) not in self.proof:
                 return {"ok": False, "error": self.save_error or "BENCHMARK_REQUIRED"}
             self.rule.update(source=p["source"], selected=p["selected"], selected_name=NAMES[p["selected"]],
                              enabled=True, applied=True, error=None)
             return self.view()
         if cmd == "set-enabled":
+            assert args[1] == RID, args
             on = args[2] == "1"
             self.rule.update(enabled=on, applied=on)
             return self.view()
@@ -79,11 +87,13 @@ class FakeRouter:
     def log(self, msg):
         self.logs.append(msg)
 
-    def close_stale(self, domains, dry=False):
+    def close_stale(self, domains, rule_id, dry=False):
+        assert rule_id == RID, rule_id
         self.closes.append((self.rule["source"], self.rule["selected"], self.rule["enabled"]))
         return 1
 
-    def probe(self):
+    def probe(self, rule_id):
+        self.probes.append(rule_id)
         return self.probe_ok
 
     def where(self):
@@ -185,6 +195,21 @@ class Night(Base):
         self.assertEqual(self.r.mark["night"], {"source": NIGHT, "selected": TOKYO07, "name": g.NIGHT_NODES[TOKYO07]})
         self.assertEqual(self.c.now().strftime("%H:%M"), "07:20")
         self.assertEqual(self.r.closes[0], (NIGHT, TOKYO07, True))
+        self.assertEqual(self.r.mark["rule"], RID)
+        self.assertEqual(self.r.mark["before"]["id"], RID)
+        self.assertEqual(set(self.r.probes), {RID})
+        self.assertEqual(OTHER["selected"], TW01)
+
+    def test_night_benchmarks_only_the_night_nodes(self):
+        self.c.at(60, lambda: self.r.mark.update(mode="restored"))
+        self.night()
+        self.assertIn(("benchmark", NIGHT, TOKYO07, TOKYO08), self.r.calls)
+        self.assertFalse(any(c[:2] == ("benchmark", NIGHT) and len(c) == 2 for c in self.r.calls), "不再整源测速")
+
+    def test_without_a_chatgpt_preset_rule_nothing_changes(self):
+        self.r.rule["preset"] = ""
+        self.assertEqual(self.night(), "RULE_NOT_ACTIVE")
+        self.assertFalse(any(c[0] in ("benchmark", "save", "set-enabled") for c in self.r.calls))
 
     def test_second_choice_when_first_fails_benchmark(self):
         self.r.eligible[NIGHT] = {TOKYO08}
@@ -235,7 +260,8 @@ class Night(Base):
 
     def test_stale_marker_is_restored_before_switching(self):
         self.r.rule.update(source=NIGHT, selected=TOKYO07, selected_name=NAMES[TOKYO07], enabled=False, applied=False)
-        self.r.mark = {"mode": "night", "rule": g.RULE_ID, "since": self.c.epoch() - 20 * 3600,
+        # 旧版标记：原规则里没有 id，编号只在 "rule"。
+        self.r.mark = {"mode": "night", "rule": RID, "since": self.c.epoch() - 20 * 3600,
                        "before": {"source": MESL, "selected": TW01, "selected_name": NAMES[TW01], "label": "ChatGPT",
                                   "domains": ["chatgpt.com", "openai.com"], "preset": ""},
                        "night": {"source": NIGHT, "selected": TOKYO07}}
@@ -304,14 +330,14 @@ class Guard(Base):
         self.c.at(50, lambda: self.r.proof.discard((MESL, TW01)))
         self.c.at(100, lambda: self.db.big(self.c))
         self.assert_restored(self.night())
-        self.assertIn(("benchmark", MESL), self.r.calls)
+        self.assertIn(("benchmark", MESL, TW01), self.r.calls, "恢复时只测原节点")
 
     def test_core_check_timeouts_are_retried_without_benchmark(self):
         """2026-10-26 00:09：模块核心校验超时（CONFIG_TEST_FAILED），恢复不该去测速，也不该放弃。"""
         self.c.at(100, lambda: self.db.big(self.c))
         self.c.at(101, lambda: self.r.flaky.update({"save": ["CONFIG_TEST_FAILED", "CONFIG_TEST_FAILED"]}))
         self.assert_restored(self.night())
-        self.assertNotIn(("benchmark", MESL), self.r.calls)
+        self.assertFalse(any(c[:2] == ("benchmark", MESL) for c in self.r.calls))
         self.assertTrue(any("CONFIG_TEST_FAILED" in line for line in self.r.logs))
 
     def test_disable_is_retried_when_core_check_times_out(self):
