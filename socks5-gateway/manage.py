@@ -341,10 +341,10 @@ def verify(client, host: str, args) -> None:
     targets = json.loads(text(client, CLI + " targets", timeout=60))
     if targets.get("ok") is not True or not isinstance(targets.get("nodes"), list):
         fail("TARGETS_SCHEMA_INVALID")
-    print("VERIFY_OK enabled=%s applied=%s ipv4_only=%s exit=%s groups=%d nodes=%d" % (
+    print("VERIFY_OK enabled=%s applied=%s ipv4_only=%s exit=%s subscription=%s nodes=%d" % (
         str(status.get("enabled")).lower(), str(status.get("applied")).lower(), str(status.get("ipv4_only")).lower(),
-        (status.get("exit") or {}).get("now"), len(targets.get("groups") or []), len(targets.get("nodes") or [])),
-        flush=True)
+        (status.get("exit") or {}).get("now"), (status.get("subscription") or {}).get("name"),
+        len(targets.get("nodes") or [])), flush=True)
 
 
 def rollback(client, host: str, args) -> None:

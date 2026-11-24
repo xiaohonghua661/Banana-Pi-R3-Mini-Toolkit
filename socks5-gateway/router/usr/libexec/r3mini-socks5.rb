@@ -89,7 +89,6 @@ module R3MiniSocks5
     'CORE_FAILED' => 'SOCKS5 内核没有启动或没有接受新配置。',
     'SWITCH_FAILED' => 'SOCKS5 内核没有接受这次切换，请重试。',
     'RELOAD_FAILED' => 'OpenClash 没有接受清理后的配置，已恢复原配置。',
-    'ROLLBACK_FAILED' => '恢复原配置后重新加载失败，请检查 OpenClash；改前备份已保留。',
     'SHIM_MISSING' => '没有找到 sing-box，无法开启仅 IPv4。',
     'IPV4_SERVICE' => '仅 IPv4 转发进程没有运行，请点「修复」。',
     'PROBE_TOOL_MISSING' => '探测工具 curl 不可用。',
@@ -1744,7 +1743,7 @@ module R3MiniSocks5
       command = argv[0]
       arity = { 'status' => [1], 'targets' => [1, 2], 'check-port' => [2], 'save' => [2], 'apply' => [1],
                 'enable' => [1], 'disable' => [1], 'reset' => [1], 'verify' => [1], 'probe' => [1],
-                'use' => [2, 3], 'ipv4' => [2], 'hook' => [2], 'prepare' => [1], 'shim-profile' => [1],
+                'use' => [2, 3], 'ipv4' => [2], 'hook' => [2], 'prepare' => [1],
                 'delay' => [1, 2, 3], 'delay-all' => [1] }
       fail!('ARGUMENT_INVALID') unless arity.fetch(command, []).include?(argv.length)
 
@@ -1765,7 +1764,7 @@ module R3MiniSocks5
       when 'use' then use(argv[1], argv[2])
       when 'ipv4' then ipv4(argv[1])
       when 'hook' then hook(argv[1])
-      when 'prepare', 'shim-profile' then prepare
+      when 'prepare' then prepare
       when 'delay' then delay(argv[1], argv[2])
       when 'delay-all' then delay_all
       end

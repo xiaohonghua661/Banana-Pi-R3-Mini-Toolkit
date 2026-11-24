@@ -17,6 +17,7 @@
 | `router/usr/libexec/r3mini-socks5.rb` | 后端（全部命令） |
 | `router/usr/sbin/r3mini-socks5` | CLI 入口 |
 | `router/etc/init.d/r3mini-socks5` | procd 服务：SOCKS5 内核和 sing-box |
+| `router/usr/share/luci/menu.d/luci-app-r3mini-socks5.json` | LuCI 菜单（部署时改成指向带指纹的视图） |
 | `router/usr/share/rpcd/acl.d/luci-app-r3mini-socks5.json` | LuCI 权限 |
 | `router/www/luci-static/resources/view/services/r3mini-socks5.js` | LuCI 页面（部署时改名带内容指纹） |
 | `manage.py` | 部署、核对、回滚 |

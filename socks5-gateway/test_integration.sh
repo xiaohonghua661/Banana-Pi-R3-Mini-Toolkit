@@ -93,7 +93,7 @@ c = { "allow-lan" => false, "mode" => "rule", "log-level" => "warning", "ipv6" =
       "proxies" => [main, { "name" => "r3mini-socks5-ipv4", "type" => "socks5", "server" => "127.0.0.1", "port" => 27906,
                             "username" => "ituser", "password" => "it-pass-old", "x-r3mini-owner" => "r3mini-socks5" }],
       "proxy-groups" => [
-        { "name" => "MESL", "type" => "select", "proxies" => [node] },
+        { "name" => "Proxy", "type" => "select", "proxies" => [node] },
         { "name" => "r3mini-socks5-exit", "type" => "select", "hidden" => true, "proxies" => [node, "DIRECT", "REJECT"] },
         { "name" => "r3mini-socks5-mode", "type" => "select", "hidden" => true, "proxies" => ["r3mini-socks5-exit", "r3mini-socks5-ipv4"] }],
       "listeners" => [{ "name" => "r3mini-socks5", "type" => "socks", "port" => 27896, "listen" => "127.0.0.1", "udp" => true,
@@ -153,10 +153,12 @@ echo "== 4. 开关仅 IPv4（不重启内核）"
 p0=$(corepid); a=$(up); out=$(be ipv4 on); b=$(up)
 [ "$(echo "$out" | j applied)" = true ] && [ "$(echo "$out" | j mode)" = r3mini-socks5-ipv4 ] && ok "ipv4 on：applied、mode=ipv4（$(el $a $b)s）" || bad "ipv4 on" "$out"
 [ "$(corepid)" = "$p0" ] && ok "开仅 IPv4 没有重启内核" || bad "开仅 IPv4 重启了内核"
-pr=$(be probe); echo "$pr" | ruby -ryaml -e 'x = YAML.safe_load(STDIN.read); c = x["checks"] || []
+pr=$(be probe); res=$(echo "$pr" | ruby -ryaml -e 'x = YAML.safe_load(STDIN.read); c = x["checks"] || []
 v6 = c.select { |e| e["family"] == "IPv6" }.map { |e| e["id"] }
 puts "  " + c.map { |e| "#{e["id"]}=#{e["region"] || "?"}/#{e["family"] || "-"}" }.join(" ")
-puts (c.size == 5 && c.count { |e| e["ok"] } >= 4 && v6.empty?) ? "OK" : "BAD v6=#{v6.inspect} ok=#{c.count { |e| e["ok"] }}"' | { read l; echo "$l"; read r; [ "$r" = OK ] && ok "五家地区检测：至少 4 家有结果，没有 IPv6" || bad "多家地区检测" "$r"; }
+puts (c.size == 5 && c.count { |e| e["ok"] } >= 4 && v6.empty?) ? "OK" : "BAD v6=#{v6.inspect} ok=#{c.count { |e| e["ok"] }}"')
+echo "$res" | head -n 1
+r=$(echo "$res" | tail -n 1); [ "$r" = OK ] && ok "五家地区检测：至少 4 家有结果，没有 IPv6" || bad "多家地区检测" "$r"
 v=$(be verify); [ "$(echo "$v" | j ok)" = true ] && ok "verify：Google $(echo "$v" | j google_ip)、Cloudflare $(echo "$v" | j cloudflare_ip)" || bad "verify" "$v"
 
 echo "== 5. 同一订阅里换节点（不重载内核、断开旧连接）"
@@ -187,7 +189,8 @@ d=$(be delay); [ "$(echo "$d" | j ok)" = true ] && ok "当前出口延迟 $(echo
 d=$(be delay "$(b64 "$alt")"); [ "$(echo "$d" | j by)" = socks5 ] && ok "单独测一个非当前节点（$alt）：$(echo "$d" | j delay) ms" || bad "delay $alt" "$d"
 d=$(be delay "$(b64 "$NODE")" "$(b64 $SUB)"); [ "$(echo "$d" | j by)" = socks5 ] && ok "指明当前订阅时由 SOCKS5 内核测" || bad "delay 指明订阅" "$d"
 d=$(be delay "$(b64 "$first")" "$(b64 $OTHER)"); [ "$(echo "$d" | j error)" = DELAY_UNAVAILABLE ] && ok "没在运行的订阅 → DELAY_UNAVAILABLE" || bad "delay 其他订阅" "$d"
-t=$(be targets); echo "$t" | ruby -ryaml -e 'x = YAML.safe_load(STDIN.read); puts x["nodes"].count { |e| e["delay"] }' | { read c; [ "${c:-0}" -ge 1 ] && ok "targets 带上了 $c 个延迟" || bad "targets 没有延迟"; }
+t=$(be targets); c=$(echo "$t" | ruby -ryaml -e 'x = YAML.safe_load(STDIN.read); puts x["nodes"].count { |e| e["delay"] }')
+[ "${c:-0}" -ge 1 ] && ok "targets 带上了 $c 个延迟" || bad "targets 没有延迟"
 
 echo "== 8. 改端口（热重载）与改密码（重启内核）"
 p0=$(corepid); a=$(up); out=$(be save "$(b64 '{"port":27899}')"); b=$(up)
