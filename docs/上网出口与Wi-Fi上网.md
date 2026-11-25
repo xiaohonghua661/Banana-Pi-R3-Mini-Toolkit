@@ -312,25 +312,41 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 退回旧版（`5279ed3` 的「手机热点 WAN」）：
 
 - 先问清用户新版哪里有问题。旧版连不上手机热点（见本节开头），退回后这个故障会回来。
-- 在 PowerShell 里执行（`~` 在 PowerShell 里不会展开，所以写 `$HOME`；在 Git Bash 里可以写 `~`）：
+- 回滚同样是写设备：要有用户明确要求，并先按「部署、测试、回滚」第 1 步再做一份整机备份。
+- 在仓库根目录执行。脚本不展开 `~`，所以两种终端的写法不同：
 
   ```powershell
+  # PowerShell：用 $HOME，可以带引号
   python fan-dashboard/deploy_hotspot.py 192.168.0.246 --key "$HOME/.ssh/mingdaren_246_ed25519" --rollback /root/r3mini-hotspot-backup-20261125221944
   ```
 
-- 回滚会换回 6 个旧文件、删掉 `status.uc` 和 `log.uc`，最后重启看门狗；开机链接不会撤。要回到部署前「看门狗不自启、不运行」的状态，回滚成功后在设备上再执行 `/etc/init.d/r3mini-hotspot disable && /etc/init.d/r3mini-hotspot stop`。
-- 核对：
-  - `ls /usr/share/r3mini-hotspot` 应报不存在。
-  - `ls /etc/rc.d | grep hotspot` 应为空。
-  - `/etc/init.d/r3mini-hotspot status` 应为 `inactive`。
+  ```bash
+  # Git Bash：/root/… 参数要靠 MSYS_NO_PATHCONV=1 防止被改写成 Windows 路径；
+  # 这时不能写 ~（会变成 /c/Users/…，Python 找不到），要用 $USERPROFILE
+  MSYS_NO_PATHCONV=1 python fan-dashboard/deploy_hotspot.py 192.168.0.246 --key "$USERPROFILE/.ssh/mingdaren_246_ed25519" --rollback /root/r3mini-hotspot-backup-20261125221944
+  ```
+
+- 回滚会做这几件事：
+  - 换回 6 个旧文件；
+  - 删掉 `status.uc`、`log.uc`，再删掉变空的目录 `/usr/share/r3mini-hotspot`（部署前没有这个目录）；
+  - 最后重启看门狗。
+  - 开机链接不会撤。
+- 回滚成功会打印 `ROLLBACK_OK=…`。此时核对 `ls /usr/share/r3mini-hotspot` 应报不存在；看门狗是 running，`/etc/rc.d` 里仍有 `S95`/`K05r3mini-hotspot`。
+- 要完全回到部署前「看门狗不自启、不运行」的状态，再在设备上执行 `/etc/init.d/r3mini-hotspot disable && /etc/init.d/r3mini-hotspot stop`。之后核对：`ls /etc/rc.d | grep hotspot` 应为空，`/etc/init.d/r3mini-hotspot status` 应为 `inactive`。
 
 启用 Wi-Fi 上网之前：
 
-- 在 `.246` 上执行 `ping -c 2 -W 2 192.168.0.242`，再看 `ip neigh show 192.168.0.242`。两样都没有回应、也没有 `REACHABLE`/`STALE` 记录，才算 `.242` 不在这个 LAN。
+- 在 `.246` 上执行 `ping -c 2 -W 2 192.168.0.242`，再看 `ip neigh show 192.168.0.242`。ping 不通，并且邻居表里没有这条记录，或者只有 `INCOMPLETE`/`FAILED`（ping 之后通常会留下这种记录），才算 `.242` 不在这个 LAN。出现 `REACHABLE`、`STALE`、`DELAY` 都表示它在。
 - 再在页面上点「搜索附近 Wi-Fi」，确认列表里没有 `.242` 的 `immortalwrt-2.4`、`immortalwrt-5.0`。只证明不在同一个 LAN 不够：两台在射频范围内、又连同一部手机，照样会被拉到同一信道。
+  - 注意别看错：`.246` 自己叫 `immortalwrt2-2.4`、`immortalwrt2-5.0`，只比 `.242` 多一个「2」。
 - 上面任一项不满足就不要启用，先问用户。
-- `.246` 的「优先使用」是有线 WAN（`r3mini_hotspot.main.preferred_egress=wan`）。网线在线时，Wi-Fi 上网只是备用；要让流量走手机热点，还得在页面上把「优先使用」改成 Wi-Fi 上网或自动后拔掉网线。
-- 用户在页面上自己启用不受下面这条限制。agent 代为启用时，会写 `wireless`、`network`、`firewall`、`r3mini_hotspot`，要按 `docs/必读/当前设备运行基线.md` 的「禁止并发写入的范围」：先取得用户明确要求，再做一份新的整机备份。22:17 那份是部署前做的，不能算这次的改前备份。
+- `.246` 的「优先使用」是有线 WAN（`r3mini_hotspot.main.preferred_egress=wan`），网线在线时 Wi-Fi 上网只是备用。要让流量走手机热点，有两种办法：
+  - 把「优先使用」改成 Wi-Fi 上网，这样网线插着也走热点；
+  - 或者保持有线 WAN / 自动，拔掉网线后自动切到热点。
+- 用户在页面上自己启用不受下面这条限制。
+- agent 代为启用时，要按 `docs/必读/当前设备运行基线.md` 的「禁止并发写入的范围」：先取得用户明确要求，再做一份新的整机备份。22:17 那份是部署前做的，不能算这次的改前备份。
+  - 保存任务会备份并提交 `wireless`、`network`、`firewall`、`r3mini_hotspot` 四份配置。
+  - 在 `.246` 上，`firewall` 实际不会变：wan 区已经包含 `wwan`，见下文。这里仍按四份都会写来从严处理。
 - 页面测试 `test_hotspot_page.py` 在 `.242` 上对同一版跑过（见上节「部署、测试、回滚」第 3 步）；`.246` 上没跑，因为这台电脑没装 `playwright`。它只检查页面，不是启用的前置条件。
 - Wi-Fi 上网没在 `.246` 上启用过。上一节「还没在真机验证」的各项，对 `.246` 同样都没有验证。
 
