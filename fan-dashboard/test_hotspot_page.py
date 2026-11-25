@@ -78,6 +78,8 @@ class Page:
         self.fix_scan = False
         self.scan_error = None
         self.fast_disable = False
+        self.debug_fixture = None
+        self.debug_calls = []
         self.work = None
 
     # ---------- 断言 ----------
@@ -113,6 +115,11 @@ class Page:
             if callable(st):
                 st = st()
             return {"code": 0, "stdout": json.dumps(st, ensure_ascii=False)}
+        if cmd == "debug":
+            self.debug_calls.append(time.time())
+            if self.debug_fixture is not None:
+                return {"code": 0, "stdout": json.dumps(self.debug_fixture, ensure_ascii=False)}
+            return self.helper(argv)
         if cmd == "scan":
             if self.scan_error:
                 return {"code": 1, "stdout": "", "stderr": self.scan_error}
@@ -286,7 +293,7 @@ def run_page(t: Page, sid: str) -> None:
         t.check("poll_every_1s_during_job", 3 <= fast <= 5, f"{fast} calls in 4.2 s")
         t.fail_status = True
         page.wait_for_timeout(2600)
-        t.check("job_outage_message", "正在重配 Wi-Fi" in q(".r3x-age").inner_text(), q(".r3x-age").inner_text())
+        t.check("job_outage_message", "正在重配 Wi-Fi" in q(".r3x-now .r3x-age").inner_text(), q(".r3x-now .r3x-age").inner_text())
         t.fail_status = False
         done = copy.deepcopy(t.base)
         done["wifi"].update({"enabled": True, "ssid": "Phone5G", "radio": "radio1", "up": True, "ip": "172.20.10.2", "signal": -48, "key_set": True})
@@ -322,11 +329,11 @@ def run_page(t: Page, sid: str) -> None:
         t.fail_status = True
         t.fixture = done
         page.wait_for_timeout(11000)
-        t.check("stale_message", "读不到状态" in q(".r3x-age").inner_text(), q(".r3x-age").inner_text())
+        t.check("stale_message", "读不到状态" in q(".r3x-now .r3x-age").inner_text(), q(".r3x-now .r3x-age").inner_text())
         t.check("stale_disables_prefer", q(".r3x-prefer button").first.is_disabled())
         t.fail_status = False
         page.wait_for_timeout(5500)
-        t.check("recovers_after_failure", "更新于" in q(".r3x-age").inner_text())
+        t.check("recovers_after_failure", "更新于" in q(".r3x-now .r3x-age").inner_text())
 
         # 11-25 截图：停用任务比第一次回状态还快结束，表单不能停在「已启用、设置没有改动」
         enabled = copy.deepcopy(t.base)
@@ -385,6 +392,66 @@ def run_page(t: Page, sid: str) -> None:
             && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.includes('Wi-Fi'))
             && parseFloat(getComputedStyle(e).fontSize) < 14).map(e => e.className || e.tagName)""")
         t.check("wifi_text_at_least_14px", not small_wifi, str(small_wifi[:5]))
+
+        # 调试面板：右下角开关，关着不读，开着每 10 秒读一次
+        t.fixture = None
+        btn = page.locator(".r3x .r3x-dbg-btn")
+        vp = page.viewport_size
+        box = btn.bounding_box()
+        t.check("debug_button_in_corner", box is not None and vp["width"] - (box["x"] + box["width"]) <= 24 and vp["height"] - (box["y"] + box["height"]) <= 24, str(box))
+        n0 = len(t.debug_calls)
+        page.wait_for_timeout(6000)
+        t.check("debug_closed_no_reads", len(t.debug_calls) == n0, str(len(t.debug_calls) - n0))
+        btn.click()
+        page.wait_for_function("() => document.querySelector('.r3x .r3x-dbg-log').textContent.length > 0 || document.querySelector('.r3x #r3x-dbg .r3x-dbg-list li')", timeout=20000)
+        page.wait_for_timeout(800)
+        t.check("debug_opens", page.locator(".r3x #r3x-dbg").is_visible() and btn.get_attribute("aria-expanded") == "true")
+        t.check("debug_real_read", len(t.debug_calls) > n0)
+        diag_text = q("#r3x-dbg").inner_text()
+        t.check("debug_shows_state", "看门狗" in diag_text and "日志" in diag_text and "Wi-Fi 上网 STA" in diag_text, diag_text[:200])
+        page.screenshot(path=str(t.out / "debug-real-1440.png"))
+        rect = page.evaluate("() => { const r = document.querySelector('.r3x #r3x-dbg').getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom, innerWidth, innerHeight]; }")
+        t.check("debug_panel_inside_viewport", rect[0] >= 0 and rect[1] >= 0 and rect[2] <= rect[4] and rect[3] <= rect[5], str(rect))
+        t.debug_fixture = {
+            "generated": 0,
+            "problems": [{"level": "error", "text": "/tmp 的权限是 0700，无线服务进不去"}, {"level": "warn", "text": "Wi-Fi 上网还没连上「<b>x</b>」"}],
+            "diag": {"radios": [{"name": "radio0", "band": "2g", "channel": "6", "up": True, "pending": False, "ap": "phy0-ap0", "ap_exists": False, "hostapd": ""}],
+                     "sta": {"ifname": "phy0-sta0", "exists": True, "wpa_state": "SCANNING", "frequency": 2437, "signal": None},
+                     "wwan": {"autostart": False, "up": False, "pending": True, "ip": "", "errors": []},
+                     "watchdog": {"running": True, "pid": 123}, "dirs": [{"dir": "/tmp", "mode": "0700"}],
+                     "log": {"path": "/mnt/mmcblk0p6/r3mini-hotspot/hotspot.log", "persistent": True, "size": 2048}, "job": None},
+            "module_log": ["2026-11-25T19:00:00.000+08:00 INFO job-1 job.start <img src=x onerror=__xss2=1>"],
+            "syslog": ["Wed Nov 25 19:00:00 2026 daemon.notice hostapd: phy0-ap0: AP-DISABLED"],
+        }
+        q(".r3x-dbg-tools .cbi-button").first.click()
+        page.wait_for_timeout(1200)
+        dbg = q("#r3x-dbg").inner_text()
+        t.check("debug_problems_rendered", "0700" in dbg and q(".r3x-dbg-list li.lv-error").count() >= 1, dbg[:200])
+        t.check("debug_diag_flags", "网卡不存在" in dbg and "被手动关闭" in dbg and "SCANNING" in dbg, dbg[:300])
+        t.check("debug_log_as_text", page.evaluate("window.__xss2 === undefined") and "<img src=x" in q(".r3x-dbg-log").first.text_content())
+        q(".r3x-dbg-tools .cbi-button").nth(1).click()
+        page.wait_for_timeout(300)
+        t.check("debug_copy_feedback", q("#r3x-dbg .r3x-msg").inner_text() != "", q("#r3x-dbg .r3x-msg").inner_text())
+        n0 = len(t.debug_calls)
+        page.wait_for_timeout(10800)
+        t.check("debug_open_polls_10s", 1 <= len(t.debug_calls) - n0 <= 2, str(len(t.debug_calls) - n0))
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_selector(".r3x .r3x-exit", timeout=30000)
+        page.wait_for_timeout(1500)
+        t.check("debug_open_state_remembered", page.locator(".r3x #r3x-dbg").is_visible())
+        t.check("debug_remembered_panel_loads", q(".r3x-dbg-list li").count() >= 2, str(q(".r3x-dbg-list li").count()))
+        page.set_viewport_size({"width": 390, "height": 800})
+        page.wait_for_timeout(400)
+        rect = page.evaluate("() => { const r = document.querySelector('.r3x #r3x-dbg').getBoundingClientRect(); return [r.left, r.right, innerWidth, document.documentElement.scrollWidth > document.documentElement.clientWidth]; }")
+        t.check("debug_panel_fits_mobile", rect[0] >= 0 and rect[1] <= rect[2] and not rect[3], str(rect))
+        page.screenshot(path=str(t.out / "debug-390.png"))
+        page.set_viewport_size({"width": 1440, "height": 1000})
+        q(".r3x-dbg-tools .cbi-button").nth(2).click()
+        page.wait_for_timeout(300)
+        t.check("debug_closes", not page.locator(".r3x #r3x-dbg").is_visible() and btn.get_attribute("aria-expanded") == "false")
+        t.debug_fixture = None
+        t.fixture = None
+        page.wait_for_timeout(5600)
 
         # 布局
         for w in (1920, 1440, 1024, 768, 600, 390, 320):

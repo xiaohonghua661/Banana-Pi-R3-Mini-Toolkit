@@ -10,6 +10,8 @@ var HELPER = '/usr/sbin/r3mini-hotspot-web';
 var SLOW_MS = 5000;   // 平时每 5 秒读一次状态
 var FAST_MS = 1000;   // 切换出口、保存 Wi-Fi 期间每秒读一次
 var BURST_MS = 8000;  // 切换出口后保持快读的时长
+var DEBUG_MS = 10000; // 调试面板打开时每 10 秒读一次
+var DEBUG_KEY = 'r3x-debug-open';
 var CHANNELS_5G = [36, 40, 44, 48, 149, 153, 157, 161];
 var KINDS = ['wan', 'cellular', 'hotspot'];
 var NAMES = { auto: '自动', wan: '有线 WAN', cellular: '5G 蜂窝', hotspot: 'Wi-Fi 上网' };
@@ -83,6 +85,21 @@ var CSS = [
 	'.r3x .r3x-alert{display:grid;gap:6px;margin:0 0 12px}',
 	'.r3x .r3x-alert p{margin:0;padding:8px 12px;border-left:4px solid #c62828;background:rgba(198,40,40,.08)}',
 	'.r3x .r3x-alert p.paused{border-left-color:#ed6c02;background:rgba(237,108,2,.08)}',
+	// 调试：右下角开关 + 浮层
+	'.r3x .r3x-dbg-btn{position:fixed;right:16px;bottom:16px;z-index:1001;min-height:32px;margin:0;padding:0 14px;border-radius:999px;box-shadow:0 2px 8px rgba(0,0,0,.2);opacity:.8}',
+	'.r3x .r3x-dbg-btn[aria-expanded="true"],.r3x .r3x-dbg-btn:hover{opacity:1}',
+	'.r3x .r3x-dbg{position:fixed;right:16px;bottom:60px;z-index:1000;display:grid;gap:10px;width:min(720px,calc(100vw - 32px));max-height:min(78vh,800px);overflow:auto;padding:12px 14px;border:1px solid rgba(128,128,128,.35);border-radius:10px;background:#fff;color:#222;box-shadow:0 10px 30px rgba(0,0,0,.25)}',
+	'.r3x .r3x-dbg-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}',
+	'.r3x .r3x-dbg-tools{display:flex;gap:6px;margin-left:auto}',
+	'.r3x .r3x-dbg-tools .cbi-button{margin:0;min-height:30px;padding:0 10px}',
+	'.r3x .r3x-dbg-sec{display:grid;gap:4px}',
+	'.r3x .r3x-dbg-sec>summary{cursor:pointer;font-weight:600}',
+	'.r3x .r3x-dbg-list{margin:0;padding:0 0 0 18px}',
+	'.r3x .r3x-dbg-list li{overflow-wrap:anywhere}',
+	'.r3x .r3x-dbg-list li.lv-error{color:#c62828}',
+	'.r3x .r3x-dbg-list li.lv-warn{color:#b45309}',
+	'.r3x .r3x-dbg-list li.lv-ok{color:#2e7d32}',
+	'.r3x .r3x-dbg-log{max-height:280px;overflow:auto;margin:4px 0 0;padding:8px;border-radius:6px;background:rgba(128,128,128,.1);font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}',
 	'@container r3x (min-width:900px){',
 	'.r3x .r3x-wifi{grid-template-columns:minmax(340px,520px) minmax(0,1fr);grid-template-rows:auto 1fr;grid-template-areas:"top scan" "bottom scan";column-gap:28px}',
 	'}',
@@ -99,6 +116,10 @@ var CSS = [
 	'.r3x .r3x-age.err,.r3x .r3x-msg.err,.r3x .r3x-job.err{color:#ef9a9a}',
 	'.r3x .r3x-exit.active{border-color:#81c784;box-shadow:inset 3px 0 0 #81c784}',
 	'.r3x .r3x-prefer .cbi-button[aria-pressed="true"]{outline-color:#81c784}',
+	'.r3x .r3x-dbg{background:#1f1f1f;color:#ddd}',
+	'.r3x .r3x-dbg-list li.lv-error{color:#ef9a9a}',
+	'.r3x .r3x-dbg-list li.lv-warn{color:#ffb74d}',
+	'.r3x .r3x-dbg-list li.lv-ok{color:#81c784}',
 	'}'
 ].join('\n');
 
@@ -331,17 +352,148 @@ return view.extend({
 					])
 				])
 			]),
-			n.foot
+			n.foot,
+			this.buildDebug()
 		]);
 
 		this.fillRadios(st);
 		this.resetForm(true);
 		this.update(st);
 
-		this.onVisible = function() { if (!document.hidden) self.refresh(); };
+		this.onVisible = function() {
+			if (document.hidden) return;
+			self.refresh();
+			if (!self.nodes.dbg.hidden) self.loadDebug();
+		};
 		document.addEventListener('visibilitychange', this.onVisible);
 		this.schedule();
+		// 上次开着调试面板就接着开；要等页面挂进文档后再读，此刻 root 还不在文档里。
+		try {
+			if (window.localStorage.getItem(DEBUG_KEY) === '1')
+				window.setTimeout(function() { self.toggleDebug(true); }, 0);
+		} catch (e) {}
 		return this.root;
+	},
+
+	// ---------- 调试面板（右下角开关） ----------
+
+	buildDebug: function() {
+		var self = this, n = this.nodes;
+		n.dbgBtn = E('button', { 'class': 'cbi-button cbi-button-neutral r3x-dbg-btn', 'aria-expanded': 'false', 'aria-controls': 'r3x-dbg',
+			'title': '查看发现的问题、当前状态和日志', 'click': function() { self.toggleDebug(); } }, '调试');
+		n.dbgAge = E('span', { 'class': 'r3x-age' }, '');
+		n.dbgProblems = E('ul', { 'class': 'r3x-dbg-list' });
+		n.dbgDiag = E('ul', { 'class': 'r3x-dbg-list' });
+		n.dbgModSum = E('span', {}, '本模块日志');
+		n.dbgMod = E('pre', { 'class': 'r3x-dbg-log' });
+		n.dbgSysSum = E('span', {}, '系统无线日志');
+		n.dbgSys = E('pre', { 'class': 'r3x-dbg-log' });
+		n.dbgMsg = E('div', { 'class': 'r3x-msg' }, '');
+		n.dbg = E('div', { 'class': 'r3x-dbg', 'id': 'r3x-dbg', 'role': 'dialog', 'aria-label': '调试', 'hidden': '' }, [
+			E('div', { 'class': 'r3x-dbg-head' }, [
+				E('strong', {}, '调试'), n.dbgAge,
+				E('span', { 'class': 'r3x-dbg-tools' }, [
+					E('button', { 'class': 'cbi-button cbi-button-neutral', 'click': function() { self.loadDebug(true); } }, '刷新'),
+					E('button', { 'class': 'cbi-button cbi-button-neutral', 'click': function() { self.copyDebug(); } }, '复制'),
+					E('button', { 'class': 'cbi-button cbi-button-neutral', 'aria-label': '关闭调试面板', 'click': function() { self.toggleDebug(false); } }, '关闭')
+				])
+			]),
+			E('div', { 'class': 'r3x-dbg-sec' }, [E('strong', {}, '发现的问题'), n.dbgProblems]),
+			E('div', { 'class': 'r3x-dbg-sec' }, [E('strong', {}, '当前状态'), n.dbgDiag]),
+			E('details', { 'class': 'r3x-dbg-sec', 'open': '' }, [E('summary', {}, [n.dbgModSum]), n.dbgMod]),
+			E('details', { 'class': 'r3x-dbg-sec' }, [E('summary', {}, [n.dbgSysSum]), n.dbgSys]),
+			n.dbgMsg
+		]);
+		return E('div', {}, [n.dbgBtn, n.dbg]);
+	},
+
+	toggleDebug: function(open) {
+		var n = this.nodes;
+		if (open == null) open = n.dbg.hidden;
+		n.dbg.hidden = !open;
+		n.dbgBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+		try { window.localStorage.setItem(DEBUG_KEY, open ? '1' : '0'); } catch (e) {}
+		clearTimeout(this.dbgTimer);
+		if (open) this.loadDebug(true);
+	},
+
+	// 只在面板打开、标签页在前台时读；每 10 秒一次（读一次约 0.5 秒，比平时的状态重）。
+	loadDebug: function(now) {
+		var self = this, n = this.nodes;
+		clearTimeout(this.dbgTimer);
+		if (n.dbg.hidden || !this.root.isConnected) return;
+		var again = function() { self.dbgTimer = setTimeout(function() { self.loadDebug(); }, DEBUG_MS); };
+		if (document.hidden && !now) return again();
+		if (this.dbgInflight) return;
+		this.dbgInflight = true;
+		this.run(['debug']).then(function(d) {
+			self.debugData = d;
+			self.renderDebug(d);
+			self.message(n.dbgMsg, '');
+		}).catch(function(err) {
+			self.message(n.dbgMsg, '读不到调试信息：' + err.message, 'err');
+		}).then(function() {
+			self.dbgInflight = false;
+			again();
+		});
+	},
+
+	debugLines: function(d) {
+		var g = d.diag || {}, lines = [];
+		(g.radios || []).forEach(function(r) {
+			lines.push(bandName(r.band) + '（' + r.name + '）：' + (r.up ? '已启动' : '未启动') + (r.pending ? '，重配中' : '') + '，信道 ' + r.channel
+				+ '，本机 AP ' + (r.ap || '无') + ' ' + (r.ap ? (r.ap_exists ? (r.hostapd || '状态未知') : '网卡不存在') : ''));
+		});
+		var s = g.sta || {};
+		lines.push('Wi-Fi 上网 STA：' + (s.ifname ? s.ifname + (s.exists ? '' : '（网卡不存在）') + '，' + (s.wpa_state || '状态未知')
+			+ (s.frequency ? '，' + s.frequency + ' MHz' : '') + (s.signal != null ? '，' + s.signal + ' dBm' : '') : '没有启动'));
+		var w = g.wwan || {};
+		lines.push('wwan：' + (w.up ? '已连上' : '未连上') + (w.ip ? '，' + w.ip : '') + (w.pending ? '，连接中' : '')
+			+ (w.autostart === false ? '，被手动关闭' : '') + (w.errors && w.errors.length ? '，错误 ' + JSON.stringify(w.errors) : ''));
+		var dog = g.watchdog || {};
+		lines.push('看门狗：' + (dog.running ? '运行中（PID ' + dog.pid + '）' : '没有运行'));
+		lines.push('目录权限：' + (g.dirs || []).map(function(x) { return x.dir + ' ' + x.mode; }).join('，'));
+		var log = g.log || {};
+		lines.push('日志：' + (log.path || '?') + '（' + (log.persistent ? '在数据分区，重启不丢' : '在内存里，重启会丢') + '，'
+			+ Math.round((log.size || 0) / 1024) + ' KB）');
+		if (g.job) lines.push('最近任务：' + g.job.action + ' ' + g.job.state + '：' + (g.job.message || ''));
+		return lines;
+	},
+
+	renderDebug: function(d) {
+		var n = this.nodes;
+		var fill = function(list, items, cls) {
+			while (list.firstChild) list.removeChild(list.firstChild);
+			items.forEach(function(it) { list.appendChild(E('li', { 'class': cls ? cls(it) : '' }, [T(it.text != null ? it.text : it)])); });
+		};
+		var problems = d.problems || [];
+		fill(n.dbgProblems, problems.length ? problems : [{ level: 'ok', text: '没发现问题' }], function(it) { return 'lv-' + (it.level || 'info'); });
+		fill(n.dbgDiag, this.debugLines(d));
+		var keep = function(pre, lines) {
+			var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+			pre.textContent = lines.length ? lines.join('\n') : '（还没有日志）';
+			if (atBottom) pre.scrollTop = pre.scrollHeight;
+		};
+		keep(n.dbgMod, d.module_log || []);
+		keep(n.dbgSys, d.syslog || []);
+		n.dbgModSum.textContent = '本模块日志（最近 ' + (d.module_log || []).length + ' 行）';
+		n.dbgSysSum.textContent = '系统无线日志（最近 ' + (d.syslog || []).length + ' 行）';
+		n.dbgAge.textContent = '更新于 ' + clockText(new Date());
+	},
+
+	copyDebug: function() {
+		var d = this.debugData, n = this.nodes;
+		if (!d) return this.message(n.dbgMsg, '还没读到调试信息。', 'err');
+		var text = ['== 发现的问题 =='].concat((d.problems || []).map(function(p) { return '[' + p.level + '] ' + p.text; }),
+			['', '== 当前状态 =='], this.debugLines(d), ['', '== 本模块日志 =='], d.module_log || [], ['', '== 系统无线日志 =='], d.syslog || []).join('\n');
+		var ta = E('textarea', { 'style': 'position:fixed;left:-9999px;top:0', 'readonly': '' });
+		ta.value = text;
+		document.body.appendChild(ta);
+		ta.select();
+		var ok = false;
+		try { ok = document.execCommand('copy'); } catch (e) {}
+		document.body.removeChild(ta);
+		this.message(n.dbgMsg, ok ? '已复制到剪贴板，可以直接粘贴给别人看。' : '浏览器不让复制，请手动选中日志复制。', ok ? 'ok' : 'err');
 	},
 
 	// ---------- 刷新 ----------
@@ -441,7 +593,8 @@ return view.extend({
 		if (!job) { n.job.hidden = true; return; }
 		n.job.hidden = false;
 		n.job.className = 'r3x-job' + (job.state === 'failed' ? ' err' : job.state === 'done' ? ' ok' : '');
-		n.job.textContent = (job.state === 'running' ? '进行中：' : job.state === 'failed' ? '失败：' : '完成：') + (job.message || '');
+		var secs = Math.max(0, ((this.st && this.st.now) || 0) - (job.started || 0));
+		n.job.textContent = (job.state === 'running' ? '进行中（' + secs + ' 秒）：' : job.state === 'failed' ? '失败：' : '完成：') + (job.message || '');
 		if (job.state === 'running') {
 			this.followJob = job.id;
 		} else if (job.id === this.followJob) {

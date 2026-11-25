@@ -9,7 +9,7 @@
 
 host 默认 192.168.0.242。依赖 paramiko。
 
-输出：部署成功打印 BACKUP=…、DEPLOY_SHA256_OK=7/7、PRESERVED_CONFIG_OK=1；回滚成功打印 ROLLBACK_OK=<目录>。
+输出：部署成功打印 BACKUP=…、DEPLOY_SHA256_OK=8/8、PRESERVED_CONFIG_OK=1；回滚成功打印 ROLLBACK_OK=<目录>。
 失败时以非零退出并打印 error_kind：
     PINNED_HOST_KEY_MISSING        ~/.ssh/known_hosts 里没有该主机
     SSH_KEY_MISSING                --key 指的文件不存在
@@ -40,6 +40,7 @@ FILES = (
     "usr/sbin/r3mini-hotspot-web",
     "usr/sbin/r3mini-hotspot-watchdog",
     "usr/share/r3mini-hotspot/status.uc",
+    "usr/share/r3mini-hotspot/log.uc",
     "etc/init.d/r3mini-hotspot",
     "etc/config/r3mini_hotspot",
     "usr/share/luci/menu.d/luci-app-r3mini-hotspot.json",

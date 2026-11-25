@@ -63,21 +63,24 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
 `/etc/init.d/r3mini-hotspot` 常驻 `/usr/sbin/r3mini-hotspot-watchdog`，只在 Wi-Fi 上网启用时工作。它有两种状态：
 
 - **连接中**（STA 开着）：
-  - 每 `check_interval` 秒（默认 20）检查一次，连续 `failure_limit` 次（默认 3）没连上就 `ifup wwan`，算一轮。
-  - 连续 2 轮（约 2 分钟）还没连上，就**停靠**：把 `wireless.r3mini_phone_sta.disabled` 设成 1（`r3mini_hotspot.main.enabled` 仍是 1），`ifdown wwan`，重配这个频段，本机 AP 随之恢复。
+  - 每 `check_interval` 秒（默认 20）检查一次，连续 `failure_limit` 次（默认 3）没连上算一轮。每轮记下 STA 卡在哪一步（见「日志与调试面板」）。
+  - 重连交给 wpa_supplicant 自己做，看门狗不重配射频。旧版每轮都 `ifup wwan`，而 `ifup` 会让这个频段重配一次，本机 AP 跟着闪断。现在只有 wwan 被手动关闭（`autostart=false`）时才 `ifup`。
+  - 连续 2 轮（约 2 分钟）还没连上，就**停靠**：把 `wireless.r3mini_phone_sta.disabled` 设成 1（`r3mini_hotspot.main.enabled` 仍是 1），重载一次网络配置，本机 AP 随之恢复。不执行 `ifdown wwan`。
 - **停靠中**（`enabled=1` 而 STA `disabled=1`；页面显示「等对方出现」）：
-  - 每隔一段时间用本机 AP 做一次 `iwinfo scan`（不停 AP）。搜到对方，就把本机这个频段改到对方信道、打开 STA、重配并 `ifup wwan`。
+  - 每隔一段时间用本机 AP 做一次 `iwinfo scan`（不停 AP）。搜到对方，就把本机这个频段改到对方信道、打开 STA，再重载一次网络配置。
   - 间隔从 60 秒起。打开后 10 分钟内又停靠（搜得到却连不上，多半是密码或信号问题），间隔翻倍，最长 1800 秒；连上后恢复 60 秒。
 - 连上之后对方换信道，由 wpa_supplicant 的信道切换（CSA）带着本机 AP 一起换，看门狗不管。
 - 页面的保存任务在跑时，看门狗不动手。它和页面共用写锁 `/var/lock/r3mini-hotspot-write`。
-- 每次重配前都会检查 `/tmp` 权限，重配后都会核对本机 AP 是否起来；没起来就再重配一次。见「本机 Wi-Fi 起不来」一节。
+- 每次重配前都会检查 `/tmp` 权限，重配后都会核对本机 AP 是否起来；没起来就把这个频段关了再开（`ubus call network.wireless down/up`）。见「本机 Wi-Fi 起不来」一节。
+- 每小时清理一次超过保留期的旧日志。
 
 ## 受管文件与设置
 
 | 文件 | 作用 |
 |---|---|
-| `/usr/sbin/r3mini-hotspot-web` | 后端：`status`、`scan <radio>`、`save <radio> <ssid> <密码文件\|->`、`disable`、`prefer <auto\|wan\|cellular\|hotspot>`、`cellular <on\|off>` |
-| `/usr/share/r3mini-hotspot/status.uc` | `status` 的实现。一个 ucode 进程读完 uci、ubus 和 `/proc/net/route`，不调外部命令；设备上实测 34–59 ms |
+| `/usr/sbin/r3mini-hotspot-web` | 后端：`status`、`debug`、`scan <radio>`、`save <radio> <ssid> <密码文件\|->`、`disable`、`prefer <auto\|wan\|cellular\|hotspot>`、`cellular <on\|off>` |
+| `/usr/share/r3mini-hotspot/status.uc` | `status` 与 `debug` 的实现。`status` 一个 ucode 进程读完 uci、ubus 和 `/proc/net/route`，不调外部命令，设备上实测 34–59 ms；`debug` 另读日志，约 0.5 秒 |
+| `/usr/share/r3mini-hotspot/log.uc` | 日志的唯一写入口：时间戳、轮转、清理都在这里 |
 | `/usr/sbin/r3mini-hotspot-watchdog` | 自动重连 |
 | `/etc/init.d/r3mini-hotspot` | 启动看门狗；启动时删掉残留的密码临时文件 |
 | `/usr/share/luci/menu.d/luci-app-r3mini-hotspot.json` | 菜单「网络 → 上网出口」 |
@@ -103,12 +106,40 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
 - **后台执行**：`save` / `disable` 立即返回，真正的工作在 `setsid` 起的独立进程里跑，进度写在 `/tmp/r3mini-hotspot-job.json`。这样不受 rpcd 30 秒的执行上限限制。rpcd 用 `-t 30` 启动，超时直接 SIGKILL，清理代码不会执行；这一点 2026-11-25 已在设备上实测。
 - **密码不进命令行**：页面把密码写进 `/tmp/r3mini-hotspot-key-<16 位十六进制>`（0600）。后端确认路径对、不是符号链接后把文件挪走，用完即删。
 - **锁可回收**：锁文件里记 PID，持有进程死了，下次自动回收；旧版留下的 `mkdir` 目录锁也会被清掉。
-- **失败还原**：写配置或重配失败时，恢复 network、wireless、firewall、r3mini_hotspot 四份配置，并重配受影响的频段。
+- **只重载一次**：写完配置后执行一次 `ubus call network reload`，netifd 会重配所有配置有变化的频段，然后等这些频段在 `network.wireless status` 里变成 `up=true、pending=false`（最多 30 秒）。旧版对每个频段各执行一次 `wifi reconf`，而每次 `wifi reconf` 都附带一次 `network reload`，同一个频段被重配了两次。11-25 19:22 实测：连上 7 秒后热点和上网又各断了约 5 秒。
+- **不 ifdown**：停用和停靠只把 STA 设成 `disabled`，wwan 自然断开。`ifdown wwan` 会被 netifd 记成手动关闭，之后重配射频 STA 不会启动；遇到这种状态（旧版留下的）时才补 `ifup wwan`。
+- **失败还原**：写配置或重配失败时，恢复 network、wireless、firewall、r3mini_hotspot 四份配置，再重载一次。
 - **防火墙**：只在第一次把 `wwan` 加进 wan 区时重载。
 - **重配前修 `/tmp` 权限、重配后核对本机 AP**：
   - 本机 AP 30 秒内没起来（看 `/sys/class/net/<AP 网卡>` 在不在），保存任务会恢复保存前的设置再等一次。
   - 两次都没起来，任务失败，并在消息里写出手工恢复命令。
   - 停用任务不回滚，只再重配一次。
+
+## 日志与调试面板
+
+日志在 `/mnt/mmcblk0p6/r3mini-hotspot/hotspot.log`（数据分区，重启不丢；目录 0700、文件 0600）。数据分区没挂上时写 `/tmp/r3mini-hotspot-log/hotspot.log`，每行带 `persist=false`，重启会丢。
+
+- **行格式**：`<时间> <级别> <run_id> <事件> <说明> [k=v …]`。
+  - 时间是带毫秒和时区的 ISO8601，例如 `2026-11-25T19:47:17.270+08:00`。
+  - run_id：保存、停用任务是任务号（与页面上任务的 id 相同），看门狗是 `wd-<PID>`，其余命令是 `cmd-<时间>-<PID>`。
+- **级别**：ERROR 表示目标没达成；WARN 表示降级但达成；INFO 是阶段推进；DEBUG 是外部命令的原文、退出码、耗时和输出摘要。
+- **主要事件**：
+  - `job.start` / `job.step` / `job.found` / `job.write` / `job.connect` / `job.end`：保存或停用的全过程。`job.end` 带 `result=done|failed` 和 `reason`。
+  - `reason` 取值：`connected`、`not_connected_auth`（多半密码不对）、`not_connected_absent`（没找到对方或信号弱）、`not_connected_dhcp`（连上了没拿到地址）、`not_found`、`unsupported_channel`、`enterprise`、`wep`、`need_password`、`bad_password_length`、`reload_failed`、`write_failed`、`ap_not_up`、`ap_not_up_hard`、`lock_busy`、`interrupted` 等。
+  - `net.reload`、`radio.settle`、`ap.check`、`radio.kick`、`wwan.ifup`、`tmp.fix`：重配过程。
+  - `wd.start` / `wd.round` / `wd.park` / `wd.probe` / `wd.unpark` / `wd.up`：看门狗。
+  - `prefer.set`、`cellular.set`、`scan.done`、`cmd.fail`：页面上的其他操作。
+- **密码**：一律不进日志，`job.start` 只记 `new_key=yes|no`。
+- **轮转与清理**：单个文件超过 256 KB 就轮转成 `.1`、`.2`、`.3`，最多 4 份约 1 MB；轮转出的文件超过 14 天删除。看门狗每小时清理一次，每次轮转时也会清理。
+- 在设备上直接看：`tail -n 50 /mnt/mmcblk0p6/r3mini-hotspot/hotspot.log`。
+
+**调试面板**：页面右下角的「调试」按钮。打开后显示：
+
+- 发现的问题：`/tmp` 权限、本机 AP 网卡不存在或 hostapd 没在发射、频段重配中或启动失败、STA 没启动或卡在哪一步、wwan 被手动关闭、看门狗没运行、最近任务失败、日志不持久。
+- 当前状态：各频段、STA（wpa_supplicant 状态、频率、信号）、wwan、看门狗 PID、目录权限、日志位置。
+- 本模块最近 120 行日志，以及系统日志里跟无线有关的最近 100 行（已滤掉 `handle_probe_req: send failed` 等刷屏行）。
+
+面板只在打开、并且标签页在前台时读取，每 10 秒一次；关着时不读。打开与否记在浏览器里，下次进页面保持。「复制」把面板全部内容复制成文本，方便发给别人看。
 
 ## 本机 Wi-Fi 起不来（/tmp 权限）
 
@@ -157,17 +188,17 @@ python fan-dashboard/test_hotspot_page.py 192.168.0.242 --key docs/私密/r3mini
    - 用 `python chatgpt-routing/manage.py check-backup <文件>` 核对。
    - 没有现成的整机还原命令。要还原某个文件，得在本机内存里解密，从归档里取出来再传回设备。
 2. **`test_hotspot_backend.py`**：在设备 `/tmp` 沙箱里，用假配置和桩命令跑后端与看门狗，不碰真实配置、无线和路由。
-   - 2026-11-25 结果：`RESULT pass=101 fail=0`。
+   - 2026-11-25 最新结果：`RESULT pass=182 fail=0`。
 3. **`test_hotspot_page.py`**：在设备真实的 LuCI 页面上走查。
    - 加 `--candidate`：把本地页面换进浏览器，状态和搜索由本地后端在设备上只读执行。
    - 保存、停用、切换出口、蜂窝开关、写密码文件，都在浏览器里拦下，不会到达设备。
    - 覆盖：刷新节奏、表单规则、搜索、保存流程、恶意 SSID、320–1440 宽度、暗色、字号不小于 12 px。截图写到 `tmp/hotspot-ui/page-<时间>/`。
-   - 2026-11-25：候选版和部署后都是 51 项，`PAGE_OK`。
+   - 2026-11-25：候选版和部署后最新都是 87 项 `PAGE_OK`，含右下角调试面板。
 4. **`deploy_hotspot.py`**：
    - 先把要覆盖的文件备份到设备 `/root/r3mini-hotspot-backup-<时间>/`，并打印 `BACKUP=<该目录>`。
    - 装完逐个核对 SHA-256，不一致就自动回滚。
    - ACL 有变化时才重启 rpcd；此时已登录的 LuCI 要重新登录。不重启 uhttpd。
-   - 成功时依次打印 `BACKUP=…`、`DEPLOY_SHA256_OK=7/7`、`PRESERVED_CONFIG_OK=1`。
+   - 成功时依次打印 `BACKUP=…`、`DEPLOY_SHA256_OK=8/8`、`PRESERVED_CONFIG_OK=1`。
 
 回滚：用要撤销的那次部署自己打印的 `BACKUP=` 目录，里面存的是那次部署覆盖前的文件。
 
@@ -228,9 +259,24 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 
 已在真机验证：连接 2.4 GHz 手机热点、本机 AP 跟到对方信道。
 
+19:21:49 用户又保存了一次：
+
+- 11 秒连上（19:22:00），`ifup wwan` 修正生效。
+- 但连上 7 秒后（19:22:05），2.4 GHz 又重配了一次，热点和上网各断约 5 秒。原因：后端对两个频段各执行一次 `wifi reconf`，每次都附带 `network reload`。第一次已在重配 radio0，第二次又叠了上去，radio0 迟迟不报启动完成，约 13 秒后被 netifd 超时重来。
+
+19:47 部署了修正：
+
+- 只重载一次、不 ifdown、看门狗不再每轮 ifup；
+- 没连上时按 STA 实际状态说明原因；
+- 写结构化日志并轮转清理；
+- 页面右下角加调试面板；
+- 保存进行中显示已用秒数。
+
+设备端文件备份：`/root/r3mini-hotspot-backup-20261125194717`。
+
 还没在真机验证（会断 Wi-Fi，需要用户在场并同意）：
 
-- 带 `ifup wwan` 修正后再保存一次，看是否立即连上；
+- 用 19:47 的版本再保存一次，确认只断一次；
 - 5 GHz 与 2.4 GHz 互换；
 - 停用后恢复信道；
 - 看门狗停靠和重连；
@@ -309,5 +355,5 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
    uci set wireless.r3mini_phone_sta.disabled=1
    ch="$(uci -q get r3mini_hotspot.main.original_channel_radio1)"; [ -n "$ch" ] && uci set wireless.radio1.channel="$ch"
    uci commit r3mini_hotspot; uci commit wireless
-   ifdown wwan; wifi reconf radio1
+   ubus call network reload
    ```
