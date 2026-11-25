@@ -447,5 +447,52 @@ class Day(Base):
         self.assertEqual(self.r.calls, [])
 
 
+class KeyLogin(unittest.TestCase):
+    def setUp(self):
+        self.env = g.os.environ.pop("R3MINI_SSH_KEY", None)
+
+    def tearDown(self):
+        if self.env is not None:
+            g.os.environ["R3MINI_SSH_KEY"] = self.env
+
+    def test_key_is_stripped_wherever_it_appears(self):
+        rest, key = g.split_key(["night", "--trial", "20", "--key", "k1"])
+        self.assertEqual(rest, ["night", "--trial", "20"])
+        self.assertEqual(key, str(pathlib.Path("k1").resolve()))
+        rest, key = g.split_key(["rollback", "--key=k2", "测试", "原因"])
+        self.assertEqual(rest, ["rollback", "测试", "原因"])
+        self.assertEqual(key, str(pathlib.Path("k2").resolve()))
+
+    def test_no_key_falls_back_to_env_then_password(self):
+        self.assertEqual(g.split_key(["status"]), (["status"], None))
+        g.os.environ["R3MINI_SSH_KEY"] = "~/k3"
+        self.assertEqual(g.split_key(["status"])[1], str(pathlib.Path("~/k3").expanduser().resolve()))
+
+    def test_key_without_path_is_rejected(self):
+        for argv in (["status", "--key"], ["status", "--key", "--trial"]):
+            with self.assertRaises(SystemExit):
+                g.split_key(argv)
+
+    def test_install_passes_key_to_scheduled_tasks(self):
+        class R:
+            key = "C:/keys/it's"
+            def _run(self, command, data=None, timeout=180):
+                if command.startswith("cat /etc/crontabs/root") and not command.endswith("2>/dev/null"):
+                    return 0, "\n".join(lines) + "\n"
+                return 0, ("abcdef0123456789 /usr/sbin/x" if "sha256sum" in command else "")
+        lines = [g.CRON_LINE]
+        seen = []
+        orig_run, orig_dir = g.subprocess.run, g.LOG_DIR
+        g.LOG_DIR = pathlib.Path(tempfile.mkdtemp())
+        g.subprocess.run = lambda args, **kw: seen.append(args[-1]) or type("P", (), {"stdout": "Ready", "stderr": ""})()
+        try:
+            g.install(R())
+        finally:
+            g.subprocess.run, g.LOG_DIR = orig_run, orig_dir
+        self.assertEqual(len(seen), len(g.TASKS))
+        for ps in seen:
+            self.assertIn("""--key "C:/keys/it''s\"""", ps)  # PowerShell 单引号字符串里 ' 写成 ''
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

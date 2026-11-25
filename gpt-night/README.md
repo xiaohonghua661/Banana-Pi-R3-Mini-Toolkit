@@ -4,7 +4,10 @@
 
 改路由只用 `r3mini-chatgpt` 模块自己的命令（`benchmark` / `save` / `set-enabled`），不直接改 OpenClash 配置。
 
-电脑端需要 Python 3.10+ 与 `paramiko`。SSH 复用 `chatgpt-routing/manage.py` 的连接方式：要求 `~/.ssh/known_hosts` 已固定设备密钥，口令在连接时从本机 `docs/私密/商家交付信息.md` 在内存解析，不打印。
+电脑端需要 Python 3.10+ 与 `paramiko`。SSH 复用 `chatgpt-routing/manage.py` 的连接方式，要求 `~/.ssh/known_hosts` 已固定设备密钥。登录方式二选一：
+
+- 密钥：各命令加 `--key <私钥路径>`，或设环境变量 `R3MINI_SSH_KEY`。只用这把私钥登录 root，不读私密文档。`install` 时用了密钥（给了 `--key`，或设了 `R3MINI_SSH_KEY`），两个计划任务的启动参数里也会带上它（写成绝对路径）。
+- 口令：不给密钥时，连接时从本机 `docs/私密/商家交付信息.md` 在内存解析口令，不打印。
 
 ## 时间表
 
@@ -38,6 +41,7 @@ python gpt-night/gpt_night.py rollback 原因      # 夜间模式下立刻回退
 python gpt-night/gpt_night.py day               # 立刻恢复切换前的规则
 python gpt-night/gpt_night.py night --trial 20  # 忽略时段试运行 20 分钟（之后运行 day）
 python gpt-night/gpt_night.py install           # 安装或更新：路由器兜底脚本、cron、两个计划任务
+python gpt-night/gpt_night.py install --key ~/.ssh/r3mini_ed25519   # 同上，计划任务也用这把密钥登录
 python gpt-night/gpt_night.py uninstall         # 先恢复规则，再删除上述三项
 ```
 
