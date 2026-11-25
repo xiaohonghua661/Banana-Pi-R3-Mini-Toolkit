@@ -311,18 +311,34 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 
 退回旧版（`5279ed3` 的「手机热点 WAN」）：
 
-```powershell
-python fan-dashboard/deploy_hotspot.py 192.168.0.246 --key ~/.ssh/mingdaren_246_ed25519 --rollback /root/r3mini-hotspot-backup-20261125221944
-```
+- 先问清用户新版哪里有问题。旧版连不上手机热点（见本节开头），退回后这个故障会回来。
+- 在 PowerShell 里执行（`~` 在 PowerShell 里不会展开，所以写 `$HOME`；在 Git Bash 里可以写 `~`）：
 
-回滚会换回 6 个旧文件、删掉 `status.uc` 和 `log.uc`，最后重启看门狗；开机链接不会撤。要回到部署前「看门狗不自启、不运行」的状态，回滚成功后在设备上再执行 `/etc/init.d/r3mini-hotspot disable && /etc/init.d/r3mini-hotspot stop`。
+  ```powershell
+  python fan-dashboard/deploy_hotspot.py 192.168.0.246 --key "$HOME/.ssh/mingdaren_246_ed25519" --rollback /root/r3mini-hotspot-backup-20261125221944
+  ```
+
+- 回滚会换回 6 个旧文件、删掉 `status.uc` 和 `log.uc`，最后重启看门狗；开机链接不会撤。要回到部署前「看门狗不自启、不运行」的状态，回滚成功后在设备上再执行 `/etc/init.d/r3mini-hotspot disable && /etc/init.d/r3mini-hotspot stop`。
+- 核对：
+  - `ls /usr/share/r3mini-hotspot` 应报不存在。
+  - `ls /etc/rc.d | grep hotspot` 应为空。
+  - `/etc/init.d/r3mini-hotspot status` 应为 `inactive`。
 
 启用 Wi-Fi 上网之前：
 
 - 在 `.246` 上执行 `ping -c 2 -W 2 192.168.0.242`，再看 `ip neigh show 192.168.0.242`。两样都没有回应、也没有 `REACHABLE`/`STALE` 记录，才算 `.242` 不在这个 LAN。
-- `.242` 在同一个 LAN 时不要启用，先问用户。
+- 再在页面上点「搜索附近 Wi-Fi」，确认列表里没有 `.242` 的 `immortalwrt-2.4`、`immortalwrt-5.0`。只证明不在同一个 LAN 不够：两台在射频范围内、又连同一部手机，照样会被拉到同一信道。
+- 上面任一项不满足就不要启用，先问用户。
+- `.246` 的「优先使用」是有线 WAN（`r3mini_hotspot.main.preferred_egress=wan`）。网线在线时，Wi-Fi 上网只是备用；要让流量走手机热点，还得在页面上把「优先使用」改成 Wi-Fi 上网或自动后拔掉网线。
+- 用户在页面上自己启用不受下面这条限制。agent 代为启用时，会写 `wireless`、`network`、`firewall`、`r3mini_hotspot`，要按 `docs/必读/当前设备运行基线.md` 的「禁止并发写入的范围」：先取得用户明确要求，再做一份新的整机备份。22:17 那份是部署前做的，不能算这次的改前备份。
 - 页面测试 `test_hotspot_page.py` 在 `.242` 上对同一版跑过（见上节「部署、测试、回滚」第 3 步）；`.246` 上没跑，因为这台电脑没装 `playwright`。它只检查页面，不是启用的前置条件。
 - Wi-Fi 上网没在 `.246` 上启用过。上一节「还没在真机验证」的各项，对 `.246` 同样都没有验证。
+
+「日志与调试面板」「失败处置」两节按 `.242` 写。用在 `.246` 上时：
+
+- host 换成 `192.168.0.246`，私钥换成 `~/.ssh/mingdaren_246_ed25519`。
+- `.246` 没有 `mmcblk0p6`，日志在 `/tmp/r3mini-hotspot-log/hotspot.log`（每行带 `persist=false`），重启就丢。
+- `.246` 的防火墙 wan 区早就包含 `wwan`，第一次启用时不会再重载防火墙。
 
 整机备份可以用 `python chatgpt-routing/manage.py check-backup <文件>` 复核条数和抽样还原：它只在本机内存里解密，不连路由器。
 
