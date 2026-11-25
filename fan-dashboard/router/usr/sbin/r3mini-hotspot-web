@@ -2,6 +2,7 @@
 # 上网出口与 Wi-Fi 上网（手机热点 / 任意 Wi-Fi）后端，供 LuCI「网络 → 上网出口」页面调用。
 #
 #   status                       一次读全部出口、Wi-Fi 上网和后台任务的状态（JSON）
+#   debug                        调试面板：发现的问题、诊断数据、本模块日志和系统无线日志（JSON）
 #   scan <radio>                 用该频段的本机 AP 搜索附近 Wi-Fi，不停 AP（iwinfo 原始 JSON）
 #   save <radio> <ssid> <密码文件|->
 #                                后台连接所选 Wi-Fi；立即返回，进度看 status.job
@@ -10,8 +11,13 @@
 #                                选择默认出口（同步，约 1 秒）
 #   cellular <on|off>            恢复 / 暂停蜂窝自动拨号
 #
+# 日志：每个动作写进 /mnt/mmcblk0p6/r3mini-hotspot/hotspot.log（数据分区没挂上时写 /tmp），格式与轮转见 log.uc。
+# 密码一律不进日志。
+#
 # 测试钩子（只在沙箱测试里设置）：R3HS_CONF_DIR、R3HS_STATE_DIR、R3HS_LOCK_DIR、R3HS_INITD、R3HS_PATH、
-# R3HS_STATUS_UC、R3HS_CONNECT_WAIT（等连接的秒数）、R3HS_TTYS（查 SIM 卡用的 AT 口，空则不查）。
+# R3HS_STATUS_UC、R3HS_LOG_UC、R3HS_CONNECT_WAIT（等连接的秒数）、R3HS_TTYS（查 SIM 卡用的 AT 口，空则不查）、
+# R3HS_DAEMON_DIRS（要保证 network 用户能进的目录:权限）、R3HS_SYSNET（网卡目录）、R3HS_AP_WAIT（等本机 AP 的秒数）、
+# R3HS_RADIO_WAIT（等频段重配完的秒数）、R3HS_RUN_ID。
 
 PATH="${R3HS_PATH:+$R3HS_PATH:}/usr/sbin:/usr/bin:/sbin:/bin"
 CONF_DIR="${R3HS_CONF_DIR:-/etc/config}"
@@ -23,12 +29,18 @@ SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 CONFIG='r3mini_hotspot.main'
 STA='r3mini_phone_sta'
 STATUS_UC="${R3HS_STATUS_UC:-/usr/share/r3mini-hotspot/status.uc}"
+LOG_UC="${R3HS_LOG_UC:-/usr/share/r3mini-hotspot/log.uc}"
 JOB_FILE="$STATE_DIR/r3mini-hotspot-job.json"
 JOB_KEY="$STATE_DIR/r3mini-hotspot-job.key"
 JOB_LOCK="$LOCK_DIR/r3mini-hotspot-job"
 WRITE_LOCK="$LOCK_DIR/r3mini-hotspot-write"
 KEY_PATTERN='^/tmp/r3mini-hotspot-key-[0-9a-f]{16}$'
+# hostapd、wpa_supplicant 以 network 用户运行，每次重配都要读 /var/run（即 /tmp/run）下新生成的配置。
+# /tmp 一旦被改成 0700，它们读不到配置，就把本机 AP 删掉且起不来（2026-11-22、11-25 两次实测）。
+DAEMON_DIRS="${R3HS_DAEMON_DIRS-/tmp:1777 /tmp/run:755}"
+SYSNET="${R3HS_SYSNET:-/sys/class/net}"
 CHANNELS_5G=' 36 40 44 48 149 153 157 161 '
+RUN_ID="${R3HS_RUN_ID:-cmd-$(date +%s)-$$}"
 umask 077
 
 uci() {
@@ -39,7 +51,30 @@ uci() {
 	fi
 }
 
+# ---------- 日志 ----------
+
+# hlog <级别> <事件> <说明> [k=v ...]：交给 log.uc 写一行；日志写不进去不影响主流程。
+hlog() { ucode "$LOG_UC" write "$RUN_ID" "$@" >/dev/null 2>&1; return 0; }
+
+uptime_ms() { awk '{ printf "%d", $1 * 1000 }' /proc/uptime; }
+
+# run_logged <事件> <命令...>：执行并记录 cmd、exit、elapsed_ms 和输出（成功 DEBUG 摘要，失败 WARN 全文），
+# 返回命令自己的退出码。命令的输出不往外传。
+run_logged() {
+	local event="$1" start out rc
+	shift
+	start="$(uptime_ms)"
+	out="$("$@" 2>&1)"; rc=$?
+	if [ "$rc" -eq 0 ]; then
+		hlog DEBUG "$event" '命令完成' "cmd=$*" exit=0 "elapsed_ms=$(( $(uptime_ms) - start ))" "out=$(printf '%s' "$out" | head -c 300)"
+	else
+		hlog WARN "$event" '命令失败' "cmd=$*" "exit=$rc" "elapsed_ms=$(( $(uptime_ms) - start ))" "out=$out"
+	fi
+	return "$rc"
+}
+
 fail() {
+	hlog ERROR cmd.fail "$1" "cmd=${CMD:-?}"
 	printf '%s\n' "$1" >&2
 	exit 1
 }
@@ -75,6 +110,7 @@ take_lock() {
 	owner="$(cat "$path" 2>/dev/null)"
 	if is_uint "$owner" && kill -0 "$owner" 2>/dev/null; then return 1; fi
 	rm -f "$path" 2>/dev/null || return 1
+	hlog WARN lock.recover '回收持有者已退出的锁' "lock=$path" "owner=$owner"
 	claim_lock "$path"
 }
 
@@ -140,6 +176,16 @@ radio_ap_ifname() {
 	ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$1.interfaces[@.section=\"$section\"].ifname" 2>/dev/null
 }
 
+radio_band() { uci -q get "wireless.$1.band"; }
+
+band_label() { [ "$1" = 2g ] && printf '2.4 GHz' || printf '5 GHz'; }
+
+radios_label() {
+	local radio out=''
+	for radio in $1; do out="${out:+$out、}$(band_label "$(radio_band "$radio")")"; done
+	printf '%s' "$out"
+}
+
 wifi_link_ok() {
 	[ -n "$1" ] && iw dev "$1" link 2>/dev/null | grep -q '^Connected to '
 }
@@ -154,27 +200,143 @@ wwan_ready() {
 	[ -n "$WWAN_IP" ] && wifi_link_ok "$dev"
 }
 
+# netifd 把 wwan 记成手动关闭（ifdown 过）时，只重配射频 STA 不会启动，要 ifup。
+wwan_manual_down() { [ "$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.autostart' 2>/dev/null)" = false ]; }
+
+# 看 STA 现在卡在哪一步，打印「代码 说明」。代码：connected / dhcp / auth / absent / no_sta / unknown。
+sta_diagnose() {
+	local ifname phy state up
+	ifname="$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.*.interfaces[@.section=\"$STA\"].ifname" 2>/dev/null | head -n 1)"
+	if [ -z "$ifname" ] || [ ! -e "$SYSNET/$ifname" ]; then
+		printf 'no_sta STA 没有启动'
+		return 0
+	fi
+	phy="${ifname%%-*}"
+	state="$(ubus call wpa_supplicant phy_status "{\"phy\":\"$phy\"}" 2>/dev/null | jsonfilter -e '@.state' 2>/dev/null)"
+	up="$(ifstatus wwan 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)"
+	case "$state" in
+		COMPLETED) [ "$up" = true ] && printf 'connected 已连上' || printf 'dhcp 已连上对方，但没拿到地址（对方没分配 IP）' ;;
+		AUTHENTICATING|ASSOCIATING|ASSOCIATED|4WAY_HANDSHAKE|GROUP_HANDSHAKE) printf 'auth 卡在认证或握手（%s），多半是密码不对' "$state" ;;
+		SCANNING|DISCONNECTED|INACTIVE|INTERFACE_DISABLED) printf 'absent 没找到对方或信号太弱（%s）' "$state" ;;
+		*) printf 'unknown 状态未知（%s）' "${state:-无}" ;;
+	esac
+}
+
 job_json_field() { jsonfilter -i "$JOB_FILE" -e "@.$1" 2>/dev/null; }
 
 status_json() { ucode "$STATUS_UC"; }
 
-# ---------- 搜索 ----------
+# ---------- 重配无线 ----------
 
-radio_band() { uci -q get "wireless.$1.band"; }
-
-scan_json() {
-	local radio="$1" ap
-	valid_name "$radio" && [ "$(uci -q get "wireless.$radio")" = wifi-device ] || fail '频段无效'
-	ap="$(radio_ap_ifname "$radio")"
-	[ -n "$ap" ] || fail '这个频段的本机 Wi-Fi 没有运行，无法搜索'
-	ubus -t 20 call iwinfo scan "{\"device\":\"$ap\"}" 2>/dev/null || fail '搜索失败，请稍后重试'
+# 重配前调用：把 /tmp、/tmp/run 恢复成其他用户可进入。修过的目录放进 DAEMON_FIXED。
+ensure_daemon_access() {
+	local entry dir mode old
+	DAEMON_FIXED=''
+	for entry in $DAEMON_DIRS; do
+		dir="${entry%:*}"; mode="${entry##*:}"
+		[ -d "$dir" ] || continue
+		old="$(ls -ld "$dir" 2>/dev/null | cut -c1-10)"
+		case "$old" in ?????????[xt]) continue ;; esac
+		if ! chmod "$mode" "$dir"; then
+			hlog ERROR tmp.fix '恢复目录权限失败，无线服务会读不到配置' "dir=$dir" "got=$old" "expect=$mode" impact=wifi_may_not_start
+			return 1
+		fi
+		hlog WARN tmp.fix '目录权限被改成别人进不去，已恢复' "dir=$dir" "got=$old" "set=$mode"
+		logger -t r3mini-hotspot "restored $dir from $old to $mode so hostapd/wpa_supplicant can read their config"
+		DAEMON_FIXED="${DAEMON_FIXED:+$DAEMON_FIXED }$dir"
+	done
+	return 0
 }
 
-# 在 radio 上找名为 ssid 的网络，信号最强的那个；输出 "信道 加密"。
+daemon_note() {
+	[ -n "$DAEMON_FIXED" ] && printf '（发现 %s 的权限被改成别人进不去，无线服务读不到配置，已恢复）' "$DAEMON_FIXED"
+}
+
+# 让 netifd 按新配置重配。只 reload 一次：逐个 wifi reconf 会让同一个射频叠加重配
+# （11-25 19:22 实测：连上 7 秒后又断了 5 秒）。
+apply_network() {
+	ensure_daemon_access || return 1
+	run_logged net.reload ubus call network reload
+}
+
+# 等这些频段重配完（network.wireless status 里 up=true、pending=false），最多 R3HS_RADIO_WAIT 秒（默认 30）。
+settle_radios() {
+	local radios="$1" waited=0 st r up pend busy start
+	start="$(uptime_ms)"
+	sleep 1
+	while :; do
+		st="$(ubus call network.wireless status 2>/dev/null)"
+		busy=''
+		for r in $radios; do
+			up="$(printf '%s' "$st" | jsonfilter -e "@.$r.up" 2>/dev/null)"
+			pend="$(printf '%s' "$st" | jsonfilter -e "@.$r.pending" 2>/dev/null)"
+			[ "$up" = true ] && [ "$pend" != true ] || busy="$busy $r"
+		done
+		if [ -z "$busy" ]; then
+			hlog INFO radio.settle '频段重配完成' "radios=$radios" "elapsed_ms=$(( $(uptime_ms) - start ))"
+			return 0
+		fi
+		if [ "$waited" -ge "${R3HS_RADIO_WAIT:-30}" ]; then
+			hlog WARN radio.settle '频段重配超时' "radios=$radios" "busy=${busy# }" "waited_s=$waited" expect=up got=pending
+			return 1
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+}
+
+# 某个频段的本机 AP 网卡在不在。频段禁用或没配 AP 时算正常。
+radio_ap_ok() {
+	local ifname
+	[ "$(uci -q get "wireless.$1.disabled")" = 1 ] && return 0
+	radio_ap_section "$1" >/dev/null || return 0
+	ifname="$(radio_ap_ifname "$1")"
+	[ -n "$ifname" ] && [ -e "$SYSNET/$ifname" ]
+}
+
+# 等这些频段的本机 AP 起来，最多 R3HS_AP_WAIT 秒（默认 30）；没起来的频段打印出来并返回 1。
+wait_aps() {
+	local radio missing waited=0
+	while :; do
+		missing=''
+		for radio in $1; do radio_ap_ok "$radio" || missing="$missing $radio"; done
+		[ -z "$missing" ] && return 0
+		if [ "$waited" -ge "${R3HS_AP_WAIT:-30}" ]; then
+			printf '%s' "${missing# }"
+			return 1
+		fi
+		sleep 2
+		waited=$((waited + 2))
+	done
+}
+
+# 把一个频段关了再开（11-25 18:06 实测能救回起不来的本机 AP）。
+kick_radio() {
+	ensure_daemon_access
+	run_logged radio.kick ubus call network.wireless down "{\"device\":\"$1\"}"
+	sleep 2
+	run_logged radio.kick ubus call network.wireless up "{\"device\":\"$1\"}"
+}
+
+# ---------- 搜索 ----------
+
+scan_json() {
+	local radio="$1" ap out n
+	valid_name "$radio" && [ "$(uci -q get "wireless.$radio")" = wifi-device ] || fail '频段无效'
+	ap="$(radio_ap_ifname "$radio")"
+	[ -n "$ap" ] && [ -e "$SYSNET/$ap" ] || fail "本机 $(band_label "$(radio_band "$radio")") Wi-Fi 现在没有运行，没法借它搜索"
+	out="$(ubus -t 20 call iwinfo scan "{\"device\":\"$ap\"}" 2>/dev/null)" ||
+		fail "这次没搜成；如果 Wi-Fi 上网正用这个频段且还没连上，本机这个频段的 Wi-Fi 处于暂停，搜不了，稍后再试"
+	n="$(printf '%s' "$out" | jsonfilter -e '@.results[*].channel' 2>/dev/null | wc -l)"
+	hlog INFO scan.done '搜索附近 Wi-Fi' "radio=$radio" "ap=$ap" "found=$n"
+	printf '%s\n' "$out"
+}
+
+# 在 radio 上找名为 ssid 的网络，信号最强的那个；输出 "信道 加密"。返回 2 = 本机 AP 不在或扫描失败，1 = 没找到。
 find_network() {
 	local radio="$1" ssid="$2" ap raw count i best_signal=-999 best_ch='' best_enc='' s ch sig enabled wpa auth
 	ap="$(radio_ap_ifname "$radio")"
-	[ -n "$ap" ] || return 2
+	[ -n "$ap" ] && [ -e "$SYSNET/$ap" ] || return 2
 	raw="$(ubus -t 20 call iwinfo scan "{\"device\":\"$ap\"}" 2>/dev/null)" || return 2
 	count="$(printf '%s' "$raw" | jsonfilter -e '@.results[*].channel' 2>/dev/null | wc -l)"
 	i=0
@@ -202,6 +364,7 @@ find_network() {
 		fi
 	done
 	[ -n "$best_ch" ] || return 1
+	FOUND_SIGNAL="$best_signal"
 	printf '%s %s\n' "$best_ch" "$best_enc"
 }
 
@@ -237,14 +400,25 @@ job_write() {
 	) > "$tmp" && mv -f "$tmp" "$JOB_FILE"
 }
 
+job_elapsed() { printf '%d' $(( $(uptime_ms) - JOB_T0 )); }
+
+# job_fail <给人看的原因> <reason 代码>
 job_fail() {
 	JOB_DONE=1
+	hlog ERROR job.end '任务失败' "action=$JOB_ACTION" result=failed "reason=${2:-unknown}" "step=$JOB_STEP" "message=$1" "elapsed_ms=$(job_elapsed)"
 	job_write failed "$JOB_STEP" "$1"
 	exit 1
 }
 
+job_done() {
+	JOB_DONE=1
+	hlog INFO job.end '任务完成' "action=$JOB_ACTION" result=done "reason=${2:-ok}" "step=$JOB_STEP" "message=$1" "elapsed_ms=$(job_elapsed)"
+	job_write done "$JOB_STEP" "$1"
+}
+
 job_step() {
 	JOB_STEP="$1"
+	hlog INFO job.step "$2" "step=$1"
 	job_write running "$1" "$2"
 }
 
@@ -252,6 +426,7 @@ job_cleanup() {
 	rm -f "$JOB_KEY"
 	if [ "${JOB_DONE:-0}" != 1 ]; then
 		JOB_DONE=1
+		hlog ERROR job.end '任务被中断' "action=$JOB_ACTION" result=failed reason=interrupted "step=$JOB_STEP"
 		job_write failed "$JOB_STEP" '任务中断；配置已尽量恢复，请检查后重试'
 	fi
 	drop_lock "$WRITE_LOCK"
@@ -263,10 +438,10 @@ start_job() {
 	local action="$1" id tries=0 pid
 	shift
 	take_lock "$JOB_LOCK" || fail '已有 Wi-Fi 设置任务在执行，请等它结束'
-	id="$(now_s)-$$"
+	id="job-$(now_s)-$$"
 	JOB_ID="$id"; JOB_ACTION="$action"; JOB_STARTED="$(now_s)"; JOB_STEP=queued
 	job_write running queued '正在开始…'
-	setsid sh "$SELF" __job "$id" "$action" "$@" </dev/null >/dev/null 2>&1 &
+	R3HS_RUN_ID="$id" setsid sh "$SELF" __job "$id" "$action" "$@" </dev/null >/dev/null 2>&1 &
 	# 等任务进程报到（它一启动就写自己的 PID），最多 5 秒。
 	while [ "$tries" -lt 5 ]; do
 		pid="$(job_json_field pid)"
@@ -279,31 +454,34 @@ start_job() {
 
 backup_configs() {
 	local package
-	JOB_BACKUP="$(mktemp -d "$STATE_DIR/r3mini-hotspot-apply.XXXXXX")" || job_fail '无法创建临时备份'
+	JOB_BACKUP="$(mktemp -d "$STATE_DIR/r3mini-hotspot-apply.XXXXXX")" || job_fail '无法创建临时备份' backup_failed
 	for package in network wireless firewall r3mini_hotspot; do
-		cp -p "$CONF_DIR/$package" "$JOB_BACKUP/$package" 2>/dev/null || job_fail "无法备份 $package 配置"
+		cp -p "$CONF_DIR/$package" "$JOB_BACKUP/$package" 2>/dev/null || job_fail "无法备份 $package 配置" backup_failed
 	done
 }
 
 restore_configs() {
-	local package radio
+	local package
 	[ -n "$JOB_BACKUP" ] && [ -d "$JOB_BACKUP" ] || return 0
+	hlog WARN job.restore '恢复保存前的设置' "radios=$JOB_RADIOS"
 	for package in network wireless firewall r3mini_hotspot; do
 		cp -f "$JOB_BACKUP/$package" "$CONF_DIR/$package" 2>/dev/null
 		uci -q revert "$package"
 	done
-	for radio in $JOB_RADIOS; do wifi reconf "$radio" >/dev/null 2>&1; done
-	[ "${JOB_FIREWALL:-0}" = 1 ] && "$INITD/firewall" reload >/dev/null 2>&1
+	apply_network
+	settle_radios "$JOB_RADIOS"
+	[ "${JOB_FIREWALL:-0}" = 1 ] && run_logged fw.reload "$INITD/firewall" reload
 	rm -rf "$JOB_BACKUP"
 	JOB_BACKUP=''
 }
 
+# job_rollback <原因> <reason 代码>
 job_rollback() {
 	restore_configs
-	job_fail "$1；已恢复保存前的设置"
+	job_fail "$1；已恢复保存前的设置" "${2:-write_failed}"
 }
 
-stage() { uci set "$1" || job_rollback '写入配置失败'; }
+stage() { uci set "$1" || job_rollback '写入配置失败' write_failed; }
 
 original_channel_key() { printf 'original_channel_%s' "$1"; }
 
@@ -340,18 +518,39 @@ find_wan_zone() {
 }
 
 commit_all() {
-	uci commit network && uci commit wireless && uci commit firewall && uci commit r3mini_hotspot || job_rollback '提交配置失败'
+	uci commit network && uci commit wireless && uci commit firewall && uci commit r3mini_hotspot || job_rollback '提交配置失败' write_failed
 }
 
-reconf_radios() {
-	local radio
-	for radio in $JOB_RADIOS; do
-		wifi reconf "$radio" >/dev/null 2>&1 || job_rollback "重新配置 $radio 失败"
-	done
+# 写完配置后：reload 一次，等重配完。传 ifup 时，wwan 若被手动关过就 ifup（会让这个频段再重配一次）。
+apply_changes() {
+	apply_network || job_rollback '重载网络配置失败' reload_failed
+	settle_radios "$JOB_RADIOS"
+	if [ "$1" = ifup ] && wwan_manual_down; then
+		hlog INFO wwan.ifup 'wwan 之前被手动关闭，打开它' expect=autostart=true got=autostart=false
+		run_logged wwan.ifup ifup wwan
+		settle_radios "$JOB_RADIOS"
+	fi
+}
+
+# 重配后本机 AP 没起来：恢复保存前的设置；还不行就把这个频段关了再开；再不行把手工恢复的办法写进任务结果。
+check_aps_or_rollback() {
+	local missing still r
+	if missing="$(wait_aps "$JOB_RADIOS")"; then
+		hlog INFO ap.check '本机 AP 都在' "radios=$JOB_RADIOS"
+		return 0
+	fi
+	hlog ERROR ap.check '重配后本机 AP 没起来，恢复保存前的设置' "missing=$missing" expect=present got=missing impact=rollback
+	restore_configs
+	still="$(wait_aps "$JOB_RADIOS")" &&
+		job_fail "本机 $(radios_label "$missing") Wi-Fi 重配后没能起来，已恢复保存前的设置，本机 Wi-Fi 已回来" ap_not_up
+	for r in $still; do kick_radio "$r"; done
+	still="$(wait_aps "$JOB_RADIOS")" &&
+		job_fail "本机 $(radios_label "$missing") Wi-Fi 重配后没能起来，已恢复保存前的设置并把这个频段重启了一次，本机 Wi-Fi 已回来" ap_not_up
+	job_fail "本机 $(radios_label "$still") Wi-Fi 重配后起不来，恢复原设置并重启这个频段后也没起来。从有线 LAN 用 SSH 执行 ubus call network.wireless down '{\"device\":\"$still\"}' 再把 down 换成 up；还不行要重启路由器" ap_not_up_hard
 }
 
 job_save() {
-	local radio="$1" ssid="$2" use_key="$3" band old_radio found channel enc key old_ssid zone networks i wait
+	local radio="$1" ssid="$2" use_key="$3" band old_radio found channel enc key old_ssid zone networks wait diag
 	band="$(radio_band "$radio")"
 	old_radio="$(uci -q get "wireless.$STA.device")"
 	old_ssid="$(uci -q get "wireless.$STA.ssid")"
@@ -360,34 +559,36 @@ job_save() {
 		key="$(cat "$JOB_KEY" 2>/dev/null)"
 		rm -f "$JOB_KEY"
 	fi
+	hlog INFO job.start '开始保存 Wi-Fi 上网' "radio=$radio" "band=$band" "ssid=$ssid" "old_radio=${old_radio:-none}" "old_ssid=$old_ssid" "new_key=$([ -n "$key" ] && printf yes || printf no)"
 
 	job_step scan "正在搜索「$ssid」…"
 	found="$(find_network "$radio" "$ssid")"
 	case "$?" in
 		0) ;;
-		2) job_fail '这个频段的本机 Wi-Fi 没有运行，无法搜索' ;;
-		*) job_fail "没搜到「$ssid」；请确认它开着、在这个频段，并靠近路由器" ;;
+		2) job_fail '这个频段的本机 Wi-Fi 没有运行，无法搜索' ap_down_before_scan ;;
+		*) job_fail "没搜到「$ssid」；请确认它开着、在这个频段，并靠近路由器" not_found ;;
 	esac
 	channel="${found% *}"; enc="${found#* }"
+	hlog INFO job.found '搜到目标' "ssid=$ssid" "channel=$channel" "encryption=$enc"
 	if ! channel_supported "$band" "$channel"; then
-		[ "$band" = 2g ] && job_fail "「$ssid」在信道 $channel，本机 Wi-Fi 不能跟过去（2.4 GHz 只支持 1–13）"
-		job_fail "「$ssid」在信道 $channel，本机 Wi-Fi 不能跟过去（5 GHz 只支持 36–48、149–161）"
+		[ "$band" = 2g ] && job_fail "「$ssid」在信道 $channel，本机 Wi-Fi 不能跟过去（2.4 GHz 只支持 1–13）" unsupported_channel
+		job_fail "「$ssid」在信道 $channel，本机 Wi-Fi 不能跟过去（5 GHz 只支持 36–48、149–161）" unsupported_channel
 	fi
 	case "$enc" in
-		eap) job_fail '这个 Wi-Fi 用企业认证（802.1X），不支持' ;;
-		wep) job_fail '这个 Wi-Fi 用 WEP 或未知加密，不支持' ;;
+		eap) job_fail '这个 Wi-Fi 用企业认证（802.1X），不支持' enterprise ;;
+		wep) job_fail '这个 Wi-Fi 用 WEP 或未知加密，不支持' wep ;;
 	esac
 	if [ "$enc" != none ]; then
 		if [ -z "$key" ]; then
 			[ "$ssid" = "$old_ssid" ] && key="$(uci -q get "wireless.$STA.key")"
-			[ -n "$key" ] || job_fail '请输入这个 Wi-Fi 的密码'
+			[ -n "$key" ] || job_fail '请输入这个 Wi-Fi 的密码' need_password
 		fi
-		[ "$(printf '%s' "$key" | wc -c)" -ge 8 ] && [ "$(printf '%s' "$key" | wc -c)" -le 63 ] || job_fail '密码必须是 8–63 个字符'
+		[ "$(printf '%s' "$key" | wc -c)" -ge 8 ] && [ "$(printf '%s' "$key" | wc -c)" -le 63 ] || job_fail '密码必须是 8–63 个字符' bad_password_length
 	fi
-	zone="$(find_wan_zone)" || job_fail '没找到防火墙 wan 区域'
+	zone="$(find_wan_zone)" || job_fail '没找到防火墙 wan 区域' no_wan_zone
 
 	job_step write '正在写入设置…'
-	with_lock_held || job_fail '另一项出口或 Wi-Fi 设置正在执行，请稍后再试'
+	with_lock_held || job_fail '另一项出口或 Wi-Fi 设置正在执行，请稍后再试' lock_busy
 	backup_configs
 	JOB_RADIOS="$radio"
 	if [ -n "$old_radio" ] && [ "$old_radio" != "$radio" ]; then
@@ -407,7 +608,7 @@ job_save() {
 	if [ "$enc" = none ]; then
 		uci -q delete "wireless.$STA.key"
 	else
-		printf "set wireless.%s.key='%s'\n" "$STA" "$(printf '%s' "$key" | sed "s/'/'\\\\''/g")" | uci -q batch || job_rollback '写入密码失败'
+		printf "set wireless.%s.key='%s'\n" "$STA" "$(printf '%s' "$key" | sed "s/'/'\\\\''/g")" | uci -q batch || job_rollback '写入密码失败' write_failed
 	fi
 	stage "wireless.$STA.disabled=0"
 	stage "wireless.$radio.channel=$channel"
@@ -420,14 +621,16 @@ job_save() {
 	JOB_FIREWALL=0
 	case " $networks " in
 		*' wwan '*) ;;
-		*) uci add_list "firewall.$zone.network=wwan" || job_rollback '写入防火墙失败'; JOB_FIREWALL=1 ;;
+		*) uci add_list "firewall.$zone.network=wwan" || job_rollback '写入防火墙失败' write_failed; JOB_FIREWALL=1 ;;
 	esac
 	commit_all
+	hlog INFO job.write '设置已写入' "radios=$JOB_RADIOS" "channel=$channel" "encryption=$enc" "firewall_add=$JOB_FIREWALL"
 
 	job_step reconf "正在把本机 $(band_label "$band") Wi-Fi 切到信道 $channel，这个频段会断开十几秒…"
-	reconf_radios
+	apply_changes ifup
+	check_aps_or_rollback
 	if [ "$JOB_FIREWALL" = 1 ]; then
-		"$INITD/firewall" reload >/dev/null 2>&1 || job_rollback '重载防火墙失败'
+		run_logged fw.reload "$INITD/firewall" reload || job_rollback '重载防火墙失败' reload_failed
 	fi
 	"$INITD/r3mini-hotspot" enable >/dev/null 2>&1
 	"$INITD/r3mini-hotspot" restart >/dev/null 2>&1
@@ -438,24 +641,23 @@ job_save() {
 	wait=0
 	while [ "$wait" -lt "${R3HS_CONNECT_WAIT:-45}" ]; do
 		if wwan_ready; then
-			JOB_DONE=1
-			job_write done connect "已连上「$ssid」，IP $WWAN_IP"
+			job_done "已连上「$ssid」，IP $WWAN_IP$(daemon_note)" connected
 			return 0
 		fi
 		sleep 3
 		wait=$((wait + 3))
 	done
-	JOB_DONE=1
-	job_write done connect "已保存，但 ${R3HS_CONNECT_WAIT:-45} 秒内没连上「$ssid」。常见原因：密码不对、信号太弱、对方不分配地址。后台会每 $(cfg check_interval || printf 20) 秒重试。"
+	diag="$(sta_diagnose)"
+	hlog WARN job.connect '保存后没连上' "ssid=$ssid" "waited_s=$wait" "sta=${diag%% *}" "detail=${diag#* }" expect=connected "got=${diag%% *}"
+	job_done "已保存，但 ${R3HS_CONNECT_WAIT:-45} 秒内没连上「$ssid」：${diag#* }。没连上期间本机 $(band_label "$band") Wi-Fi 会暂停；约 2 分钟仍连不上，后台会先停下 Wi-Fi 上网让本机 Wi-Fi 恢复，搜到对方后再自动重连。$(daemon_note)" "not_connected_${diag%% *}"
 }
-
-band_label() { [ "$1" = 2g ] && printf '2.4 GHz' || printf '5 GHz'; }
 
 job_disable() {
 	local radio
 	radio="$(uci -q get "wireless.$STA.device")"
+	hlog INFO job.start '开始停用 Wi-Fi 上网' "radio=${radio:-none}"
 	job_step write '正在停用 Wi-Fi 上网…'
-	with_lock_held || job_fail '另一项出口或 Wi-Fi 设置正在执行，请稍后再试'
+	with_lock_held || job_fail '另一项出口或 Wi-Fi 设置正在执行，请稍后再试' lock_busy
 	backup_configs
 	JOB_RADIOS="$radio"
 	uci -q get "wireless.$STA" >/dev/null && stage "wireless.$STA.disabled=1"
@@ -464,15 +666,23 @@ job_disable() {
 	stage "$CONFIG.enabled=0"
 	uci -q delete "$CONFIG.target_channel"
 	commit_all
-	ifdown wwan >/dev/null 2>&1
+	# 不 ifdown wwan：STA 停了 wwan 自然就断；ifdown 会被 netifd 记成手动关闭，下次启用时 STA 不启动。
 	if [ -n "$radio" ]; then
 		job_step reconf "正在恢复本机 $(band_label "$(radio_band "$radio")") Wi-Fi，这个频段会断开十几秒…"
-		reconf_radios
+		apply_changes
 	fi
-	"$INITD/r3mini-hotspot" restart >/dev/null 2>&1
 	rm -rf "$JOB_BACKUP"; JOB_BACKUP=''
-	JOB_DONE=1
-	job_write done reconf '已停用 Wi-Fi 上网'
+	"$INITD/r3mini-hotspot" restart >/dev/null 2>&1
+	# 停用是往安全方向走，不回滚；本机 AP 没起来就把这个频段关了再开。
+	if [ -n "$radio" ] && ! wait_aps "$JOB_RADIOS" >/dev/null; then
+		hlog ERROR ap.check '停用后本机 AP 没起来，重启这个频段' "missing=$radio" expect=present got=missing impact=kick_radio
+		kick_radio "$radio"
+		wait_aps "$JOB_RADIOS" >/dev/null ||
+			job_fail "已停用 Wi-Fi 上网，但本机 $(radios_label "$radio") Wi-Fi 没能起来。从有线 LAN 用 SSH 执行 ubus call network.wireless down '{\"device\":\"$radio\"}' 再把 down 换成 up；还不行要重启路由器" ap_not_up_hard
+	else
+		hlog INFO ap.check '本机 AP 都在' "radios=$JOB_RADIOS"
+	fi
+	job_done "已停用 Wi-Fi 上网$(daemon_note)" disabled
 }
 
 # 任务进程里拿写锁：最多等 20 秒。
@@ -487,7 +697,8 @@ with_lock_held() {
 
 run_job() {
 	JOB_ID="$1"; JOB_ACTION="$2"; shift 2
-	JOB_STARTED="$(now_s)"; JOB_STEP=start; JOB_DONE=0; JOB_BACKUP=''
+	RUN_ID="$JOB_ID"
+	JOB_STARTED="$(now_s)"; JOB_T0="$(uptime_ms)"; JOB_STEP=start; JOB_DONE=0; JOB_BACKUP=''
 	printf '%s\n' "$$" > "$JOB_LOCK"
 	trap 'restore_configs; job_cleanup' 0
 	trap 'exit 1' 1 2 15
@@ -495,7 +706,7 @@ run_job() {
 	case "$JOB_ACTION" in
 		save) job_save "$@" ;;
 		disable) job_disable ;;
-		*) job_fail '未知任务' ;;
+		*) job_fail '未知任务' unknown_action ;;
 	esac
 }
 
@@ -584,7 +795,7 @@ restore_routes() {
 }
 
 set_egress() {
-	local target="$1" cell wan_m cell_m wifi_m work dev
+	local target="$1" cell wan_m cell_m wifi_m work dev before
 	case "$target" in
 		auto) wan_m=10; cell_m=20; wifi_m=30 ;;
 		wan) wan_m=5; cell_m=20; wifi_m=30 ;;
@@ -598,6 +809,7 @@ set_egress() {
 		cellular) [ -n "$cell" ] && iface_online "$cell" || fail '蜂窝网络当前没有连上' ;;
 		hotspot) wwan_ready || fail 'Wi-Fi 上网当前没有连上' ;;
 	esac
+	before="$(default_device)"
 	work="$(mktemp -d "$STATE_DIR/r3mini-egress.XXXXXX")" || fail '无法创建临时文件'
 	cp -p "$CONF_DIR/network" "$work/network" && cp -p "$CONF_DIR/r3mini_hotspot" "$work/r3mini_hotspot" || { rm -rf "$work"; fail '无法备份配置'; }
 	ip -4 route show default > "$work/routes"
@@ -629,11 +841,13 @@ set_egress() {
 		*) dev='' ;;
 	esac
 	if [ -n "$dev" ] && [ "$(default_device)" != "$dev" ]; then
+		hlog ERROR prefer.set '切换后默认路由不对，恢复原出口' "target=$target" "expect=$dev" "got=$(default_device)"
 		cp -f "$work/network" "$CONF_DIR/network"; cp -f "$work/r3mini_hotspot" "$CONF_DIR/r3mini_hotspot"
 		restore_routes "$work/routes" "$work/devices"
 		rm -rf "$work"
 		fail '切换后默认路由不对；已恢复原来的出口'
 	fi
+	hlog INFO prefer.set '优先出口已切换' "target=$target" "default_before=${before:-none}" "default_after=$(default_device)"
 	rm -rf "$work"
 }
 
@@ -672,14 +886,16 @@ set_cellular() {
 	case "$mode" in
 		off)
 			uci set "network.$cell.auto=0" && uci commit network || fail '保存失败'
-			ifdown "$cell" >/dev/null 2>&1
+			run_logged cellular.ifdown ifdown "$cell"
+			hlog INFO cellular.set '已暂停蜂窝自动拨号' "iface=$cell" auto=0
 			;;
 		on)
 			sim="$(sim_state)"
 			[ "$sim" = missing ] && fail '5G 模块里没检测到 SIM 卡；插好卡后再启用'
 			uci -q delete "network.$cell.auto"
 			uci commit network || fail '保存失败'
-			ifup "$cell" >/dev/null 2>&1
+			run_logged cellular.ifup ifup "$cell"
+			hlog INFO cellular.set '已恢复蜂窝自动拨号' "iface=$cell" auto=1 "sim=$sim"
 			;;
 		*) fail '用法: cellular <on|off>' ;;
 	esac
@@ -693,8 +909,10 @@ cellular_command() {
 
 [ "${R3MINI_HOTSPOT_LIB:-0}" = 1 ] && return 0 2>/dev/null
 
+CMD="$1"
 case "$1" in
 	status) status_json ;;
+	debug) R3HS_LOG_UC="$LOG_UC" ucode "$STATUS_UC" debug ;;
 	scan) [ "$#" -eq 2 ] || fail '用法: scan <radio>'; scan_json "$2" ;;
 	save) shift; save_command "$@" ;;
 	disable)
@@ -704,5 +922,5 @@ case "$1" in
 	prefer) shift; prefer_command "$@" ;;
 	cellular) shift; cellular_command "$@" ;;
 	__job) shift; run_job "$@" ;;
-	*) fail '用法: r3mini-hotspot-web status | scan <radio> | save <radio> <ssid> <密码文件|-> | disable | prefer <auto|wan|cellular|hotspot> | cellular <on|off>' ;;
+	*) fail '用法: r3mini-hotspot-web status | debug | scan <radio> | save <radio> <ssid> <密码文件|-> | disable | prefer <auto|wan|cellular|hotspot> | cellular <on|off>' ;;
 esac

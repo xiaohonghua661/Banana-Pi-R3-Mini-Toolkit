@@ -1,75 +1,176 @@
 #!/bin/sh
-# Wi-Fi 上网自动重连：每 check_interval 秒检查一次。
-#   连续 failure_limit 次没连上：ifup wwan
-#   连续 3 轮重连无效、且过了冷却时间：用本机 AP 搜索（不停 AP），对方换了信道就让本机该频段跟过去
-# 与页面共用 r3mini-hotspot-web 的函数和写锁；页面的保存任务在跑时不动手。
+# Wi-Fi 上网自动重连。
+#
+# OpenWrt 的设计：同一个频段上 STA 没连上（断开、扫描、认证中）时，hostapd 会暂停这个频段的本机 AP。
+# 所以对方（例如手机热点）一直不在，本机这个频段的 Wi-Fi 也会一直停着。看门狗因此分两种状态：
+#
+#   连接中  STA 开着。每 check_interval 秒查一次；连续 failure_limit 次没连上算一轮，记下 STA 卡在哪一步。
+#           重连由 wpa_supplicant 自己做；只有 wwan 被手动关闭（ifdown 过）时才 ifup。
+#           连续 PARK_ROUNDS 轮（默认约 2 分钟）还没连上，就「停靠」：把 STA 先停掉、重配一次，本机 AP 随之恢复。
+#   停靠中  r3mini_hotspot.enabled=1 而 wireless.r3mini_phone_sta.disabled=1。借本机 AP 搜索（不停 AP），
+#           搜到对方就把信道调过去、重新打开 STA。打开后 10 分钟内又停靠，下次搜索的间隔加倍
+#           （60 秒起，最多 1800 秒）；连上后恢复 60 秒。
+#
+# 每小时清理一次超过保留期的旧日志。与页面共用 r3mini-hotspot-web 的函数、写锁和日志；页面的保存任务在跑时不动手。
 
-TAG='r3mini-hotspot'
 R3MINI_HOTSPOT_LIB=1
 . "${R3HS_WEB:-/usr/sbin/r3mini-hotspot-web}"
+RUN_ID="wd-$$"
+
+PARK_ROUNDS="${R3HS_PARK_ROUNDS:-2}"
+PROBE_MIN=60
+PROBE_MAX=1800
+PRUNE_EVERY=3600
 
 enabled() { [ "$(cfg enabled)" = 1 ]; }
+parked() { enabled && [ "$(uci -q get "wireless.$STA.disabled")" = 1 ]; }
+sta_radio() { uci -q get "wireless.$STA.device"; }
 
-follow_channel() {
-	local radio ssid band found channel
-	radio="$(uci -q get "wireless.$STA.device")"
+# 重配一个频段并确认本机 AP 起来了；没起来就把这个频段关了再开。
+apply_radio() {
+	local radio="$1"
+	apply_network
+	settle_radios "$radio"
+	if wait_aps "$radio" >/dev/null; then
+		hlog INFO ap.check '本机 AP 都在' "radios=$radio"
+		return 0
+	fi
+	hlog ERROR ap.check '重配后本机 AP 没起来，重启这个频段' "missing=$radio" expect=present got=missing impact=kick_radio
+	kick_radio "$radio"
+	wait_aps "$radio" >/dev/null && return 0
+	hlog ERROR ap.check '重启频段后本机 AP 仍没起来' "missing=$radio" expect=present got=missing impact=local_wifi_down
+	return 1
+}
+
+park() {
+	local radio diag="$1"
+	radio="$(sta_radio)"
+	[ -n "$radio" ] || return 0
+	take_lock "$WRITE_LOCK" || { hlog WARN wd.park '写锁被占，这轮不停靠' "lock=$WRITE_LOCK"; return 0; }
+	hlog WARN wd.park "连续 $PARK_ROUNDS 轮没连上，先停下 Wi-Fi 上网让本机 AP 恢复" "radio=$radio" "sta=${diag%% *}" "detail=${diag#* }" "next_probe_s=$probe_every"
+	if uci set "wireless.$STA.disabled=1" && uci commit wireless; then
+		apply_radio "$radio"
+	else
+		uci -q revert wireless
+		hlog ERROR wd.park '写配置失败，没能停靠' "radio=$radio"
+	fi
+	drop_lock "$WRITE_LOCK"
+	next_probe=$(( $(date +%s) + probe_every ))
+	last_probe_result=''
+}
+
+# 停靠中：搜到对方才重新打开 STA；对方换了信道就把本机这个频段一起调过去。
+probe() {
+	local radio ssid band found rc channel result
+	radio="$(sta_radio)"
 	ssid="$(uci -q get "wireless.$STA.ssid")"
 	[ -n "$radio" ] && [ -n "$ssid" ] || return 0
 	band="$(radio_band "$radio")"
-	found="$(find_network "$radio" "$ssid")" || { logger -t "$TAG" "wifi uplink not visible on $radio"; return 0; }
+	found="$(find_network "$radio" "$ssid")"; rc=$?
+	case "$rc" in
+		0) result=found ;;
+		1) result=not_found ;;
+		*) result=scan_failed ;;
+	esac
+	# 搜不到时一分钟一次，只在结果变化或每 30 分钟记一行，免得刷屏。
+	if [ "$result" != found ]; then
+		if [ "$result" != "$last_probe_result" ] || [ $(( $(date +%s) - last_probe_log )) -ge 1800 ]; then
+			hlog INFO wd.probe '停靠中，还没搜到对方' "radio=$radio" "ssid=$ssid" "result=$result" "next_probe_s=$probe_every"
+			last_probe_log="$(date +%s)"
+		fi
+		last_probe_result="$result"
+		return 0
+	fi
+	last_probe_result="$result"
 	channel="${found% *}"
-	[ "$channel" != "$(uci -q get "wireless.$radio.channel")" ] || { logger -t "$TAG" "wifi uplink visible, channel unchanged"; return 0; }
-	channel_supported "$band" "$channel" || { logger -t "$TAG" "wifi uplink moved to unsupported channel $channel"; return 0; }
-	take_lock "$WRITE_LOCK" || return 0
-	logger -t "$TAG" "wifi uplink moved to channel $channel; aligning $radio"
-	if uci set "wireless.$radio.channel=$channel" && uci commit wireless; then
+	if ! channel_supported "$band" "$channel"; then
+		hlog WARN wd.probe '对方在本机跟不过去的信道上，继续停靠' "radio=$radio" "ssid=$ssid" "channel=$channel"
+		return 0
+	fi
+	take_lock "$WRITE_LOCK" || { hlog WARN wd.unpark '写锁被占，下次再试' "lock=$WRITE_LOCK"; return 0; }
+	hlog INFO wd.unpark '搜到对方，重新打开 Wi-Fi 上网' "radio=$radio" "ssid=$ssid" "channel=$channel" "signal=${FOUND_SIGNAL:-?}"
+	if uci set "wireless.$radio.channel=$channel" && uci set "wireless.$STA.disabled=0" && uci commit wireless; then
 		uci set "$CONFIG.target_channel=$channel" && uci commit r3mini_hotspot
-		wifi reconf "$radio" >/dev/null 2>&1 || logger -t "$TAG" "wifi reconf $radio failed"
+		apply_radio "$radio"
+		if wwan_manual_down; then
+			hlog INFO wwan.ifup 'wwan 之前被手动关闭，打开它' expect=autostart=true got=autostart=false
+			run_logged wwan.ifup ifup wwan
+		fi
+		unparked_at="$(date +%s)"
 	else
 		uci -q revert wireless
-		logger -t "$TAG" "channel update failed"
+		hlog ERROR wd.unpark '写配置失败，没能重连' "radio=$radio"
 	fi
 	drop_lock "$WRITE_LOCK"
 }
 
 interval="$(cfg check_interval)"; is_uint "$interval" && [ "$interval" -ge 5 ] && [ "$interval" -le 3600 ] || interval=20
 limit="$(cfg failure_limit)"; is_uint "$limit" && [ "$limit" -ge 1 ] && [ "$limit" -le 20 ] || limit=3
-cooldown="$(cfg cooldown)"; is_uint "$cooldown" && [ "$cooldown" -ge 30 ] && [ "$cooldown" -le 3600 ] || cooldown=180
 
 failures=0
 rounds=0
-last_follow=0
-backoff="$cooldown"
+probe_every="$PROBE_MIN"
+next_probe=0
+unparked_at=0
+down_since=0
+last_probe_result=''
+last_probe_log=0
+last_prune=0
 
 tick() {
+	local now diag
+	now="$(date +%s)"
+	if [ $((now - last_prune)) -ge "$PRUNE_EVERY" ]; then
+		ucode "$LOG_UC" prune >/dev/null 2>&1
+		last_prune="$now"
+	fi
 	if ! enabled || lock_owner_alive "$JOB_LOCK"; then
 		failures=0
 		rounds=0
-	elif wwan_ready; then
+		return 0
+	fi
+	if parked; then
+		[ "$now" -ge "$next_probe" ] || return 0
+		next_probe=$((now + probe_every))
+		probe
+		return 0
+	fi
+	if wwan_ready; then
+		if [ "$down_since" -gt 0 ]; then
+			hlog INFO wd.up 'Wi-Fi 上网已连上' "down_s=$((now - down_since))" "ip=$WWAN_IP"
+			down_since=0
+		fi
 		failures=0
 		rounds=0
-		backoff="$cooldown"
-	else
-		failures=$((failures + 1))
-		if [ "$failures" -ge "$limit" ]; then
-			failures=0
-			rounds=$((rounds + 1))
-			logger -t "$TAG" "wifi uplink down; ifup wwan (round $rounds)"
-			ifup wwan >/dev/null 2>&1
-			now="$(date +%s)"
-			if [ "$rounds" -ge 3 ] && [ $((now - last_follow)) -ge "$backoff" ]; then
-				follow_channel
-				last_follow="$now"
-				rounds=0
-				backoff=$((backoff * 2))
-				[ "$backoff" -le 1800 ] || backoff=1800
-			fi
+		probe_every="$PROBE_MIN"
+		return 0
+	fi
+	[ "$down_since" -gt 0 ] || down_since="$now"
+	failures=$((failures + 1))
+	[ "$failures" -ge "$limit" ] || return 0
+	failures=0
+	rounds=$((rounds + 1))
+	diag="$(sta_diagnose)"
+	if [ "$rounds" -ge "$PARK_ROUNDS" ]; then
+		rounds=0
+		# 刚从停靠打开又连不上：说明对方搜得到却连不上（密码、信号），拉长下次搜索间隔。
+		if [ "$unparked_at" -gt 0 ] && [ $((now - unparked_at)) -lt 600 ]; then
+			probe_every=$((probe_every * 2))
+			[ "$probe_every" -le "$PROBE_MAX" ] || probe_every="$PROBE_MAX"
 		fi
+		park "$diag"
+		return 0
+	fi
+	hlog WARN wd.round 'Wi-Fi 上网没连上' "round=$rounds" "of=$PARK_ROUNDS" "sta=${diag%% *}" "detail=${diag#* }" "down_s=$((now - down_since))"
+	if wwan_manual_down; then
+		hlog INFO wwan.ifup 'wwan 被手动关闭，打开它' expect=autostart=true got=autostart=false
+		run_logged wwan.ifup ifup wwan
 	fi
 }
 
 [ "${R3HS_WATCHDOG_LIB:-0}" = 1 ] && return 0 2>/dev/null
 
+hlog INFO wd.start '看门狗启动' "interval_s=$interval" "limit=$limit" "park_rounds=$PARK_ROUNDS" "log=$(ucode "$LOG_UC" path 2>/dev/null)"
 while :; do
 	tick
 	sleep "$interval"

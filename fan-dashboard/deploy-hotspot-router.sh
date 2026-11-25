@@ -63,6 +63,7 @@ put_if_missing() {
 put /usr/sbin/r3mini-hotspot-web 755
 put /usr/sbin/r3mini-hotspot-watchdog 755
 put /usr/share/r3mini-hotspot/status.uc 644
+put /usr/share/r3mini-hotspot/log.uc 644
 put /etc/init.d/r3mini-hotspot 755
 put_if_missing /etc/config/r3mini_hotspot 600
 put /usr/share/luci/menu.d/luci-app-r3mini-hotspot.json 644

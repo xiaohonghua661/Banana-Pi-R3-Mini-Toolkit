@@ -20,6 +20,7 @@ FILES = {
     "web": "usr/sbin/r3mini-hotspot-web",
     "wd": "usr/sbin/r3mini-hotspot-watchdog",
     "status.uc": "usr/share/r3mini-hotspot/status.uc",
+    "log.uc": "usr/share/r3mini-hotspot/log.uc",
 }
 
 
@@ -35,7 +36,7 @@ def main() -> int:
         for name, relative in FILES.items():
             run(client, f"cat > {work}/{name}", local_bytes(relative))
         run(client, f"cat > {work}/test.sh", (ROOT / "test_hotspot_router.sh").read_bytes().replace(b"\r\n", b"\n"))
-        stdin, stdout, _ = client.exec_command(f"cd {work} && sh test.sh {work}/web {work}/wd {work}/status.uc 2>&1", timeout=600)
+        stdin, stdout, _ = client.exec_command(f"cd {work} && sh test.sh {work}/web {work}/wd {work}/status.uc {work}/log.uc 2>&1", timeout=600)
         stdin.channel.shutdown_write()
         for line in iter(stdout.readline, ""):
             print(line, end="", flush=True)
