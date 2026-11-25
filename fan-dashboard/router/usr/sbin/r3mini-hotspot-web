@@ -11,7 +11,8 @@
 #   cellular <on|off>            恢复 / 暂停蜂窝自动拨号
 #
 # 测试钩子（只在沙箱测试里设置）：R3HS_CONF_DIR、R3HS_STATE_DIR、R3HS_LOCK_DIR、R3HS_INITD、R3HS_PATH、
-# R3HS_STATUS_UC、R3HS_CONNECT_WAIT（等连接的秒数）、R3HS_TTYS（查 SIM 卡用的 AT 口，空则不查）。
+# R3HS_STATUS_UC、R3HS_CONNECT_WAIT（等连接的秒数）、R3HS_TTYS（查 SIM 卡用的 AT 口，空则不查）、
+# R3HS_DAEMON_DIRS（要保证 network 用户能进的目录:权限）、R3HS_SYSNET（网卡目录）、R3HS_AP_WAIT（等本机 AP 的秒数）。
 
 PATH="${R3HS_PATH:+$R3HS_PATH:}/usr/sbin:/usr/bin:/sbin:/bin"
 CONF_DIR="${R3HS_CONF_DIR:-/etc/config}"
@@ -28,6 +29,10 @@ JOB_KEY="$STATE_DIR/r3mini-hotspot-job.key"
 JOB_LOCK="$LOCK_DIR/r3mini-hotspot-job"
 WRITE_LOCK="$LOCK_DIR/r3mini-hotspot-write"
 KEY_PATTERN='^/tmp/r3mini-hotspot-key-[0-9a-f]{16}$'
+# hostapd、wpa_supplicant 以 network 用户运行，每次重配都要读 /var/run（即 /tmp/run）下新生成的配置。
+# /tmp 一旦被改成 0700，它们读不到配置，就把本机 AP 删掉且起不来（2026-11-22、11-25 两次实测）。
+DAEMON_DIRS="${R3HS_DAEMON_DIRS-/tmp:1777 /tmp/run:755}"
+SYSNET="${R3HS_SYSNET:-/sys/class/net}"
 CHANNELS_5G=' 36 40 44 48 149 153 157 161 '
 umask 077
 
@@ -140,6 +145,57 @@ radio_ap_ifname() {
 	ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$1.interfaces[@.section=\"$section\"].ifname" 2>/dev/null
 }
 
+# 重配无线前调用：把 /tmp、/tmp/run 恢复成其他用户可进入。修过的目录放进 DAEMON_FIXED。
+ensure_daemon_access() {
+	local entry dir mode old
+	DAEMON_FIXED=''
+	for entry in $DAEMON_DIRS; do
+		dir="${entry%:*}"; mode="${entry##*:}"
+		[ -d "$dir" ] || continue
+		old="$(ls -ld "$dir" 2>/dev/null | cut -c1-10)"
+		case "$old" in ?????????[xt]) continue ;; esac
+		chmod "$mode" "$dir" || return 1
+		logger -t r3mini-hotspot "restored $dir from $old to $mode so hostapd/wpa_supplicant can read their config"
+		DAEMON_FIXED="${DAEMON_FIXED:+$DAEMON_FIXED }$dir"
+	done
+	return 0
+}
+
+daemon_note() {
+	[ -n "$DAEMON_FIXED" ] && printf '（发现 %s 的权限被改成别人进不去，无线服务读不到配置，已恢复）' "$DAEMON_FIXED"
+}
+
+# 某个频段的本机 AP 网卡在不在。频段禁用或没配 AP 时算正常。
+radio_ap_ok() {
+	local ifname
+	[ "$(uci -q get "wireless.$1.disabled")" = 1 ] && return 0
+	radio_ap_section "$1" >/dev/null || return 0
+	ifname="$(radio_ap_ifname "$1")"
+	[ -n "$ifname" ] && [ -e "$SYSNET/$ifname" ]
+}
+
+# 等这些频段的本机 AP 起来，最多 R3HS_AP_WAIT 秒（默认 30）；没起来的频段打印出来并返回 1。
+wait_aps() {
+	local radio missing waited=0
+	while :; do
+		missing=''
+		for radio in $1; do radio_ap_ok "$radio" || missing="$missing $radio"; done
+		[ -z "$missing" ] && return 0
+		if [ "$waited" -ge "${R3HS_AP_WAIT:-30}" ]; then
+			printf '%s' "${missing# }"
+			return 1
+		fi
+		sleep 2
+		waited=$((waited + 2))
+	done
+}
+
+radios_label() {
+	local radio out=''
+	for radio in $1; do out="${out:+$out、}$(band_label "$(radio_band "$radio")")"; done
+	printf '%s' "$out"
+}
+
 wifi_link_ok() {
 	[ -n "$1" ] && iw dev "$1" link 2>/dev/null | grep -q '^Connected to '
 }
@@ -166,15 +222,16 @@ scan_json() {
 	local radio="$1" ap
 	valid_name "$radio" && [ "$(uci -q get "wireless.$radio")" = wifi-device ] || fail '频段无效'
 	ap="$(radio_ap_ifname "$radio")"
-	[ -n "$ap" ] || fail '这个频段的本机 Wi-Fi 没有运行，无法搜索'
-	ubus -t 20 call iwinfo scan "{\"device\":\"$ap\"}" 2>/dev/null || fail '搜索失败，请稍后重试'
+	[ -n "$ap" ] && [ -e "$SYSNET/$ap" ] || fail "本机 $(band_label "$(radio_band "$radio")") Wi-Fi 现在没有运行，没法借它搜索"
+	ubus -t 20 call iwinfo scan "{\"device\":\"$ap\"}" 2>/dev/null ||
+		fail "这次没搜成；如果 Wi-Fi 上网正用这个频段且还没连上，本机这个频段的 Wi-Fi 处于暂停，搜不了，稍后再试"
 }
 
 # 在 radio 上找名为 ssid 的网络，信号最强的那个；输出 "信道 加密"。
 find_network() {
 	local radio="$1" ssid="$2" ap raw count i best_signal=-999 best_ch='' best_enc='' s ch sig enabled wpa auth
 	ap="$(radio_ap_ifname "$radio")"
-	[ -n "$ap" ] || return 2
+	[ -n "$ap" ] && [ -e "$SYSNET/$ap" ] || return 2
 	raw="$(ubus -t 20 call iwinfo scan "{\"device\":\"$ap\"}" 2>/dev/null)" || return 2
 	count="$(printf '%s' "$raw" | jsonfilter -e '@.results[*].channel' 2>/dev/null | wc -l)"
 	i=0
@@ -345,9 +402,21 @@ commit_all() {
 
 reconf_radios() {
 	local radio
+	ensure_daemon_access || job_rollback '无法恢复 /tmp 权限，无线服务会读不到配置'
 	for radio in $JOB_RADIOS; do
 		wifi reconf "$radio" >/dev/null 2>&1 || job_rollback "重新配置 $radio 失败"
 	done
+}
+
+# 重配后本机 AP 没起来：先恢复保存前的设置再等一次。还不行就把手工恢复的办法写进任务结果。
+check_aps_or_rollback() {
+	local missing still
+	missing="$(wait_aps "$JOB_RADIOS")" && return 0
+	logger -t r3mini-hotspot "local AP on $missing did not come back after reconf; rolling back"
+	restore_configs
+	still="$(wait_aps "$JOB_RADIOS")" &&
+		job_fail "本机 $(radios_label "$missing") Wi-Fi 重配后没能起来，已恢复保存前的设置，本机 Wi-Fi 已回来"
+	job_fail "本机 $(radios_label "$still") Wi-Fi 重配后起不来，恢复原设置后也没起来。从有线 LAN 用 SSH 执行 ubus call network.wireless down '{\"device\":\"$still\"}' 再把 down 换成 up；还不行要重启路由器"
 }
 
 job_save() {
@@ -426,6 +495,7 @@ job_save() {
 
 	job_step reconf "正在把本机 $(band_label "$band") Wi-Fi 切到信道 $channel，这个频段会断开十几秒…"
 	reconf_radios
+	check_aps_or_rollback
 	if [ "$JOB_FIREWALL" = 1 ]; then
 		"$INITD/firewall" reload >/dev/null 2>&1 || job_rollback '重载防火墙失败'
 	fi
@@ -439,14 +509,14 @@ job_save() {
 	while [ "$wait" -lt "${R3HS_CONNECT_WAIT:-45}" ]; do
 		if wwan_ready; then
 			JOB_DONE=1
-			job_write done connect "已连上「$ssid」，IP $WWAN_IP"
+			job_write done connect "已连上「$ssid」，IP $WWAN_IP$(daemon_note)"
 			return 0
 		fi
 		sleep 3
 		wait=$((wait + 3))
 	done
 	JOB_DONE=1
-	job_write done connect "已保存，但 ${R3HS_CONNECT_WAIT:-45} 秒内没连上「$ssid」。常见原因：密码不对、信号太弱、对方不分配地址。后台会每 $(cfg check_interval || printf 20) 秒重试。"
+	job_write done connect "已保存，但 ${R3HS_CONNECT_WAIT:-45} 秒内没连上「$ssid」。常见原因：密码不对、信号太弱、对方不分配地址。没连上期间本机 $(band_label "$band") Wi-Fi 会暂停；约 2 分钟仍连不上，后台会先停下 Wi-Fi 上网让本机 Wi-Fi 恢复，搜到对方后再自动重连。$(daemon_note)"
 }
 
 band_label() { [ "$1" = 2g ] && printf '2.4 GHz' || printf '5 GHz'; }
@@ -469,10 +539,18 @@ job_disable() {
 		job_step reconf "正在恢复本机 $(band_label "$(radio_band "$radio")") Wi-Fi，这个频段会断开十几秒…"
 		reconf_radios
 	fi
-	"$INITD/r3mini-hotspot" restart >/dev/null 2>&1
 	rm -rf "$JOB_BACKUP"; JOB_BACKUP=''
+	"$INITD/r3mini-hotspot" restart >/dev/null 2>&1
+	# 停用是往安全方向走，不回滚；本机 AP 没起来就再重配一次。
+	if [ -n "$radio" ] && ! wait_aps "$JOB_RADIOS" >/dev/null; then
+		logger -t r3mini-hotspot "local AP on $radio missing after disable; reconf again"
+		ensure_daemon_access
+		wifi reconf "$radio" >/dev/null 2>&1
+		wait_aps "$JOB_RADIOS" >/dev/null ||
+			job_fail "已停用 Wi-Fi 上网，但本机 $(radios_label "$radio") Wi-Fi 没能起来。从有线 LAN 用 SSH 执行 ubus call network.wireless down '{\"device\":\"$radio\"}' 再把 down 换成 up；还不行要重启路由器"
+	fi
 	JOB_DONE=1
-	job_write done reconf '已停用 Wi-Fi 上网'
+	job_write done reconf "已停用 Wi-Fi 上网$(daemon_note)"
 }
 
 # 任务进程里拿写锁：最多等 20 秒。

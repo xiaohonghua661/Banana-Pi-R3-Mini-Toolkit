@@ -8,6 +8,7 @@ import { readfile, access } from 'fs';
 
 const conf_dir = getenv('R3HS_CONF_DIR');
 const state_dir = getenv('R3HS_STATE_DIR') || '/tmp';
+const sysnet = getenv('R3HS_SYSNET') || '/sys/class/net';
 const uci = conf_dir ? cursor(conf_dir, conf_dir + '/.uci') : cursor();
 const bus = connect();
 const now = time();
@@ -82,6 +83,11 @@ let link = {};
 if (wwan?.l3_device)
 	link = call('iwinfo', 'info', { device: wwan.l3_device });
 const wifi_up = online(wwan) && link.ssid != null && link.ssid != '';
+const wifi_enabled = cfg('enabled', '0') == '1';
+// 看门狗在对方长时间不在时会把 STA 停掉（停靠），让同频段的本机 Wi-Fi 恢复。
+const wifi_parked = wifi_enabled && sta.disabled == '1';
+// STA 开着却没连上时，OpenWrt 会暂停同频段的本机 AP。
+const sta_radio = wifi_enabled && !wifi_parked && !wifi_up ? sta.device : null;
 
 // 本机各频段：AP 接口与实际信道
 const wstatus = call('network.wireless', 'status');
@@ -97,13 +103,18 @@ uci.foreach('wireless', 'wifi-device', (r) => {
 	for (let i in wstatus?.[name]?.interfaces ?? [])
 		if (ap_section && i.section == ap_section['.name'] && i.ifname)
 			ap = i.ifname;
-	const info = ap ? call('iwinfo', 'info', { device: ap }) : {};
+	// 网卡不在时 iwinfo 可能给出假信道，只在网卡存在时信它。
+	const ap_up = !!(ap && access(sysnet + '/' + ap));
+	const info = ap_up ? call('iwinfo', 'info', { device: ap }) : {};
 	push(radios, {
 		name,
 		band: r.band ?? '',
 		channel: `${info.channel ?? r.channel ?? ''}`,
 		ap,
 		ap_ssid: ap_section?.ssid ?? '',
+		has_ap: ap_section != null,
+		ap_up,
+		ap_paused: ap_up && sta_radio == name,
 		disabled: r.disabled == '1'
 	});
 });
@@ -141,7 +152,8 @@ print(sprintf('%J\n', {
 		dialing: !!cellular?.pending
 	},
 	wifi: {
-		enabled: cfg('enabled', '0') == '1',
+		enabled: wifi_enabled,
+		parked: wifi_parked,
 		ssid: sta.ssid ?? '',
 		radio: sta.device ?? cfg('radio', ''),
 		encryption: sta.encryption ?? '',

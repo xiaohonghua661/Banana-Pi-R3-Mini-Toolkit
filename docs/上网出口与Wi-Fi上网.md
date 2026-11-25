@@ -39,6 +39,10 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
   - 保存和停用时，该频段 AP 断开十几秒。
   - 从一个频段换到另一个频段时，原来那个频段也会恢复原信道并重配，同样断开十几秒。页面的提示和确认框会写明两个频段。
   - 第一次启用时，会把 `wwan` 加进防火墙 wan 区并重载一次防火墙。这一下对已有连接的影响没有实测过。
+- **STA 没连上时，同频段的本机 AP 会暂停。** 这是 OpenWrt 的设计：wpa_supplicant 在 STA 处于断开、扫描、认证状态时，会通知 hostapd 停掉同一射频上的 AP，连上后再恢复（`/usr/share/hostap/wpa_supplicant.uc` 的 `iface_hostapd_notify`）。所以手机热点一关，本机这个频段的 Wi-Fi 也跟着停。
+  - 看门狗在约 2 分钟后「停靠」，让本机 AP 恢复，见下一节。
+  - 保存前的提示和确认框都写明了这一点；建议 Wi-Fi 上网用连接设备少的那个频段。
+  - 页面顶部会标出「暂停中」的本机 Wi-Fi。
 - 能跟过去的信道：
   - 2.4 GHz：1–13。
   - 5 GHz：只有 36、40、44、48、149、153、157、161。本机 5 GHz 用 HE80、不用 DFS；52–144 要先做雷达检测，165 只能用 20 MHz。
@@ -56,12 +60,17 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
 
 ## 自动重连（看门狗）
 
-`/etc/init.d/r3mini-hotspot` 常驻 `/usr/sbin/r3mini-hotspot-watchdog`，只在 Wi-Fi 上网启用时工作：
+`/etc/init.d/r3mini-hotspot` 常驻 `/usr/sbin/r3mini-hotspot-watchdog`，只在 Wi-Fi 上网启用时工作。它有两种状态：
 
-- 每 `check_interval` 秒（默认 20）检查一次，连续 `failure_limit` 次（默认 3）没连上就 `ifup wwan`。
-- 重连 3 轮仍无效，且距上次搜索超过冷却时间，就用 `iwinfo scan` 搜一次（不停 AP）。对方换了信道时，把本机该频段改过去并 `wifi reconf`。
-  - 冷却时间从 `cooldown`（默认 180 秒）起，每次翻倍，最多 1800 秒。
+- **连接中**（STA 开着）：
+  - 每 `check_interval` 秒（默认 20）检查一次，连续 `failure_limit` 次（默认 3）没连上就 `ifup wwan`，算一轮。
+  - 连续 2 轮（约 2 分钟）还没连上，就**停靠**：把 `wireless.r3mini_phone_sta.disabled` 设成 1（`r3mini_hotspot.main.enabled` 仍是 1），`ifdown wwan`，重配这个频段，本机 AP 随之恢复。
+- **停靠中**（`enabled=1` 而 STA `disabled=1`；页面显示「等对方出现」）：
+  - 每隔一段时间用本机 AP 做一次 `iwinfo scan`（不停 AP）。搜到对方，就把本机这个频段改到对方信道、打开 STA、重配并 `ifup wwan`。
+  - 间隔从 60 秒起。打开后 10 分钟内又停靠（搜得到却连不上，多半是密码或信号问题），间隔翻倍，最长 1800 秒；连上后恢复 60 秒。
+- 连上之后对方换信道，由 wpa_supplicant 的信道切换（CSA）带着本机 AP 一起换，看门狗不管。
 - 页面的保存任务在跑时，看门狗不动手。它和页面共用写锁 `/var/lock/r3mini-hotspot-write`。
+- 每次重配前都会检查 `/tmp` 权限，重配后都会核对本机 AP 是否起来；没起来就再重配一次。见「本机 Wi-Fi 起不来」一节。
 
 ## 受管文件与设置
 
@@ -84,7 +93,8 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
 | `radio` | 用哪个频段（`radio0` / `radio1`） |
 | `interface` | 固定为 `wwan` |
 | `preferred_egress` | 优先出口 |
-| `check_interval`、`failure_limit`、`cooldown` | 看门狗参数，默认 20、3、180 |
+| `check_interval`、`failure_limit` | 看门狗参数，默认 20、3 |
+| `cooldown` | 旧版看门狗用的，现在不用；页面状态里仍会读出来 |
 | `original_channel_radio0`、`original_channel_radio1` | 启用前该频段的信道，停用或换频段时恢复。旧版的 `original_channel` 只记 5 GHz，第一次保存时自动改成 `original_channel_radio1` |
 | `target_channel` | 当前跟随的信道 |
 
@@ -95,6 +105,34 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
 - **锁可回收**：锁文件里记 PID，持有进程死了，下次自动回收；旧版留下的 `mkdir` 目录锁也会被清掉。
 - **失败还原**：写配置或重配失败时，恢复 network、wireless、firewall、r3mini_hotspot 四份配置，并重配受影响的频段。
 - **防火墙**：只在第一次把 `wwan` 加进 wan 区时重载。
+- **重配前修 `/tmp` 权限、重配后核对本机 AP**：
+  - 本机 AP 30 秒内没起来（看 `/sys/class/net/<AP 网卡>` 在不在），保存任务会恢复保存前的设置再等一次。
+  - 两次都没起来，任务失败，并在消息里写出手工恢复命令。
+  - 停用任务不回滚，只再重配一次。
+
+## 本机 Wi-Fi 起不来（/tmp 权限）
+
+2026-11-22 和 11-25 两次，本机两个 AP 在重配无线后消失，`wifi down/up` 和重启 wpad 都恢复不了。原因是 `/tmp` 的权限被改成了 `drwx------`，OpenWrt 默认是 `drwxrwxrwt`（1777）：
+
+- `/var` 指向 `/tmp`，hostapd 和 wpa_supplicant 以 `network` 用户（uid 101）运行，没有越过文件权限的能力，于是进不了 `/tmp`。
+- 开机时已经打开的东西照常工作。一旦重配，netifd 生成的新配置（`/var/run/hostapd-phyN.conf`、`/var/run/wpa_supplicant-*.conf`）它们读不到：
+  - hostapd 加载配置失败，就把这个射频上的 AP 删掉，日志只有 `Remove interface 'phyN'`，没有 `Restart interface`；
+  - netifd 随后执行 `iw dev phyN-ap0 set txpower` 时报 `command failed: No such device (-19)`；
+  - wpa_supplicant 报 `Failed to open config file '/var/run/wpa_supplicant-phy0-sta0.conf', error: Permission denied`。
+- 是谁把 `/tmp` 改成 0700 的，没有查实。同一时期 `/etc/openclash` 也是 0700（修改时间 11-24 13:50）。SOCKS5 模块第 3 版的注释写着，它只把「本模块自己的目录」收成 0700，说明以前可能把写临时文件的其他目录也收过。
+
+不重启的恢复办法（2026-11-25 18:06 实测有效，两个 AP 都回来了）：
+
+```sh
+chmod 1777 /tmp
+ubus call network.wireless down '{"device":"radio1"}'; sleep 2; ubus call network.wireless up '{"device":"radio1"}'
+ubus call network.wireless down '{"device":"radio0"}'; sleep 2; ubus call network.wireless up '{"device":"radio0"}'
+iw dev
+```
+
+`iw dev` 里出现 `phy0-ap0`、`phy1-ap0` 即为恢复。这样做不会触发 `network reload`，也不碰 OpenClash。
+
+本模块的防护：保存、停用、看门狗停靠和重连，每次重配前都检查 `/tmp` 与 `/tmp/run` 对其他用户能否进入。不能进入就恢复成 1777 / 755，写一条 `logger` 日志，并在任务结果里注明。页面顶部会列出「现在没有在运行」的本机 Wi-Fi。
 
 ## 部署、测试、回滚
 
@@ -168,7 +206,13 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
   - 只有把蜂窝接口改成 `modemmanager` 协议时，才要恢复 ModemManager：`/etc/init.d/modemmanager enable && /etc/init.d/modemmanager start`。
   - 不要让 ModemManager 和 quectel 协议同时管这块模块。11-25 实测 ModemManager 会占住 `ttyUSB2`，「恢复拨号」查 SIM 卡时只能改用 `ttyUSB3`，查不出结果就照常恢复。
 
-下面几项没有在真机上验证，因为都会断 Wi-Fi，需要用户在场并同意：实际连接一个 Wi-Fi、2.4/5 GHz 互换、停用后恢复信道、看门狗在真机上跟随信道、有 SIM 卡时恢复拨号。
+2026-11-25 17:59 的故障：用户在页面上保存了 2.4 GHz 的 Wi-Fi 上网、又停用，本机两个 AP 都没再起来，原因见「本机 Wi-Fi 起不来」一节。18:06 按该节命令恢复，没有重启。18:26 部署了防护版：
+
+- 页面和后端：重配前修 `/tmp` 权限、重配后核对本机 AP；看门狗停靠；页面顶部的本机 Wi-Fi 告警；表单与路由器状态同步；字号 14 px。
+- 设备端文件备份：`/root/r3mini-hotspot-backup-20261125182636`。
+- 部署后两个本机 AP 都在，`status` 里 `ap_up` 都是 true，信道 12、48。
+
+下面几项没有在真机上验证，因为都会断 Wi-Fi，需要用户在场并同意：实际连接一个 Wi-Fi、2.4/5 GHz 互换、停用后恢复信道、看门狗真机停靠和重连、有 SIM 卡时恢复拨号。
 
 ## 失败处置
 
@@ -186,8 +230,7 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 | `另一项出口或 Wi-Fi 设置正在执行，请稍后再试` | 各写命令 | 写锁 20 秒内没拿到（切换出口、蜂窝开关、看门狗跟信道），稍后重试 |
 | `频段无效`、`请填写 Wi-Fi 名称`、`Wi-Fi 名称不能超过 32 字节`、`Wi-Fi 名称不能包含换行`、`密码不能包含换行` | save / scan | 输入不合法，改正后重试 |
 | `密码临时文件无效`、`密码临时文件不存在`、`密码临时文件读取失败` | save | 页面传密码失败，刷新页面重试。命令行调用时用 `-`，或用合规的 `/tmp/r3mini-hotspot-key-<16 位十六进制>` 文件 |
-| `这个频段的本机 Wi-Fi 没有运行，无法搜索` | scan / 任务 | 该频段的本机 AP 被关了或被禁用，先到「网络 → 无线」打开它 |
-| `搜索失败，请稍后重试` | scan | `iwinfo scan` 出错，稍后重试 |
+| `这个频段的本机 Wi-Fi 没有运行，无法搜索` | 任务 failed | 保存时借本机 AP 搜索，但它不在。先恢复本机 AP（见「本机 Wi-Fi 起不来」） |
 | `没搜到「X」；请确认它开着、在这个频段，并靠近路由器` | 任务 failed | 对方没开、频段选错，或者是隐藏网络。换频段或靠近后重试 |
 | `「X」在信道 N，本机 Wi-Fi 不能跟过去（…只支持…）` | 任务 failed | 在手机上把热点改到受支持的信道或频段后重试 |
 | `这个 Wi-Fi 用企业认证（802.1X），不支持`、`这个 Wi-Fi 用 WEP 或未知加密，不支持` | 任务 failed | 不支持，换一个网络 |
@@ -196,7 +239,12 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 | `…；已恢复保存前的设置` | 任务 failed | 写配置或重配失败，四份配置已还原。到「网络 → 无线」看该频段是否正常，再重试 |
 | `任务中断；配置已尽量恢复，请检查后重试` | 任务 failed | 任务被信号中断。到「网络 → 无线」核对 STA 和信道后，重新保存或停用 |
 | `任务进程意外退出；请检查 Wi-Fi 设置后重试` | status | 任务被强杀，例如路由器重启，配置可能停在中途。核对 STA 和信道后，重新保存或停用 |
-| `已保存，但 45 秒内没连上「X」…` | 任务 **done** | 页面显示为「完成」，设置已生效，只是还没连上。常见原因是密码不对、信号弱或对方不分配地址；看门狗每 20 秒重试 |
+| `已保存，但 45 秒内没连上「X」…` | 任务 **done** | 页面显示为「完成」，设置已生效，只是还没连上。常见原因是密码不对、信号弱或对方不分配地址。没连上期间本机这个频段的 Wi-Fi 暂停，约 2 分钟后看门狗停靠让它恢复 |
+| `本机 X Wi-Fi 重配后没能起来，已恢复保存前的设置，本机 Wi-Fi 已回来` | 任务 failed | 新设置让本机 AP 起不来，已自动退回。查 `logread \| grep -E "hostapd\|netifd"` 后再试 |
+| `本机 X Wi-Fi 重配后起不来，恢复原设置后也没起来…`、`已停用 Wi-Fi 上网，但本机 X Wi-Fi 没能起来…` | 任务 failed | 按「本机 Wi-Fi 起不来」一节的命令恢复；还不行才重启路由器（先问用户） |
+| `无法恢复 /tmp 权限，无线服务会读不到配置` | 任务 failed | `chmod 1777 /tmp` 本身失败，已还原，没有重配。手工检查 `/tmp` |
+| `本机 X Wi-Fi 现在没有运行，没法借它搜索` | scan | 本机这个频段的 AP 网卡不在，先按「本机 Wi-Fi 起不来」一节恢复 |
+| `这次没搜成；如果 Wi-Fi 上网正用这个频段且还没连上…` | scan | 本机 AP 暂停中时搜不了。等连上、停靠后，或先停用 Wi-Fi 上网再搜 |
 | `有线 WAN 当前没有取得 IPv4 地址`、`蜂窝网络当前没有连上`、`Wi-Fi 上网当前没有连上` | prefer | 目标出口不在线，不能选 |
 | `保存出口选择失败；已恢复`、`切换后默认路由不对；已恢复原来的出口` | prefer | 已还原。查 `ip -4 route show default` 和 `ifstatus <接口>` |
 | `没有配置蜂窝网络接口`、`保存失败` | cellular | 前者是 network 里没有蜂窝协议的接口；后者是 uci 提交失败，查 overlay 空间 |

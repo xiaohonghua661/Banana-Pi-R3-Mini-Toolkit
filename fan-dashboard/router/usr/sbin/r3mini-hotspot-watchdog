@@ -1,71 +1,125 @@
 #!/bin/sh
-# Wi-Fi 上网自动重连：每 check_interval 秒检查一次。
-#   连续 failure_limit 次没连上：ifup wwan
-#   连续 3 轮重连无效、且过了冷却时间：用本机 AP 搜索（不停 AP），对方换了信道就让本机该频段跟过去
+# Wi-Fi 上网自动重连。
+#
+# OpenWrt 的设计：同一个频段上 STA 没连上（断开、扫描、认证中）时，hostapd 会暂停这个频段的本机 AP。
+# 所以对方（例如手机热点）一直不在，本机这个频段的 Wi-Fi 也会一直停着。看门狗因此分两种状态：
+#
+#   连接中  STA 开着。每 check_interval 秒查一次；连续 failure_limit 次没连上就 ifup wwan（算一轮）。
+#           连续 PARK_ROUNDS 轮（默认约 2 分钟）还没连上，就「停靠」：把 STA 先停掉、重配这个频段，
+#           本机 Wi-Fi 随之恢复。
+#   停靠中  r3mini_hotspot.enabled=1 而 wireless.r3mini_phone_sta.disabled=1。借本机 AP 搜索（不停 AP），
+#           搜到对方就把信道调过去、重新打开 STA。打开后又连不上会再次停靠，并把下次搜索的间隔加倍
+#           （60 秒起，最多 1800 秒）；连上后恢复 60 秒。
+#
 # 与页面共用 r3mini-hotspot-web 的函数和写锁；页面的保存任务在跑时不动手。
 
 TAG='r3mini-hotspot'
 R3MINI_HOTSPOT_LIB=1
 . "${R3HS_WEB:-/usr/sbin/r3mini-hotspot-web}"
 
-enabled() { [ "$(cfg enabled)" = 1 ]; }
+PARK_ROUNDS="${R3HS_PARK_ROUNDS:-2}"
+PROBE_MIN=60
+PROBE_MAX=1800
 
-follow_channel() {
+enabled() { [ "$(cfg enabled)" = 1 ]; }
+parked() { enabled && [ "$(uci -q get "wireless.$STA.disabled")" = 1 ]; }
+sta_radio() { uci -q get "wireless.$STA.device"; }
+
+reconf_radio() {
+	ensure_daemon_access
+	wifi reconf "$1" >/dev/null 2>&1 || logger -t "$TAG" "wifi reconf $1 failed"
+	wait_aps "$1" >/dev/null || {
+		logger -t "$TAG" "local AP on $1 missing after reconf; retrying once"
+		ensure_daemon_access
+		wifi reconf "$1" >/dev/null 2>&1
+	}
+}
+
+park() {
+	local radio
+	radio="$(sta_radio)"
+	[ -n "$radio" ] || return 0
+	take_lock "$WRITE_LOCK" || return 0
+	if uci set "wireless.$STA.disabled=1" && uci commit wireless; then
+		logger -t "$TAG" "wifi uplink down for $PARK_ROUNDS rounds; parking STA so the local $radio AP comes back"
+		ifdown wwan >/dev/null 2>&1
+		reconf_radio "$radio"
+	else
+		uci -q revert wireless
+	fi
+	drop_lock "$WRITE_LOCK"
+	parked_at="$(date +%s)"
+	next_probe=$((parked_at + probe_every))
+}
+
+# 停靠中：搜到对方才重新打开 STA；对方换了信道就把本机这个频段一起调过去。
+probe() {
 	local radio ssid band found channel
-	radio="$(uci -q get "wireless.$STA.device")"
+	radio="$(sta_radio)"
 	ssid="$(uci -q get "wireless.$STA.ssid")"
 	[ -n "$radio" ] && [ -n "$ssid" ] || return 0
 	band="$(radio_band "$radio")"
-	found="$(find_network "$radio" "$ssid")" || { logger -t "$TAG" "wifi uplink not visible on $radio"; return 0; }
+	found="$(find_network "$radio" "$ssid")" || return 0
 	channel="${found% *}"
-	[ "$channel" != "$(uci -q get "wireless.$radio.channel")" ] || { logger -t "$TAG" "wifi uplink visible, channel unchanged"; return 0; }
-	channel_supported "$band" "$channel" || { logger -t "$TAG" "wifi uplink moved to unsupported channel $channel"; return 0; }
+	channel_supported "$band" "$channel" || { logger -t "$TAG" "wifi uplink visible on unsupported channel $channel; staying parked"; return 0; }
 	take_lock "$WRITE_LOCK" || return 0
-	logger -t "$TAG" "wifi uplink moved to channel $channel; aligning $radio"
-	if uci set "wireless.$radio.channel=$channel" && uci commit wireless; then
+	logger -t "$TAG" "wifi uplink visible on channel $channel; unparking STA on $radio"
+	if uci set "wireless.$radio.channel=$channel" && uci set "wireless.$STA.disabled=0" && uci commit wireless; then
 		uci set "$CONFIG.target_channel=$channel" && uci commit r3mini_hotspot
-		wifi reconf "$radio" >/dev/null 2>&1 || logger -t "$TAG" "wifi reconf $radio failed"
+		reconf_radio "$radio"
+		ifup wwan >/dev/null 2>&1
+		unparked_at="$(date +%s)"
 	else
 		uci -q revert wireless
-		logger -t "$TAG" "channel update failed"
 	fi
 	drop_lock "$WRITE_LOCK"
 }
 
 interval="$(cfg check_interval)"; is_uint "$interval" && [ "$interval" -ge 5 ] && [ "$interval" -le 3600 ] || interval=20
 limit="$(cfg failure_limit)"; is_uint "$limit" && [ "$limit" -ge 1 ] && [ "$limit" -le 20 ] || limit=3
-cooldown="$(cfg cooldown)"; is_uint "$cooldown" && [ "$cooldown" -ge 30 ] && [ "$cooldown" -le 3600 ] || cooldown=180
 
 failures=0
 rounds=0
-last_follow=0
-backoff="$cooldown"
+probe_every="$PROBE_MIN"
+next_probe=0
+unparked_at=0
 
 tick() {
+	local now
 	if ! enabled || lock_owner_alive "$JOB_LOCK"; then
 		failures=0
 		rounds=0
-	elif wwan_ready; then
+		return 0
+	fi
+	now="$(date +%s)"
+	if parked; then
+		[ "$now" -ge "$next_probe" ] || return 0
+		next_probe=$((now + probe_every))
+		probe
+		return 0
+	fi
+	if wwan_ready; then
 		failures=0
 		rounds=0
-		backoff="$cooldown"
-	else
-		failures=$((failures + 1))
-		if [ "$failures" -ge "$limit" ]; then
-			failures=0
-			rounds=$((rounds + 1))
-			logger -t "$TAG" "wifi uplink down; ifup wwan (round $rounds)"
-			ifup wwan >/dev/null 2>&1
-			now="$(date +%s)"
-			if [ "$rounds" -ge 3 ] && [ $((now - last_follow)) -ge "$backoff" ]; then
-				follow_channel
-				last_follow="$now"
-				rounds=0
-				backoff=$((backoff * 2))
-				[ "$backoff" -le 1800 ] || backoff=1800
-			fi
-		fi
+		probe_every="$PROBE_MIN"
+		return 0
 	fi
+	failures=$((failures + 1))
+	[ "$failures" -ge "$limit" ] || return 0
+	failures=0
+	rounds=$((rounds + 1))
+	if [ "$rounds" -ge "$PARK_ROUNDS" ]; then
+		rounds=0
+		# 刚从停靠打开又连不上：说明对方搜得到却连不上（密码、信号），拉长下次搜索间隔。
+		if [ "$unparked_at" -gt 0 ] && [ $((now - unparked_at)) -lt 600 ]; then
+			probe_every=$((probe_every * 2))
+			[ "$probe_every" -le "$PROBE_MAX" ] || probe_every="$PROBE_MAX"
+		fi
+		park
+		return 0
+	fi
+	logger -t "$TAG" "wifi uplink down; ifup wwan (round $rounds)"
+	ifup wwan >/dev/null 2>&1
 }
 
 [ "${R3HS_WATCHDOG_LIB:-0}" = 1 ] && return 0 2>/dev/null

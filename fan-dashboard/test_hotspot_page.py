@@ -76,6 +76,8 @@ class Page:
         self.fixture = None          # 设了就用假状态
         self.fail_status = False     # True 时状态读取返回错误
         self.fix_scan = False
+        self.scan_error = None
+        self.fast_disable = False
         self.work = None
 
     # ---------- 断言 ----------
@@ -112,6 +114,8 @@ class Page:
                 st = st()
             return {"code": 0, "stdout": json.dumps(st, ensure_ascii=False)}
         if cmd == "scan":
+            if self.scan_error:
+                return {"code": 1, "stdout": "", "stderr": self.scan_error}
             if self.fix_scan:
                 return {"code": 0, "stdout": json.dumps(FIX_SCAN, ensure_ascii=False)}
             return self.helper(argv)
@@ -120,6 +124,11 @@ class Page:
         st = copy.deepcopy(self.fixture if isinstance(self.fixture, dict) else self.base)
         if cmd == "save":
             st["job"] = {"id": "t1", "action": "save", "state": "running", "step": "scan", "message": f"正在搜索「{argv[2]}」…", "started": 0, "updated": 0}
+        elif cmd == "disable" and self.fast_disable:
+            # 任务在第一次回状态之前就做完了（11-25 截图里状态自相矛盾的那种时序）
+            st["wifi"].update({"enabled": False, "parked": False, "up": False})
+            st["job"] = {"id": "t3", "action": "disable", "state": "done", "step": "reconf", "message": "已停用 Wi-Fi 上网", "started": 0, "updated": 0}
+            self.fixture = st
         elif cmd == "disable":
             st["job"] = {"id": "t2", "action": "disable", "state": "running", "step": "write", "message": "正在停用 Wi-Fi 上网…", "started": 0, "updated": 0}
         elif cmd == "prefer":
@@ -215,6 +224,9 @@ def run_page(t: Page, sid: str) -> None:
             q("#r3x-enabled").check()
         page.wait_for_timeout(200)
         t.check("enable_unlocks_fields", not q("#r3x-ssid").is_disabled() and not q("#r3x-radio").is_disabled())
+        # 下面的假搜索结果都是 5 GHz 信道：先选 5 GHz，名称用设备上已保存的，避免受上次保存的频段影响
+        radio5 = next(r["name"] for r in t.base["radios"] if r["band"] == "5g")
+        q("#r3x-radio").select_option(radio5)
         t.check("warn_mentions_outage", "断开十几秒" in q(".r3x-warn").inner_text())
         q(".r3x-row .cbi-button-action").click()
         page.wait_for_function("() => !document.querySelector('.r3x .r3x-list').hidden", timeout=20000)
@@ -315,6 +327,64 @@ def run_page(t: Page, sid: str) -> None:
         t.fail_status = False
         page.wait_for_timeout(5500)
         t.check("recovers_after_failure", "更新于" in q(".r3x-age").inner_text())
+
+        # 11-25 截图：停用任务比第一次回状态还快结束，表单不能停在「已启用、设置没有改动」
+        enabled = copy.deepcopy(t.base)
+        enabled["wifi"].update({"enabled": True, "parked": False, "ssid": "nl", "radio": "radio0", "up": False, "key_set": True})
+        enabled["job"] = None
+        t.fixture = enabled
+        page.wait_for_timeout(5600)
+        t.check("form_shows_enabled", q("#r3x-enabled").is_checked())
+        t.fast_disable = True
+        q("#r3x-enabled").uncheck()
+        page.locator(".r3x .r3x-actions .cbi-button-apply").click()
+        page.wait_for_selector(".modal .cbi-button-apply", timeout=5000)
+        page.locator(".modal .cbi-button-apply").click()
+        page.wait_for_timeout(1500)
+        q(".r3x-actions .cbi-button-reset").click()
+        page.wait_for_timeout(300)
+        t.check("fast_job_form_consistent", not q("#r3x-enabled").is_checked() and "未启用" in q(".r3x-exit[data-kind=hotspot]").inner_text(),
+                f"checked={q('#r3x-enabled').is_checked()}")
+        t.fast_disable = False
+
+        # 本机 AP 没在运行 / 暂停中 / 停靠中
+        st = copy.deepcopy(t.base)
+        for r in st["radios"]:
+            r.update({"has_ap": True, "ap_up": True, "ap_paused": False})
+        st["radios"][0]["ap_up"] = False
+        st["radios"][1]["ap_paused"] = True
+        st["wifi"].update({"enabled": True, "parked": False, "ssid": "nl", "radio": st["radios"][1]["name"], "up": False})
+        st["job"] = None
+        t.fixture = st
+        page.wait_for_timeout(5600)
+        alert = q(".r3x-alert").inner_text() if q(".r3x-alert").is_visible() else ""
+        t.check("alert_ap_down", "没有在运行" in alert and "network.wireless down" in alert, repr(alert))
+        t.check("alert_ap_paused", "暂停中" in alert, alert[:120])
+        labels = page.eval_on_selector_all(".r3x #r3x-radio option", "els => els.map(e => e.textContent)")
+        t.check("radio_label_ap_down", "没有在运行" in labels[0] and "信道" not in labels[0], str(labels))
+        st2 = copy.deepcopy(st)
+        st2["wifi"]["parked"] = True
+        st2["radios"][1]["ap_paused"] = False
+        t.fixture = st2
+        page.wait_for_timeout(5600)
+        t.check("parked_card", "等对方出现" in q(".r3x-exit[data-kind=hotspot]").inner_text())
+        t.scan_error = "本机 2.4 GHz Wi-Fi 现在没有运行，没法借它搜索"
+        if not q("#r3x-enabled").is_checked():
+            q("#r3x-enabled").check()
+        q("#r3x-radio").select_option(st["radios"][0]["name"])
+        q(".r3x-row .cbi-button-action").click()
+        page.wait_for_timeout(800)
+        info = q(".r3x-field .r3x-hint").nth(1).inner_text()
+        t.check("scan_error_not_duplicated", info == t.scan_error, info)
+        t.scan_error = None
+        t.check("save_confirm_mentions_pause", "暂停" in q(".r3x-warn").inner_text() or q(".r3x-warn").is_hidden())
+        t.fixture = copy.deepcopy(t.base)
+        page.wait_for_timeout(5600)
+        q(".r3x-actions .cbi-button-reset").click()
+        small_wifi = page.evaluate("""() => [...document.querySelectorAll('.r3x *')].filter(e => e.offsetParent !== null
+            && [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.includes('Wi-Fi'))
+            && parseFloat(getComputedStyle(e).fontSize) < 14).map(e => e.className || e.tagName)""")
+        t.check("wifi_text_at_least_14px", not small_wifi, str(small_wifi[:5]))
 
         # 布局
         for w in (1440, 1024, 768, 600, 390, 320):

@@ -7,9 +7,11 @@
 WEB="$1"; WD="$2"; UC="$3"
 T="$(mktemp -d /tmp/r3hs-test.XXXXXX)" || exit 2
 SIM="$T/sim"
-mkdir -p "$T/conf" "$T/state" "$T/lock" "$T/initd" "$T/bin" "$SIM"
+mkdir -p "$T/conf" "$T/state" "$T/lock" "$T/initd" "$T/bin" "$SIM" "$T/sysnet" "$T/fakeroot/tmp/run"
 export R3HS_CONF_DIR="$T/conf" R3HS_STATE_DIR="$T/state" R3HS_LOCK_DIR="$T/lock" R3HS_INITD="$T/initd"
 export R3HS_PATH="$T/bin" R3HS_STATUS_UC="$UC" R3HS_CONNECT_WAIT=3 R3HS_TTYS='' R3HS_SIM="$SIM"
+# 本机 AP 网卡放在 $T/sysnet；「/tmp」换成 $T/fakeroot/tmp，用来模拟它被改成 0700。
+export R3HS_SYSNET="$T/sysnet" R3HS_AP_WAIT=4 R3HS_DAEMON_DIRS="$T/fakeroot/tmp:1777 $T/fakeroot/tmp/run:755"
 trap 'rm -rf "$T"; rm -f /tmp/r3mini-hotspot-key-r3hstest*' 0
 
 PASS=0; FAIL=0
@@ -40,7 +42,9 @@ calls() { cat "$SIM/calls" 2>/dev/null | tr '\n' ';'; }
 reset_world() {
 	rm -rf "$T/conf"/* "$T/conf/.uci" "$T/state"/* "$T/lock"/* "$SIM"/state_*
 	: > "$SIM/calls"
-	rm -f "$SIM/wwan_up" "$SIM/connect_ok" "$SIM/fail_reconf" "$SIM/scan_delay"
+	rm -f "$SIM/wwan_up" "$SIM/connect_ok" "$SIM/fail_reconf" "$SIM/scan_delay" "$SIM/ap_fail" "$SIM/ap_fail_once"
+	touch "$T/sysnet/phy0-ap0" "$T/sysnet/phy1-ap0"
+	chmod 1777 "$T/fakeroot/tmp"; chmod 755 "$T/fakeroot/tmp/run"
 	cat > "$T/conf/network" <<'EOF'
 config interface 'lan'
 	option device 'br-lan'
@@ -147,8 +151,21 @@ esac
 EOF
 cat > "$T/bin/wifi" <<'EOF'
 #!/bin/sh
+# 重配一个频段：本机 AP 网卡先消失再重建。像真机那样，「/tmp」别人进不去、或设了 ap_fail 时就建不起来。
 echo "wifi $*" >> "$R3HS_SIM/calls"
 [ "$1" = reconf ] && [ -f "$R3HS_SIM/fail_reconf" ] && exit 1
+if [ "$1" = reconf ]; then
+	case "$2" in radio0) ap=phy0-ap0 ;; radio1) ap=phy1-ap0 ;; *) ap='' ;; esac
+	if [ -n "$ap" ]; then
+		rm -f "$R3HS_SYSNET/$ap"
+		perm="$(ls -ld "${R3HS_DAEMON_DIRS%%:*}" | cut -c10)"
+		if [ -f "$R3HS_SIM/ap_fail_once" ]; then
+			rm -f "$R3HS_SIM/ap_fail_once"
+		elif [ ! -f "$R3HS_SIM/ap_fail" ] && { [ "$perm" = t ] || [ "$perm" = x ]; }; then
+			touch "$R3HS_SYSNET/$ap"
+		fi
+	fi
+fi
 [ -f "$R3HS_SIM/connect_ok" ] && touch "$R3HS_SIM/wwan_up"
 exit 0
 EOF
@@ -402,31 +419,112 @@ contains cellular_on_ifup "$(calls)" 'ifup RM500CNV'
 out="$(web status)"
 expect status_cell_auto "$(printf '%s' "$out" | jsonfilter -e '@.cellular.auto')" true
 
-echo "== 看门狗：对方换信道时跟过去"
+echo "== /tmp 被改成 0700：重配前恢复，本机 AP 照常起来"
+reset_world
+chmod 700 "$T/fakeroot/tmp"
+touch "$SIM/connect_ok"
+k="$(keyfile 'secret-pass-1')"
+web save radio1 Phone5G "$k" >/dev/null; wait_job
+expect tmp_fix_job_done "$(job state)" done
+expect tmp_fix_mode "$(ls -ld "$T/fakeroot/tmp" | cut -c1-10)" drwxrwxrwt
+contains tmp_fix_reported "$(job message)" '已恢复'
+[ -e "$T/sysnet/phy1-ap0" ] && ok tmp_fix_ap_up || bad tmp_fix_ap_up
+
+echo "== 重配后本机 AP 没起来：回滚"
+reset_world
+before="$(conf_sum)"
+touch "$SIM/ap_fail_once"
+k="$(keyfile 'secret-pass-1')"
+web save radio1 Phone5G "$k" >/dev/null; wait_job
+expect ap_once_failed "$(job state)" failed
+contains ap_once_message "$(job message)" '已恢复保存前的设置，本机 Wi-Fi 已回来'
+expect ap_once_config_restored "$(conf_sum)" "$before"
+[ -e "$T/sysnet/phy1-ap0" ] && ok ap_once_ap_back || bad ap_once_ap_back
+reset_world
+touch "$SIM/ap_fail"
+k="$(keyfile 'secret-pass-1')"
+web save radio1 Phone5G "$k" >/dev/null; wait_job
+expect ap_hard_failed "$(job state)" failed
+contains ap_hard_message "$(job message)" '恢复原设置后也没起来'
+rm -f "$SIM/ap_fail"
+
+echo "== 停用后本机 AP 没起来：再重配一次"
+reset_world
+touch "$SIM/connect_ok"
+web save radio1 Open5G - >/dev/null; wait_job
+: > "$SIM/calls"
+touch "$SIM/ap_fail_once"
+web disable >/dev/null; wait_job
+expect disable_retry_done "$(job state)" done
+[ "$(grep -c 'wifi reconf radio1' "$SIM/calls")" -ge 2 ] && ok disable_retry_reconf || bad disable_retry_reconf "$(calls)"
+[ -e "$T/sysnet/phy1-ap0" ] && ok disable_retry_ap_up || bad disable_retry_ap_up
+
+echo "== 本机 AP 不在时搜索与状态"
+reset_world
+rm -f "$T/sysnet/phy0-ap0"
+out="$(web scan radio0 2>&1)" && bad scan_ap_down_rejected || contains scan_ap_down_rejected "$out" '没有运行'
+out="$(web status)"
+expect status_ap_down "$(printf '%s' "$out" | jsonfilter -e '@.radios[0].ap_up')" false
+expect status_ap_up "$(printf '%s' "$out" | jsonfilter -e '@.radios[1].ap_up')" true
+expect status_channel_from_uci "$(printf '%s' "$out" | jsonfilter -e '@.radios[0].channel')" 12
+
+echo "== 看门狗：连不上就停靠，让本机 AP 恢复"
 reset_world
 uci -c "$T/conf" -P "$T/conf/.uci" set wireless.r3mini_phone_sta.ssid=Phone5G
+uci -c "$T/conf" -P "$T/conf/.uci" set wireless.r3mini_phone_sta.disabled=0
 uci -c "$T/conf" -P "$T/conf/.uci" set wireless.radio1.channel=36
 uci -c "$T/conf" -P "$T/conf/.uci" commit wireless
-(
-	R3HS_WATCHDOG_LIB=1 R3HS_WEB="$WEB"
-	. "$WD"
-	follow_channel
-)
-expect watchdog_follows_channel "$(u wireless.radio1.channel)" 44
-expect watchdog_target_channel "$(u r3mini_hotspot.main.target_channel)" 44
-contains watchdog_reconf "$(calls)" 'wifi reconf radio1'
-case "$(calls)" in *'wifi down'*) bad watchdog_no_wifi_down ;; *) ok watchdog_no_wifi_down ;; esac
-: > "$SIM/calls"
 uci -c "$T/conf" -P "$T/conf/.uci" set r3mini_hotspot.main.enabled=1
 uci -c "$T/conf" -P "$T/conf/.uci" commit r3mini_hotspot
+out="$(web status)"
+expect status_ap_paused "$(printf '%s' "$out" | jsonfilter -e '@.radios[1].ap_paused')" true
 (
 	R3HS_WATCHDOG_LIB=1 R3HS_WEB="$WEB"
 	. "$WD"
 	tick; tick; tick
-	echo "failures=$failures rounds=$rounds" >> "$R3HS_SIM/calls"
+	echo "rounds=$rounds" >> "$R3HS_SIM/calls"
 )
 contains watchdog_ifup_after_limit "$(calls)" 'ifup wwan'
 contains watchdog_counts_round "$(calls)" 'rounds=1'
+expect watchdog_not_parked_yet "$(u wireless.r3mini_phone_sta.disabled)" 0
+: > "$SIM/calls"
+(
+	R3HS_WATCHDOG_LIB=1 R3HS_WEB="$WEB"
+	. "$WD"
+	tick; tick; tick; tick; tick; tick
+)
+expect watchdog_parks "$(u wireless.r3mini_phone_sta.disabled)" 1
+expect watchdog_park_keeps_enabled "$(u r3mini_hotspot.main.enabled)" 1
+contains watchdog_park_reconf "$(calls)" 'wifi reconf radio1'
+contains watchdog_park_ifdown "$(calls)" 'ifdown wwan'
+out="$(web status)"
+expect status_parked "$(printf '%s' "$out" | jsonfilter -e '@.wifi.parked')" true
+expect status_parked_ap_not_paused "$(printf '%s' "$out" | jsonfilter -e '@.radios[1].ap_paused')" false
+
+echo "== 看门狗：停靠中搜到对方就重连，并跟到对方信道"
+: > "$SIM/calls"
+(
+	R3HS_WATCHDOG_LIB=1 R3HS_WEB="$WEB"
+	. "$WD"
+	tick
+)
+expect watchdog_unparks "$(u wireless.r3mini_phone_sta.disabled)" 0
+expect watchdog_unpark_channel "$(u wireless.radio1.channel)" 44
+expect watchdog_unpark_target "$(u r3mini_hotspot.main.target_channel)" 44
+contains watchdog_unpark_reconf "$(calls)" 'wifi reconf radio1'
+contains watchdog_unpark_ifup "$(calls)" 'ifup wwan'
+case "$(calls)" in *'wifi down'*) bad watchdog_no_wifi_down ;; *) ok watchdog_no_wifi_down ;; esac
+: > "$SIM/calls"
+uci -c "$T/conf" -P "$T/conf/.uci" set wireless.r3mini_phone_sta.disabled=1
+uci -c "$T/conf" -P "$T/conf/.uci" set wireless.r3mini_phone_sta.ssid=Gone
+uci -c "$T/conf" -P "$T/conf/.uci" commit wireless
+(
+	R3HS_WATCHDOG_LIB=1 R3HS_WEB="$WEB"
+	. "$WD"
+	tick
+)
+expect watchdog_stays_parked "$(u wireless.r3mini_phone_sta.disabled)" 1
+case "$(calls)" in *'wifi reconf'*) bad watchdog_no_reconf_when_absent "$(calls)" ;; *) ok watchdog_no_reconf_when_absent ;; esac
 : > "$SIM/calls"
 sleep 300 &
 holder=$!

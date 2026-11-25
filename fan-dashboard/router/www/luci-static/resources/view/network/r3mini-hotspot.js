@@ -29,7 +29,7 @@ var CSS = [
 	'.r3x .r3x-exit.unknown{opacity:.55}',
 	'.r3x .r3x-exit-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:600}',
 	'.r3x .r3x-exit-detail{overflow-wrap:anywhere;font-variant-numeric:tabular-nums}',
-	'.r3x .r3x-exit-reason{font-size:13px;opacity:.8;overflow-wrap:anywhere}',
+	'.r3x .r3x-exit-reason{font-size:14px;opacity:.8;overflow-wrap:anywhere}',
 	'.r3x .r3x-exit .cbi-button{align-self:flex-start;margin-top:4px}',
 	'.r3x .r3x-pill{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}',
 	'.r3x .r3x-pill.active{background:rgba(46,125,50,.14);color:#2e7d32}',
@@ -40,15 +40,15 @@ var CSS = [
 	'.r3x .r3x-prefer>span{margin-right:4px;font-weight:600}',
 	'.r3x .r3x-prefer .cbi-button{flex:1 1 110px;min-height:40px;margin:0}',
 	'.r3x .r3x-prefer .cbi-button[aria-pressed="true"]{outline:2px solid #2e7d32;outline-offset:-2px;font-weight:700}',
-	'.r3x .r3x-note{margin:8px 0 0;font-size:13px;opacity:.8}',
-	'.r3x .r3x-msg{min-height:1.6em;margin:8px 0 0;font-size:13px}',
+	'.r3x .r3x-note{margin:8px 0 0;font-size:14px;opacity:.8}',
+	'.r3x .r3x-msg{min-height:1.6em;margin:8px 0 0;font-size:14px}',
 	'.r3x .r3x-msg.ok{color:#2e7d32}',
 	'.r3x .r3x-msg.err{color:#c62828}',
 	'.r3x .r3x-form{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;max-width:640px}',
 	'.r3x .r3x-field{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}',
 	'.r3x .r3x-field select,.r3x .r3x-field input{max-width:100%;min-width:0}',
 	'.r3x .r3x-field>label{font-weight:600}',
-	'.r3x .r3x-field .r3x-hint{font-size:13px;opacity:.75}',
+	'.r3x .r3x-field .r3x-hint{font-size:14px;opacity:.75}',
 	'.r3x .r3x-row{display:flex;flex-wrap:wrap;gap:8px}',
 	'.r3x .r3x-row>input,.r3x .r3x-row>select{flex:1 1 220px;min-width:0;width:auto}',
 	'.r3x .r3x-row>.cbi-button{flex:none;margin:0}',
@@ -59,15 +59,18 @@ var CSS = [
 	'.r3x .r3x-list li.picked{background:rgba(46,125,50,.1)}',
 	'.r3x .r3x-list li.no{opacity:.55}',
 	'.r3x .r3x-net{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}',
-	'.r3x .r3x-meta{font-size:13px;opacity:.8;font-variant-numeric:tabular-nums}',
+	'.r3x .r3x-meta{font-size:14px;opacity:.8;font-variant-numeric:tabular-nums}',
 	'.r3x .r3x-list .cbi-button{margin:0;min-height:32px}',
-	'.r3x .r3x-warn{margin:0;padding:8px 12px;border-left:3px solid #ed6c02;background:rgba(237,108,2,.08);font-size:13px}',
+	'.r3x .r3x-warn{margin:0;padding:8px 12px;border-left:3px solid #ed6c02;background:rgba(237,108,2,.08);font-size:14px}',
 	'.r3x .r3x-actions{display:flex;flex-wrap:wrap;gap:8px}',
 	'.r3x .r3x-actions .cbi-button{min-height:40px;margin:0}',
-	'.r3x .r3x-job{margin:0;padding:8px 12px;border-radius:6px;background:rgba(128,128,128,.1);font-size:13px}',
+	'.r3x .r3x-job{margin:0;padding:8px 12px;border-radius:6px;background:rgba(128,128,128,.1);font-size:14px}',
 	'.r3x .r3x-job.err{background:rgba(198,40,40,.1);color:#c62828}',
 	'.r3x .r3x-job.ok{background:rgba(46,125,50,.1);color:#2e7d32}',
-	'.r3x .r3x-foot{margin:12px 0 0;font-size:13px;opacity:.75}',
+	'.r3x .r3x-foot{margin:12px 0 0;font-size:14px;opacity:.75}',
+	'.r3x .r3x-alert{margin:0 0 16px;padding:10px 14px;border-left:4px solid #c62828;background:rgba(198,40,40,.08)}',
+	'.r3x .r3x-alert p{margin:0}',
+	'.r3x .r3x-alert p+p{margin-top:6px}',
 	'@media (prefers-color-scheme:dark){',
 	'.r3x .r3x-pill.active,.r3x .r3x-msg.ok,.r3x .r3x-job.ok{color:#81c784}',
 	'.r3x .r3x-pill.ready{color:#90caf9}',
@@ -173,7 +176,28 @@ function exitView(st, kind) {
 	var radio = (st.radios || []).filter(function(r) { return r.name === f.radio; })[0] || {};
 	var where = '「' + f.ssid + '」· ' + bandName(radio.band);
 	if (f.up) return { tone: active ? 'active' : 'ready', pill: active ? '正在使用' : '可用', detail: f.ip, reason: where + (f.signal != null ? ' · 信号' + signalName(f.signal) : '') };
-	return { tone: 'warn', pill: '未连上', detail: '', reason: where + ' 还没连上，后台每 ' + ((st.reconnect || {}).interval || 20) + ' 秒重试' };
+	if (f.parked) return { tone: 'warn', pill: '等对方出现', detail: '', reason: where + ' 一直连不上，已先停下 Wi-Fi 上网，让本机 ' + bandName(radio.band) + ' Wi-Fi 恢复；搜到对方后会自动重连' };
+	return { tone: 'warn', pill: '未连上', detail: '', reason: where + ' 还没连上。没连上期间本机 ' + bandName(radio.band) + ' Wi-Fi 会暂停，约 2 分钟仍连不上就先停下 Wi-Fi 上网让它恢复' };
+}
+
+// 本机 AP 的异常：没在运行（起不来），或因 Wi-Fi 上网没连上而暂停。
+function apAlerts(st) {
+	var out = [];
+	(st.radios || []).forEach(function(r) {
+		if (!r.has_ap || r.disabled) return;
+		var name = '本机 ' + bandName(r.band) + ' Wi-Fi「' + r.ap_ssid + '」';
+		if (!r.ap_up)
+			out.push(name + '现在没有在运行，用它连路由器的设备连不上。可以先停用再启用 Wi-Fi 上网让它重建；仍不行，从有线 LAN 用 SSH 执行 ubus call network.wireless down \'{"device":"' + r.name + '"}\'，再把 down 换成 up 执行一次。');
+		else if (r.ap_paused)
+			out.push(name + '暂停中：Wi-Fi 上网正用这个频段且还没连上。连上后自动恢复；约 2 分钟仍连不上，会先停下 Wi-Fi 上网让它恢复。');
+	});
+	return out;
+}
+
+function radioLabel(r) {
+	if (!r.has_ap) return bandName(r.band);
+	if (!r.ap_up) return bandName(r.band) + '（本机 Wi-Fi「' + r.ap_ssid + '」没有在运行）';
+	return bandName(r.band) + '（本机 Wi-Fi「' + r.ap_ssid + '」，信道 ' + r.channel + (r.ap_paused ? '，暂停中' : '') + '）';
 }
 
 function online(st, kind) {
@@ -197,7 +221,8 @@ return view.extend({
 		this.burstUntil = 0;
 		this.scan = null;
 		this.picked = null;
-		this.lastJobId = st.job && st.job.state !== 'running' ? st.job.id : null;
+		// 页面发起或看到正在跑的任务；它结束时把表单换成路由器上的新设置。
+		this.followJob = st.job && st.job.state === 'running' ? st.job.id : null;
 		this.saved = this.savedForm(st);
 
 		this.nodes = {};
@@ -243,11 +268,13 @@ return view.extend({
 		n.job = E('p', { 'class': 'r3x-job', 'role': 'status', 'aria-live': 'polite', 'hidden': '' }, '');
 		n.formMsg = E('p', { 'class': 'r3x-msg', 'aria-live': 'polite' }, '');
 		n.foot = E('p', { 'class': 'r3x-foot' }, '');
+		n.alert = E('div', { 'class': 'r3x-alert', 'role': 'alert', 'hidden': '' });
 
 		this.root = E('div', { 'class': 'r3x' }, [
 			E('style', {}, CSS),
 			E('h2', { 'name': 'content' }, '上网出口'),
 			E('p', { 'class': 'r3x-descr' }, '路由器从这三条线路里选一条上网：有线 WAN、5G 蜂窝、Wi-Fi 上网（连手机热点或附近任意 Wi-Fi）。'),
+			n.alert,
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '当前出口'),
 				E('p', { 'class': 'r3x-now' }, [n.now, n.nowDetail, n.age]),
@@ -327,7 +354,6 @@ return view.extend({
 
 	update: function(st) {
 		var n = this.nodes, self = this;
-		var prevJob = this.st && this.st.job;
 		this.st = st;
 		var e = st.egress || {};
 		n.now.textContent = e.kind === 'none' ? '没有可用的出口' : e.kind === 'other' ? '其他线路（' + e.device + '）' : '正在通过 ' + NAMES[e.kind] + ' 上网';
@@ -363,25 +389,32 @@ return view.extend({
 			+ (offline.length ? ' 现在不可选：' + offline.join('、') + '。' : '');
 
 		var r = st.reconnect || {};
-		n.foot.textContent = 'Wi-Fi 上网自动重连：每 ' + r.interval + ' 秒检查一次，连续 ' + r.limit + ' 次没连上就重连；重连 3 轮无效时重新搜索对方信道（最少隔 ' + r.cooldown + ' 秒）。';
+		n.foot.textContent = 'Wi-Fi 上网自动重连：每 ' + r.interval + ' 秒检查一次，连续 ' + r.limit + ' 次没连上就重连；约 2 分钟仍连不上，先停下 Wi-Fi 上网让本机 Wi-Fi 恢复，之后每隔 1 分钟起（最长 30 分钟）用本机 Wi-Fi 搜一次对方，搜到再重连。';
 
-		this.renderJob(st.job, prevJob);
+		var alerts = apAlerts(st);
+		n.alert.hidden = !alerts.length;
+		while (n.alert.firstChild) n.alert.removeChild(n.alert.firstChild);
+		alerts.forEach(function(text) { n.alert.appendChild(E('p', {}, [T(text)])); });
+		this.labelRadios(st);
+
+		// 表单的「已保存设置」始终跟路由器一致；用户没动过的字段才会跟着变。
+		this.saved = this.savedForm(st);
+		this.renderJob(st.job);
 		this.syncForm();
 	},
 
-	renderJob: function(job, prev) {
+	renderJob: function(job) {
 		var n = this.nodes;
 		if (!job) { n.job.hidden = true; return; }
 		n.job.hidden = false;
 		n.job.className = 'r3x-job' + (job.state === 'failed' ? ' err' : job.state === 'done' ? ' ok' : '');
 		n.job.textContent = (job.state === 'running' ? '进行中：' : job.state === 'failed' ? '失败：' : '完成：') + (job.message || '');
-		// 刚结束的任务：表单换成路由器上的新设置。
-		if (job.state !== 'running' && job.id !== this.lastJobId) {
-			this.lastJobId = job.id;
-			if (prev && prev.id === job.id) {
-				this.saved = this.savedForm(this.st);
-				if (job.state === 'done') this.resetForm(true);
-			}
+		if (job.state === 'running') {
+			this.followJob = job.id;
+		} else if (job.id === this.followJob) {
+			// 跟着的任务刚结束：表单换成路由器上的新设置。
+			this.followJob = null;
+			this.resetForm(true);
 		}
 	},
 
@@ -433,7 +466,15 @@ return view.extend({
 		var sel = this.nodes.radio;
 		while (sel.firstChild) sel.removeChild(sel.firstChild);
 		(st.radios || []).forEach(function(r) {
-			sel.appendChild(E('option', { 'value': r.name }, [T(bandName(r.band) + (r.ap_ssid ? '（本机 Wi-Fi「' + r.ap_ssid + '」，信道 ' + r.channel + '）' : ''))]));
+			sel.appendChild(E('option', { 'value': r.name }, [T(radioLabel(r))]));
+		});
+	},
+
+	labelRadios: function(st) {
+		var options = this.nodes.radio.options;
+		(st.radios || []).forEach(function(r) {
+			for (var i = 0; i < options.length; i++)
+				if (options[i].value === r.name) options[i].textContent = radioLabel(r);
 		});
 	},
 
@@ -491,7 +532,8 @@ return view.extend({
 		n.warn.hidden = !p.action;
 		n.warn.textContent = p.action === 'disable'
 			? '停用后本机 ' + bandName(radio.band) + ' Wi-Fi 会恢复原信道，期间断开十几秒；用它连路由器的设备会短暂断网。'
-			: '保存后本机 ' + bandName(radio.band) + ' Wi-Fi（现在信道 ' + (radio.channel || '?') + '）会改到' + target + '，期间断开十几秒' + this.otherBandNote() + '；用它连路由器的设备会短暂断网。';
+			: '保存后本机 ' + bandName(radio.band) + ' Wi-Fi（现在信道 ' + (radio.channel || '?') + '）会改到' + target + '，期间断开十几秒' + this.otherBandNote() + '。'
+				+ '以后 Wi-Fi 上网没连上时（例如手机热点关了），本机 ' + bandName(radio.band) + ' Wi-Fi 会暂停，最长约 2 分钟后恢复。用这个频段连路由器的设备那时会断网，建议选连接设备少的频段。';
 
 		n.save.textContent = p.action === 'disable' ? '停用 Wi-Fi 上网' : '保存并连接';
 		n.save.disabled = lock || !p.action || !!p.block;
@@ -519,7 +561,7 @@ return view.extend({
 			self.picked = match || null;
 			self.renderScan();
 		}).catch(function(err) {
-			n.scanInfo.textContent = '搜索失败：' + err.message;
+			n.scanInfo.textContent = err.message;
 		}).then(function() { self.syncForm(); });
 	},
 
@@ -559,7 +601,8 @@ return view.extend({
 		var title = p.action === 'disable' ? '停用 Wi-Fi 上网' : '连接 Wi-Fi';
 		var lines = p.action === 'disable'
 			? ['本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并恢复原信道。']
-			: ['路由器会用 ' + bandName(radio.band) + ' 连接「' + f.ssid + '」。', '本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并改到对方信道' + this.otherBandNote() + '。如果你正用它连着路由器，页面会短暂断开，之后自动恢复。'];
+			: ['路由器会用 ' + bandName(radio.band) + ' 连接「' + f.ssid + '」。', '本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并改到对方信道' + this.otherBandNote() + '。如果你正用它连着路由器，页面会短暂断开，之后自动恢复。',
+				'注意：以后 Wi-Fi 上网没连上时（例如手机热点关了），本机 ' + bandName(radio.band) + ' Wi-Fi 会暂停，最长约 2 分钟后由后台先停下 Wi-Fi 上网让它恢复，搜到对方再自动重连。这是 OpenWrt 同一频段上网和发射共用一块射频的限制。'];
 		confirmBox(title, lines, p.action === 'disable' ? '停用' : '保存并连接').then(function(ok) {
 			if (!ok) return;
 			self.setBusy(true);
@@ -570,6 +613,7 @@ return view.extend({
 				: self.run(p.action === 'disable' ? ['disable'] : ['save', f.radio, f.ssid, '-']);
 			return start.then(function(st) {
 				n.password.value = '';
+				if (st.job) self.followJob = st.job.id;
 				self.update(st);
 				self.message(n.formMsg, '');
 			}).catch(function(err) {
