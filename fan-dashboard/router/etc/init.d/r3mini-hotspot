@@ -5,6 +5,8 @@ START=95
 STOP=05
 
 start_service() {
+	# 页面传密码用的临时文件；正常情况下读完即删，这里清掉意外留下的。
+	rm -f /tmp/r3mini-hotspot-key-* /tmp/r3mini-hotspot-job.key 2>/dev/null
 	procd_open_instance
 	procd_set_param command /usr/sbin/r3mini-hotspot-watchdog
 	procd_set_param respawn 3600 5 5
