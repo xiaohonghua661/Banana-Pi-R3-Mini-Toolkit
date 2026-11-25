@@ -1,0 +1,23 @@
+config main 'main'
+	option enabled '1'
+	# 数据与持久日志目录；require_mount 未挂载时不写盘，避免写进系统 overlay（填 '-' 关闭该检查）
+	option data_dir '/mnt/mmcblk0p6/r3mini-traffic'
+	option require_mount '/mnt/mmcblk0p6'
+	option poll_seconds '2'
+	# 读连接跟踪表的内核开销随表项数增长；TCP 关闭后在 TIME_WAIT 里留 120 秒，15 秒一读不丢终值（上限 60）
+	option conntrack_seconds '15'
+	option checkpoint_seconds '300'
+	# 保留最近多少个有数据的日期（按条数，不按当前时钟往回算）
+	option retention_days '60'
+	option max_mb '200'
+	# 0：只在某小时明细超过 5000 行时把不足 64 KiB 的目标并入「(其他)」；大于 0：总按该阈值折叠
+	option fold_bytes '0'
+	# 记录经本机转发、未进 OpenClash 的流量（kind=forward，按目标 IP:端口）
+	option forward '1'
+	# 不经 OpenClash 的独立 SOCKS 端口，按设备从连接跟踪计数：'端口:标签'
+	list socks_port '10810:ph-socks'
+
+# 设备备注名，report 里跟在 IP/MAC 后显示。按需追加：
+#config device
+#	option mac 'aa:bb:cc:dd:ee:ff'
+#	option name '书房电脑'

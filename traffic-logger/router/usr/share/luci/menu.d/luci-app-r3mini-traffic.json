@@ -1,0 +1,13 @@
+{
+	"admin/status/r3mini-traffic": {
+		"title": "流量记录",
+		"order": 65,
+		"action": {
+			"type": "view",
+			"path": "status/r3mini-traffic"
+		},
+		"depends": {
+			"acl": [ "luci-app-r3mini-traffic" ]
+		}
+	}
+}

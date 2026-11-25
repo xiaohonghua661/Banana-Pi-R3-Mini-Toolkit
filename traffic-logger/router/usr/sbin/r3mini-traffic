@@ -1,0 +1,1405 @@
+#!/usr/bin/ucode -S
+// r3mini-traffic：按「小时 × 设备 × 出口 × 目标」记录经本路由器的流量。
+// 只读两个数据源：
+//   OpenClash 控制接口 /connections —— 进 OpenClash 核心的每条连接（kind=clash，含直连与代理）；
+//   /proc/net/nf_conntrack —— 独立 SOCKS 端口（kind=socks，只能按设备记）与
+//                            经本机转发、未进 OpenClash 的流量（kind=forward，按目标 IP:端口记）。
+//
+// 用法：
+//   r3mini-traffic run [--data-dir D] [--run-dir R] [--no-mount-check] [--duration S] [--socks-port P:label,..]
+//   r3mini-traffic report [--date YYYY-MM-DD[..YYYY-MM-DD]] [--from H] [--to H] [--by device|target|exit|date|hour|kind[,..]]
+//                         [--device S] [--exit S] [--target S] [--kind K] [--proxy] [--top N]
+//                         [--sort up|down|total|conns|key] [--tsv|--json] [--data-dir D] [--nodes-file F]
+//                         过滤值按显示出来的取值匹配：默认不分大小写的子串，写成 =值 时整串相等
+//   r3mini-traffic status [--json]
+//   r3mini-traffic web report|status [参数]       LuCI 页面专用：只读、只输出 JSON，不接受路径类参数
+//   r3mini-traffic maintain                       压缩过完的日子、按保留策略清理
+//   r3mini-traffic replay INPUT OUTDIR [--fold N] [--socks-port P:label,..] [--ct-warmup N]   离线对照测试
+//   测试用：--clock-skew S（run，墙钟偏移秒）、--now EPOCH（maintain）、--retention-days N、--max-mb N
+//
+// 数据：<data_dir>/<YYYY-MM-DD>/<HH>.<run_id>.<序号>.tsv。每次进入一个小时开一段会话，只写自己的文件
+// （检查点原子重写），所以重启、时钟回拨都不会覆盖别的会话；同一小时的多段会话在查询与压缩时求和。
+// 每行：hour_epoch  src_ip  mac  kind(clash|socks|forward|unattributed)  exit  target  up  down  conns
+// 本机没有 RTC，冷启动时钟会落后：墙钟早于已有数据时只维持基线不记录；保留策略按日期条数而不按当前时钟算。
+'use strict';
+
+import * as fs from 'fs';
+import { cursor } from 'uci';
+
+const VERSION = '1.4.0';
+const DATE_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+const PART_RE = /^[0-9]{2}(\.[0-9a-f]{8}\.[0-9]+)?\.tsv$/;
+const GZ_RE = /^([0-9]{4}-[0-9]{2}-[0-9]{2})(\.[0-9a-f]{8}-[0-9]+)?\.tsv\.gz$/;
+const SAFE_PATH = /^\/[A-Za-z0-9_\/.-]+$/;
+const FLAGS = { 'no-mount-check': true, proxy: true, tsv: true, json: true };
+const NONPROXY = { DIRECT: true, REJECT: true, 'REJECT-DROP': true, PASS: true };
+// 处于硬件/软件卸载（[HW_OFFLOAD]/[OFFLOAD]）的条目不打印超时与 TCP 状态两列
+const CT_HEAD = /^ipv4 +[0-9]+ +([a-z]+) +[0-9]+ +([0-9]+ +)?([A-Z_]+ +)?/;
+const CT_TUPLE = /src=([0-9.]+) dst=([0-9.]+) sport=([0-9]+) dport=([0-9]+) packets=([0-9]+) bytes=([0-9]+) (\[UNREPLIED\] )?src=([0-9.]+) dst=([0-9.]+) sport=([0-9]+) dport=([0-9]+) packets=([0-9]+) bytes=([0-9]+)/;
+// 连接跟踪计的是 IP 层字节；按每包包头扣除后才与 OpenClash 的载荷字节同口径（纯 ACK 的上传扣成 0）
+const CT_HDR = { tcp: 52, udp: 28 };
+const LINE_RATE = 125000000;   // 1 Gbit/s：首次读到的流若累计字节超过「运行时长 × 线速」，必然早于记录器存在
+const MAX_ROWS = 5000;
+const OVERFLOW_FOLD = 65536;
+// popen 走 /bin/sh：显式给 PATH，调用方（如经 rpcd 的 file exec）传进来的 PATH 不影响找到的 gzip/ip
+const SH_PATH = 'PATH=/usr/sbin:/usr/bin:/sbin:/bin ';
+
+let opt = {};
+let cfg = null;
+let names = {};
+let local_ips = {};
+let run_id = '';
+let log_path = null;
+let cfg_warn = [];
+
+// ucode 的 int(null) 是 0 而不是 NaN，缺省值必须先判空；用 === 是因为 0 == '' 为真
+function num(v, d) {
+	if (v == null || v === '')
+		return d;
+	let n = int(v);
+	return (type(n) == 'int' && n >= 0) ? n : d;
+}
+
+function bounded(key, v, d, lo, hi) {
+	if (v == null || v === '')
+		return d;
+	let n = int(v);
+	if (type(n) != 'int' || n < lo || (hi && n > hi)) {
+		push(cfg_warn, key + '=' + v);
+		return d;
+	}
+	return n;
+}
+
+function clean(s) {
+	return replace('' + s, /[\t\n\r]/g, ' ');
+}
+
+// 参数与查询范围错误：只打印一行原因（die() 会附带调用栈，页面上不好读），退出码 2
+function arg_fail(msg) {
+	warn(msg);
+	exit(2);
+}
+
+function hs(n) {
+	let units = ['B', 'KB', 'MB', 'GB', 'TB'], x = n * 1.0, i = 0;
+	while (x >= 1024 && i < 4) { x = x / 1024.0; i++; }
+	return i ? sprintf('%.2f %s', x, units[i]) : sprintf('%d B', n);
+}
+
+function mono() {
+	return clock(true)[0];
+}
+
+function new_run_id() {
+	return sprintf('%08x', (clock()[1] ^ int(fs.readlink('/proc/self'))) & 0xffffffff);
+}
+
+function wall() {
+	return time() + (opt['clock-skew'] || 0);
+}
+
+function iso_now() {
+	let c = clock(), t = localtime(c[0]);
+	let off = timegm(t) - c[0], sign = '+';
+	if (off < 0) { sign = '-'; off = -off; }
+	return sprintf('%04d-%02d-%02dT%02d:%02d:%02d.%03d%s%02d:%02d', t.year, t.mon, t.mday, t.hour, t.min, t.sec,
+		int(c[1] / 1000000), sign, int(off / 3600), int((off % 3600) / 60));
+}
+
+function elapsed_ms(t0) {
+	let t1 = clock(true);
+	return int(((t1[0] - t0[0]) * 1000000000 + (t1[1] - t0[1])) / 1000000);
+}
+
+function mount_ok() {
+	if (!cfg || !cfg.require_mount)
+		return true;
+	return index(fs.readfile('/proc/mounts') || '', ' ' + cfg.require_mount + ' ') >= 0;
+}
+
+// 唯一落盘咽喉：stderr（procd 转 logread，重启即失）+ 数据分区上的持久日志，超 1 MiB 轮转一份
+function log(level, event, msg, kv) {
+	let parts = [iso_now(), level, run_id, event, '"' + msg + '"'];
+	for (let k in (kv || {})) {
+		if (kv[k] == null)
+			continue;
+		let v = replace('' + kv[k], /\n/g, '\\n');
+		if (length(v) > 2048) {
+			push(parts, 'truncated=true');
+			push(parts, 'bytes=' + length(v));
+			v = substr(v, 0, 2048);
+		}
+		// 方括号里 ucode 不认 \s，须用 POSIX 类
+		if (match(v, /[[:space:]"]/) || v == '')
+			v = '"' + replace(v, /"/g, '\\"') + '"';
+		push(parts, k + '=' + v);
+	}
+	let line = join(' ', parts) + '\n';
+	warn(line);
+	if (log_path && mount_ok()) {
+		let st = fs.stat(log_path), fresh = !st;
+		if (st && st.size > 1048576) {
+			fs.rename(log_path, log_path + '.1');
+			fresh = true;
+		}
+		let f = fs.open(log_path, 'a');
+		if (f) {
+			f.write(line);
+			f.close();
+			if (fresh)
+				fs.chmod(log_path, 384);
+		}
+	}
+}
+
+// 限流：同一 key 在 interval 秒内只放行一次；返回期间被压下的次数，压下时返回 null
+let rl_state = {};
+function rl(key, interval) {
+	let t = mono(), x = rl_state[key];
+	if (x && t - x.t < interval) {
+		x.n++;
+		return null;
+	}
+	rl_state[key] = { t: t, n: 0 };
+	return x ? x.n : 0;
+}
+
+function guard(stage, fn) {
+	try {
+		return fn();
+	} catch (e) {
+		let msg = e.message || ('' + e), s = rl('exc:' + stage + ':' + msg, 300);
+		if (s != null)
+			log('ERROR', 'traffic.exception', '阶段异常，本轮跳过', { reason: 'EXCEPTION', stage: stage, err: msg,
+				type: e.type, suppressed: s, stack: e.stacktrace ? sprintf('%J', e.stacktrace) : null,
+				impact: 'stage_skipped' });
+		return null;
+	}
+}
+
+function load_config() {
+	let u = cursor();
+	let g = (k, d) => { let v = u.get('r3mini_traffic', 'main', k); return (v == null || v === '') ? d : v; };
+	let mnt = g('require_mount', '/mnt/mmcblk0p6');
+	let c = {
+		enabled: g('enabled', '1'),
+		data_dir: opt['data-dir'] || g('data_dir', '/mnt/mmcblk0p6/r3mini-traffic'),
+		require_mount: (opt['no-mount-check'] || mnt == '-') ? '' : mnt,
+		run_dir: opt['run-dir'] || '/var/run/r3mini-traffic',
+		poll_ms: bounded('poll_seconds', g('poll_seconds', '2'), 2, 1, 10) * 1000,
+		ct_every: bounded('conntrack_seconds', g('conntrack_seconds', '15'), 15, 5, 60),
+		cp_every: bounded('checkpoint_seconds', g('checkpoint_seconds', '300'), 300, 30, 3600),
+		retention_days: bounded('retention_days', opt['retention-days'] || g('retention_days', '60'), 60, 1, 3650),
+		max_bytes: bounded('max_mb', opt['max-mb'] || g('max_mb', '200'), 200, 1, 100000) * 1048576,
+		fold: bounded('fold_bytes', opt.fold != null ? opt.fold : g('fold_bytes', '0'), 0, 0, 0),
+		forward: g('forward', '1') == '1',
+		warmup: bounded('ct_warmup', opt['ct-warmup'], 3, 1, 100),
+		ports: {},
+		api_port: num(u.get('openclash', 'config', 'cn_port'), 9090),
+		secret: u.get('openclash', 'config', 'dashboard_password') || '',
+	};
+	let ports = opt['socks-port'] ? split(opt['socks-port'], ',') : u.get('r3mini_traffic', 'main', 'socks_port');
+	if (type(ports) == 'string')
+		ports = [ports];
+	for (let p in (ports || [])) {
+		let m = match(p, /^([0-9]+)(:(.+))?$/);
+		if (m)
+			c.ports[m[1]] = clean(m[3] || ('socks-' + m[1]));
+		else
+			push(cfg_warn, 'socks_port=' + p);
+	}
+	u.foreach('r3mini_traffic', 'device', (s) => {
+		if (s.mac && s.name)
+			names[lc(s.mac)] = s.name;
+	});
+	for (let k in ['data_dir', 'run_dir'])
+		if (!match(c[k], SAFE_PATH) || index(c[k], '..') >= 0)
+			die(sprintf('%s 含不安全字符: %s\n', k, c[k]));
+	c.ttl_long = int((7500 + c.ct_every - 1) / c.ct_every);
+	c.ttl_short = int((300 + c.ct_every - 1) / c.ct_every);
+	return c;
+}
+
+// 本机地址 → 网卡名（forward 的出口按 SNAT 地址标成 DIRECT@网卡）
+function load_local_ips() {
+	let s = { '127.0.0.1': 'lo' }, p = fs.popen(SH_PATH + 'ip -4 -o addr show 2>/dev/null', 'r');
+	if (!p)
+		return s;
+	for (let line = p.read('line'); line != null && line != ''; line = p.read('line')) {
+		let m = match(line, /^[0-9]+: +([^ ]+) +inet ([0-9.]+)\//);
+		if (m)
+			s[m[2]] = m[1];
+	}
+	p.close();
+	return s;
+}
+
+function load_arp() {
+	let m = {}, f = fs.open('/proc/net/arp', 'r');
+	if (!f)
+		return m;
+	f.read('line');
+	for (let line = f.read('line'); line != null && line != ''; line = f.read('line')) {
+		let x = split(trim(line), /\s+/);
+		if (length(x) >= 4 && x[2] != '0x0' && x[3] != '00:00:00:00:00:00')
+			m[x[0]] = lc(x[3]);
+	}
+	f.close();
+	return m;
+}
+
+function hour_start(t) {
+	let x = localtime(t);
+	x.min = 0;
+	x.sec = 0;
+	return timelocal(x);
+}
+
+function day_of(t) {
+	let x = localtime(t);
+	return sprintf('%04d-%02d-%02d', x.year, x.mon, x.mday);
+}
+
+function hour_label(h) {
+	return day_of(h) + sprintf('T%02d', localtime(h).hour);
+}
+
+// ---- 聚合状态 ----
+let sess = null, seq = 0, queue = {}, arp = {}, recording = true;
+let prev = null, last_up = 0, last_down = 0, carry_up = 0, carry_down = 0;
+let ct_state = {}, ct_reads = 0, ct_t0 = 0, ct_nohead = 0;
+let hs_stat = {};
+
+function reset_hour_stat() {
+	hs_stat = { polls_ok: 0, polls_failed: 0, ct_ok: 0, ct_failed: 0, att_up: 0, att_down: 0, un_up: 0, un_down: 0 };
+}
+
+function open_session(h) {
+	seq++;
+	sess = { h: h, rows: {}, path: sprintf('%s/%s/%02d.%s.%d.tsv', cfg.data_dir, day_of(h), localtime(h).hour, run_id, seq) };
+	reset_hour_stat();
+}
+
+function add(src, kind, exit, target, du, dd, n) {
+	if (!recording || !sess)
+		return;
+	let key = join('\t', [clean(src), arp[src] || '-', kind, clean(exit), clean(target)]);
+	let r = sess.rows[key];
+	if (!r)
+		sess.rows[key] = r = [0, 0, 0];
+	r[0] += du;
+	r[1] += dd;
+	r[2] += n;
+}
+
+// 一份 /connections 快照：同一连接 id 计数单调就取差值，否则按新连接全计；首份只做基线。
+// 核心累计回退视为核心重启（只影响「未归因」的算法）。负差额结转到下一轮，长期合计与核心计数一致。
+// 全部算完再合并进总表：中途异常时什么都不提交，下一轮仍对旧基线求差。
+function ingest_clash(d) {
+	let conns = d.connections || [];
+	let up = d.uploadTotal || 0, down = d.downloadTotal || 0;
+	let first = (prev == null);
+	let restarted = !first && (up < last_up || down < last_down);
+	let next = {}, adds = [], au = 0, ad = 0;
+	for (let c in conns) {
+		let cu = c.upload || 0, cd = c.download || 0;
+		next[c.id] = [cu, cd];
+		if (first)
+			continue;
+		let p = prev[c.id], du = cu, dd = cd, isnew = 1;
+		if (p && cu >= p[0] && cd >= p[1]) {
+			du = cu - p[0];
+			dd = cd - p[1];
+			isnew = 0;
+		}
+		if (!du && !dd && !isnew)
+			continue;
+		let m = c.metadata || {}, ch = c.chains || [];
+		let exit = !length(ch) ? 'DIRECT' : (NONPROXY[ch[0]] ? ch[0] : join(' < ', ch));
+		let host = m.host || m.sniffHost || m.destinationIP || '?';
+		let port = '' + (m.destinationPort || '');
+		push(adds, [m.sourceIP || '?', exit, (port == '' || port == '443' || port == '80') ? host : host + ':' + port,
+			du, dd, isnew]);
+		au += du;
+		ad += dd;
+	}
+	let ru = 0, rd = 0;
+	if (!first) {
+		if (restarted) {
+			carry_up = 0;
+			carry_down = 0;
+		}
+		ru = (restarted ? up : up - last_up) - au + carry_up;
+		rd = (restarted ? down : down - last_down) - ad + carry_down;
+		carry_up = ru < 0 ? ru : 0;
+		carry_down = rd < 0 ? rd : 0;
+		ru = ru > 0 ? ru : 0;
+		rd = rd > 0 ? rd : 0;
+	}
+	for (let a in adds)
+		add(a[0], 'clash', a[1], a[2], a[3], a[4], a[5]);
+	if (ru || rd)
+		add('-', 'unattributed', '-', '-', ru, rd, 0);
+	if (!first) {
+		hs_stat.att_up += au;
+		hs_stat.att_down += ad;
+		hs_stat.un_up += ru;
+		hs_stat.un_down += rd;
+	}
+	if (restarted)
+		log('WARN', 'traffic.core_restart', 'OpenClash 核心计数回退，按核心重启处理', { expect: '>=' + last_up, got: up });
+	prev = next;
+	last_up = up;
+	last_down = down;
+	return length(conns);
+}
+
+// 连接跟踪。/proc/net/nf_conntrack 不是原子快照：一轮里会漏读、偶尔重复读到条目。所以
+//   同一轮重复的 key 只取第一条；本轮没读到的 key 留「墓碑」（ESTABLISHED 与卸载中的流留 7500 秒，其余 300 秒）；
+//   再出现时计数不小于墓碑就按增量算，比墓碑小才是端口复用的新流；
+//   前 warmup 轮只建基线；从没见过的流若累计字节超过「运行时长 × 线速」，必然早于记录器存在，只建基线。
+// 只认两类流：原方向 dport 命中 SOCKS 端口且目的是本机（socks）；源与目的都不是本机、回复方向被 SNAT
+// 到本机地址且未被 DNAT —— 即经本机转发、没进 OpenClash 的流（forward）。
+// 字节按「IP 层字节 − 包数 × 包头」估算载荷，增量同样按差值估算，负数记 0。
+// 粗筛只为省 CPU，不改变判定：socks 行必含「 dport=端口 」；forward 行的回复目的是本机 SNAT 地址 W，
+// 且整行不会出现「 src=W 」（原方向源与回复方向源都不是本机）
+function ct_candidate(line) {
+	for (let p in cfg.ports)
+		if (index(line, ' dport=' + p + ' ') >= 0)
+			return true;
+	if (cfg.forward)
+		for (let ip in local_ips)
+			if (ip != '127.0.0.1' && index(line, ' dst=' + ip + ' ') >= 0 && index(line, ' src=' + ip + ' ') < 0)
+				return true;
+	return false;
+}
+
+function ingest_conntrack(next_line, t) {
+	ct_reads++;
+	if (ct_reads == 1)
+		ct_t0 = t;
+	let warm = ct_reads <= cfg.warmup, seen = {}, adds = [], matched = 0, nobytes = 0, nohead = 0;
+	for (let line = next_line(); line != null; line = next_line()) {
+		if (line == '' || !ct_candidate(line))
+			continue;
+		let h = match(line, CT_HEAD);
+		if (!h) {
+			nohead++;
+			continue;
+		}
+		if (h[1] != 'tcp' && h[1] != 'udp')
+			continue;
+		let m = match(line, CT_TUPLE);
+		if (!m) {
+			nobytes++;
+			continue;
+		}
+		matched++;
+		let osrc = m[1], odst = m[2], osport = m[3], odport = m[4], opk = int(m[5]), ob = int(m[6]);
+		let rsrc = m[8], rdst = m[9], rpk = int(m[12]), rb = int(m[13]);
+		let kind = null, exit = null, target = null;
+		if (cfg.ports[odport] && local_ips[odst]) {
+			kind = 'socks';
+			exit = cfg.ports[odport];
+			target = '(SOCKS :' + odport + ')';
+		} else if (cfg.forward && !local_ips[osrc] && !local_ips[odst] && rsrc == odst && rdst != osrc && local_ips[rdst]) {
+			kind = 'forward';
+			exit = 'DIRECT@' + local_ips[rdst];
+			target = odst + ':' + odport;
+		} else {
+			continue;
+		}
+		let key = join(' ', [h[1], osrc, osport, odst, odport]);
+		if (seen[key])
+			continue;
+		seen[key] = true;
+		let st = ct_state[key], hdr = CT_HDR[h[1]];
+		let keep_long = (trim(h[3] || '') == 'ESTABLISHED' || index(line, 'OFFLOAD]') >= 0);
+		ct_state[key] = [ob, opk, rb, rpk, 0, keep_long ? cfg.ttl_long : cfg.ttl_short];
+		if (warm)
+			continue;
+		let du = 0, dd = 0, isnew = 1;
+		if (st && ob >= st[0] && opk >= st[1] && rb >= st[2] && rpk >= st[3]) {
+			du = (ob - st[0]) - (opk - st[1]) * hdr;
+			dd = (rb - st[2]) - (rpk - st[3]) * hdr;
+			isnew = 0;
+		} else if (!st && ob + rb > (t - ct_t0) * LINE_RATE) {
+			continue;
+		} else {
+			du = ob - opk * hdr;
+			dd = rb - rpk * hdr;
+		}
+		du = du > 0 ? du : 0;
+		dd = dd > 0 ? dd : 0;
+		if (du || dd || isnew)
+			push(adds, [osrc, kind, exit, target, du, dd, isnew]);
+	}
+	for (let k in keys(ct_state)) {
+		if (seen[k])
+			continue;
+		let s = ct_state[k];
+		s[4]++;
+		if (s[4] > s[5])
+			delete ct_state[k];
+	}
+	for (let a in adds)
+		add(a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
+	return { matched: matched, nobytes: nobytes, nohead: nohead };
+}
+
+function fold_rows(rs, thr) {
+	if (!thr)
+		return rs;
+	let out = {};
+	for (let k in rs) {
+		let r = rs[k], f = split(k, '\t'), key = k;
+		if ((f[2] == 'clash' || f[2] == 'forward') && r[0] + r[1] < thr) {
+			f[4] = '(其他)';
+			key = join('\t', f);
+		}
+		let o = out[key];
+		if (!o)
+			out[key] = o = [0, 0, 0];
+		o[0] += r[0];
+		o[1] += r[1];
+		o[2] += r[2];
+	}
+	return out;
+}
+
+function fold_threshold(rs) {
+	return cfg.fold ? cfg.fold : (length(keys(rs)) > MAX_ROWS ? OVERFLOW_FOLD : 0);
+}
+
+// 原子重写一段会话的文件（写临时文件再改名）。ucode 的 write/flush/close 在写满时也报成功，
+// 所以落盘后用文件大小核对实际写入字节数，不符就删临时文件、保留旧文件
+function write_session(s) {
+	let fail = (reason, kv) => {
+		let n = rl('write:' + reason, 300);
+		if (n != null)
+			log('ERROR', 'traffic.write', '会话文件写入失败', { reason: reason, path: s.path, hour: hour_label(s.h),
+				suppressed: n, err: kv.err, expect: kv.expect, got: kv.got, impact: 'kept_previous_file_will_retry' });
+		return -1;
+	};
+	if (!mount_ok())
+		return fail('DATA_MOUNT_MISSING', {});
+	let dir = substr(s.path, 0, rindex(s.path, '/')), tmp = s.path + '.tmp';
+	fs.mkdir(cfg.data_dir, 448);
+	fs.mkdir(dir, 448);
+	let rows = fold_rows(s.rows, fold_threshold(s.rows)), n = 0, bytes = 0;
+	let f = fs.open(tmp, 'w');
+	if (!f)
+		return fail('OPEN_FAILED', { err: fs.error() });
+	for (let k in rows) {
+		let r = rows[k], line = sprintf('%d\t%s\t%d\t%d\t%d\n', s.h, k, r[0], r[1], r[2]);
+		f.write(line);
+		bytes += length(line);
+		n++;
+	}
+	f.close();
+	fs.chmod(tmp, 384);
+	let st = fs.stat(tmp);
+	if (!st || st.size != bytes) {
+		fs.unlink(tmp);
+		return fail('WRITE_SHORT', { expect: bytes, got: st ? st.size : null });
+	}
+	if (!fs.rename(tmp, s.path)) {
+		let err = fs.error();
+		fs.unlink(tmp);
+		return fail('RENAME_FAILED', { err: err });
+	}
+	return n;
+}
+
+function queue_session(s) {
+	queue[s.path] = { h: s.h, path: s.path, rows: fold_rows(s.rows, fold_threshold(s.rows)) };
+	let ks = sort(keys(queue));
+	while (length(ks) > 24) {
+		let k = shift(ks);
+		log('ERROR', 'traffic.write', '补写队列超过 24 段，丢弃最旧一段', { reason: 'RETRY_QUEUE_FULL', path: k,
+			hour: hour_label(queue[k].h), impact: 'hour_lost' });
+		delete queue[k];
+	}
+}
+
+function flush(reason) {
+	for (let k in keys(queue))
+		if (write_session(queue[k]) >= 0) {
+			log('INFO', 'traffic.write', '先前失败的会话已补写', { path: k, hour: hour_label(queue[k].h) });
+			delete queue[k];
+		}
+	if (!sess)
+		return 0;
+	let n = write_session(sess);
+	if (n < 0 && reason != 'checkpoint')
+		queue_session(sess);
+	let total = hs_stat.polls_ok + hs_stat.polls_failed, att = hs_stat.att_up + hs_stat.un_up;
+	let share = att ? int(hs_stat.un_up * 1000 / att) / 10.0 : 0;
+	let level = 'INFO', why = null;
+	if (n < 0) { level = 'ERROR'; why = 'WRITE_FAILED'; }
+	else if (total && !hs_stat.polls_ok) { level = 'ERROR'; why = 'NO_SUCCESSFUL_POLL'; }
+	else if (share > 20 && hs_stat.un_up > 10485760) { level = 'WARN'; why = 'HIGH_UNATTRIBUTED'; }
+	if (level == 'INFO' || rl('flush:' + why, 300) != null)
+		log(level, 'traffic.flush', n < 0 ? '会话未能落盘' : (reason == 'hour' ? '小时数据已落盘' : '检查点已落盘'), {
+			reason: why, trigger: reason, hour: hour_label(sess.h), rows: n,
+			polls_ok: hs_stat.polls_ok, polls_failed: hs_stat.polls_failed, polls_total: total,
+			ct_ok: hs_stat.ct_ok, ct_failed: hs_stat.ct_failed, att_up: hs_stat.att_up, un_up: hs_stat.un_up,
+			un_up_pct: share, pending_retry: length(keys(queue)), path: sess.path });
+	if (n >= 0 && length(keys(sess.rows)) > MAX_ROWS)
+		sess.rows = fold_rows(sess.rows, OVERFLOW_FOLD);
+	return n;
+}
+
+// 一个日期的数据 = <日>/ 目录里的会话文件 + 若干 <日>[.<令牌>].tsv.gz，查询时全部求和
+function day_entries() {
+	let entries = {};
+	for (let e in (fs.lsdir(cfg.data_dir) || [])) {
+		let d = null, gz = null, m = null;
+		if (match(e, DATE_RE))
+			d = e;
+		else if ((m = match(e, GZ_RE))) {
+			d = m[1];
+			gz = e;
+		}
+		if (!d)
+			continue;
+		let x = entries[d];
+		if (!x)
+			entries[d] = x = { dir: false, gz: [] };
+		if (gz) push(x.gz, gz); else x.dir = true;
+	}
+	return entries;
+}
+
+function entry_size(d, x) {
+	let s = 0, st = null;
+	for (let g in x.gz)
+		if ((st = fs.stat(cfg.data_dir + '/' + g)))
+			s += st.size;
+	if (x.dir)
+		for (let e in (fs.lsdir(cfg.data_dir + '/' + d) || []))
+			if ((st = fs.stat(cfg.data_dir + '/' + d + '/' + e)))
+				s += st.size;
+	return s;
+}
+
+let compact_seq = 0;
+
+// 过完的日子：会话文件压成一份新的 <日>.<令牌>.tsv.gz，已有的 gz 不改写。可重入：压缩前在目录里放
+// .compacting.<令牌> 标记，gz 在 sync 之后原子改名；崩溃后再来时，同令牌的 gz 已存在就只删目录，否则重做。
+// 补写队列里还有该日会话时先不动它。只保留最近 retention_days 个日期，总量超 max_mb 再删最旧；今天与最新的日期永不删
+function maintain(now) {
+	if (!mount_ok())
+		return;
+	let today = day_of(now), entries = day_entries(), busy = {};
+	for (let k in queue)
+		busy[day_of(queue[k].h)] = true;
+	for (let d in sort(keys(entries))) {
+		let x = entries[d];
+		if (d >= today || !x.dir || busy[d])
+			continue;
+		let dir = cfg.data_dir + '/' + d, names = fs.lsdir(dir) || [], done = false;
+		for (let e in names) {
+			let m = match(e, /^\.compacting\.([0-9a-f]{8}-[0-9]+)$/);
+			if (!m)
+				continue;
+			if (fs.stat(cfg.data_dir + '/' + d + '.' + m[1] + '.tsv.gz'))
+				done = true;
+			else
+				fs.unlink(dir + '/' + e);
+		}
+		let parts = filter(names, (e) => match(e, PART_RE));
+		if (done || !length(parts)) {
+			system(['rm', '-rf', dir]);
+			x.dir = false;
+			if (!length(x.gz))
+				delete entries[d];
+			if (done)
+				log('INFO', 'traffic.compact', '上次压缩已完成但目录未删，已补删', { day: d });
+			continue;
+		}
+		let token = sprintf('%s-%d', run_id, ++compact_seq), name = d + '.' + token + '.tsv.gz';
+		let out = cfg.data_dir + '/' + name, marker = dir + '/.compacting.' + token;
+		fs.writefile(marker, '');
+		let cmd = sprintf('set -o pipefail; cat %s/*.tsv | gzip -c > %s.tmp && gzip -t %s.tmp && chmod 600 %s.tmp && sync && mv %s.tmp %s && sync',
+			dir, out, out, out, out, out);
+		let rc = system(cmd);
+		if (rc != 0) {
+			system(['rm', '-f', out + '.tmp', marker]);
+			if (rl('compact:' + d, 3600) != null)
+				log('ERROR', 'traffic.compact', '日数据压缩失败', { reason: 'GZIP_FAILED', cmd: cmd, exit: rc,
+					impact: 'kept_uncompressed' });
+			continue;
+		}
+		system(['rm', '-rf', dir]);
+		x.dir = false;
+		push(x.gz, name);
+		log('INFO', 'traffic.compact', '日数据已压缩', { day: d, parts: length(parts), path: out, bytes: fs.stat(out).size });
+	}
+	let dates = sort(keys(entries)), sizes = {}, total = 0;
+	for (let d in dates) {
+		sizes[d] = entry_size(d, entries[d]);
+		total += sizes[d];
+	}
+	let excess = length(dates) - cfg.retention_days;
+	for (let i = 0; i < length(dates) - 1; i++) {
+		let d = dates[i];
+		if (d == today || busy[d])
+			continue;
+		let why = excess > 0 ? 'retention' : (total > cfg.max_bytes ? 'size_cap' : null);
+		if (!why)
+			break;
+		let args = ['rm', '-rf', cfg.data_dir + '/' + d];
+		for (let g in entries[d].gz)
+			push(args, cfg.data_dir + '/' + g);
+		system(args);
+		total -= sizes[d];
+		excess--;
+		log('INFO', 'traffic.cleanup', '已删除旧数据', { day: d, why: why, retention_days: cfg.retention_days,
+			total_bytes: total, max_bytes: cfg.max_bytes });
+	}
+}
+
+// 已有数据里最新文件的修改时间；墙钟早于它说明冷启动后还没对时
+function data_floor() {
+	let newest = 0;
+	for (let e in (fs.lsdir(cfg.data_dir) || [])) {
+		let p = cfg.data_dir + '/' + e, st = fs.stat(p);
+		if (!st)
+			continue;
+		if (st.type == 'directory' && match(e, DATE_RE)) {
+			for (let f in (fs.lsdir(p) || [])) {
+				let s2 = fs.stat(p + '/' + f);
+				if (s2 && s2.mtime > newest)
+					newest = s2.mtime;
+			}
+		} else if (match(e, /\.tsv\.gz$/) && st.mtime > newest) {
+			newest = st.mtime;
+		}
+	}
+	return newest;
+}
+
+// ---- 采集（run） ----
+let api = { failing: false, reason: null, since: 0, last_ok: 0 };
+let stopping = false, interval_ms = 2000;
+
+// 经 shebang 执行时 comm 是脚本名 r3mini-traffic，显式 `ucode 脚本` 执行时是 ucode；tail 日志之类的进程两者都不是
+function proc_is_logger(pid) {
+	let comm = trim(fs.readfile('/proc/' + pid + '/comm') || '');
+	return (comm == 'r3mini-traffic' || comm == 'ucode') &&
+		index(fs.readfile('/proc/' + pid + '/cmdline') || '', 'r3mini-traffic') >= 0;
+}
+
+// 单实例：锁文件里的 pid 仍是存活的 r3mini-traffic 进程就拒绝启动
+function take_lock(path) {
+	let me = int(fs.readlink('/proc/self'));
+	let old = num(trim(fs.readfile(path) || ''), 0);
+	if (old > 0 && old != me && proc_is_logger(old))
+		die(sprintf('r3mini-traffic 已在运行 pid=%d（%s）\n', old, path));
+	fs.writefile(path, me + '\n');
+}
+
+function write_auth_header() {
+	let path = cfg.run_dir + '/auth.hdr';
+	fs.writefile(path, 'Authorization: Bearer ' + cfg.secret + '\n');
+	fs.chmod(path, 384);
+	return path;
+}
+
+function fetch_connections(hdr) {
+	let cmd = sprintf('curl -sS --max-time 4 -w "\\n%%{http_code}" -H @%s http://127.0.0.1:%d/connections 2>&1', hdr, cfg.api_port);
+	let t0 = clock(true), p = fs.popen(cmd, 'r');
+	if (!p)
+		return { ok: false, reason: 'POPEN_FAILED', cmd: cmd, exit: null, elapsed: elapsed_ms(t0), raw: fs.error() };
+	let out = p.read('all') || '', rc = p.close(), ms = elapsed_ms(t0);
+	let nl = rindex(out, '\n'), http = nl >= 0 ? substr(out, nl + 1) : '', body = nl >= 0 ? substr(out, 0, nl) : out;
+	let fail = (reason) => ({ ok: false, reason: reason, cmd: cmd, exit: rc, http: http, elapsed: ms, raw: body });
+	if (rc == 28)
+		return fail('TIMEOUT');
+	if (rc != 0)
+		return fail('CURL_FAILED');
+	if (http == '401')
+		return fail('HTTP_UNAUTHORIZED');
+	if (http != '200')
+		return fail('HTTP_STATUS');
+	let data = null;
+	try { data = json(body); } catch (e) { return fail('BAD_JSON'); }
+	if (type(data) != 'object')
+		return fail('BAD_JSON');
+	return { ok: true, data: data, elapsed: ms };
+}
+
+// 同一失败原因 5 分钟内只记一条（含命令全文与原始输出），其余计入 suppressed；恢复同样限流
+function note_api(res) {
+	let t = mono();
+	if (res.ok) {
+		if (api.failing) {
+			let n = rl('api:recover', 300);
+			if (n != null)
+				log('INFO', 'traffic.api', '控制接口已恢复', { down_seconds: t - api.since, suppressed: n });
+		}
+		api.failing = false;
+		api.last_ok = wall();
+		return;
+	}
+	if (!api.failing) {
+		api.failing = true;
+		api.since = t;
+	}
+	api.reason = res.reason;
+	let n = rl('api:' + res.reason, 300);
+	if (n != null)
+		log('ERROR', 'traffic.api', '读取 OpenClash 连接失败', { reason: res.reason, cmd: res.cmd, exit: res.exit,
+			http: res.http, elapsed_ms: res.elapsed, raw: res.raw, suppressed: n, impact: 'poll_skipped' });
+}
+
+function status_reasons(mounted, fresh) {
+	let r = [];
+	if (!fresh) push(r, 'STALE');
+	if (!recording) push(r, 'NOT_RECORDING');
+	if (!mounted) push(r, 'DATA_MOUNT_MISSING');
+	if (length(keys(queue))) push(r, 'PENDING_WRITES');
+	if (api.failing) push(r, 'API_' + api.reason);
+	return r;
+}
+
+function write_status(conns, started, mounted) {
+	let st = { version: VERSION, run_id: run_id, pid: int(fs.readlink('/proc/self')), started: started, now: wall(),
+		hour: sess ? hour_label(sess.h) : null, recording: recording, rows: sess ? length(keys(sess.rows)) : 0,
+		connections: conns, api_ok: !api.failing, api_reason: api.reason, last_api_ok: api.last_ok,
+		core_up_total: last_up, core_down_total: last_down, mount_ok: mounted, pending_retry: length(keys(queue)),
+		ct_tracked: length(keys(ct_state)), ct_unparsed: ct_nohead, data_dir: cfg.data_dir, log: log_path,
+		poll_ms: interval_ms,
+		problems: status_reasons(mounted, true) };
+	for (let k in hs_stat)
+		st['hour_' + k] = hs_stat[k];
+	fs.writefile(cfg.run_dir + '/status.json.tmp', sprintf('%J\n', st));
+	fs.rename(cfg.run_dir + '/status.json.tmp', cfg.run_dir + '/status.json');
+}
+
+function poll_conntrack(t) {
+	let f = fs.open('/proc/net/nf_conntrack', 'r');
+	if (!f) {
+		hs_stat.ct_failed++;
+		let n = rl('ct:open', 3600);
+		if (n != null)
+			log('ERROR', 'traffic.conntrack', '读取连接跟踪失败', { reason: 'OPEN_FAILED', path: '/proc/net/nf_conntrack',
+				err: fs.error(), suppressed: n, impact: 'socks_and_forward_not_counted' });
+		return;
+	}
+	// 大块一次读完：逐行读会产生上千次 read()，seq_file 每次都从表头重新遍历，内核开销近似平方增长
+	let chunks = [], chunk = null;
+	while ((chunk = f.read(1048576)) != null && length(chunk))
+		push(chunks, chunk);
+	f.close();
+	let lines = split(join('', chunks), '\n'), i = 0;
+	let r = ingest_conntrack(() => i < length(lines) ? lines[i++] : null, t);
+	hs_stat.ct_ok++;
+	ct_nohead = r.nohead;
+	if (r.nobytes && !r.matched && rl('ct:acct', 3600) != null)
+		log('WARN', 'traffic.conntrack', '连接跟踪没有字节计数，SOCKS 与转发流量无法计量', { reason: 'CONNTRACK_ACCT_OFF',
+			flows: r.nobytes, expect: 'net.netfilter.nf_conntrack_acct=1', impact: 'socks_and_forward_not_counted' });
+	if (r.nohead && rl('ct:format', 3600) != null)
+		log('WARN', 'traffic.conntrack', '有候选行格式无法识别，已跳过', { reason: 'CT_LINE_FORMAT', lines: r.nohead,
+			impact: 'some_socks_or_forward_not_counted' });
+}
+
+// 时钟核对：需要数据分区才能拿到已有数据的时间下限；未挂载或墙钟早于它时不记录
+function check_clock(now, mounted, floor) {
+	if (recording || !mounted || now < floor - 60)
+		return false;
+	recording = true;
+	open_session(hour_start(now));
+	log('INFO', 'traffic.clock', '时钟核对通过，开始记录', { now: now, floor: floor, hour: hour_label(sess.h) });
+	return true;
+}
+
+function cmd_run() {
+	cfg = load_config();
+	if (cfg.enabled != '1') {
+		warn('r3mini-traffic: disabled in /etc/config/r3mini_traffic\n');
+		return 0;
+	}
+	// 数据目录必须在要求的挂载点之下，否则分区没挂上时会写进系统 overlay
+	if (cfg.require_mount && substr(cfg.data_dir, 0, length(cfg.require_mount) + 1) != cfg.require_mount + '/')
+		die(sprintf('data_dir %s 必须位于 require_mount %s 之下\n', cfg.data_dir, cfg.require_mount));
+	run_id = new_run_id();
+	fs.mkdir(cfg.run_dir, 448);
+	fs.chmod(cfg.run_dir, 448);
+	take_lock(cfg.run_dir + '/pid');
+	let started = wall(), mounted = mount_ok(), floor = 0;
+	if (mounted) {
+		fs.mkdir(cfg.data_dir, 448);
+		fs.chmod(cfg.data_dir, 448);
+		take_lock(cfg.data_dir + '/.lock');
+		log_path = cfg.data_dir + '/r3mini-traffic.log';
+		floor = data_floor();
+	}
+	let hdr = write_auth_header();
+	local_ips = load_local_ips();
+	arp = load_arp();
+	recording = false;
+	log(mounted ? 'INFO' : 'ERROR', 'traffic.start', mounted ? '记录器启动' : '记录器启动，但数据分区未挂载', {
+		reason: mounted ? null : 'DATA_MOUNT_MISSING', impact: mounted ? null : 'not_recording_until_mounted',
+		version: VERSION, data_dir: cfg.data_dir, log: log_path, require_mount: cfg.require_mount,
+		api: '127.0.0.1:' + cfg.api_port, poll_ms: cfg.poll_ms, ct_seconds: cfg.ct_every,
+		socks_ports: join(',', keys(cfg.ports)), forward: cfg.forward, fold_bytes: cfg.fold,
+		retention_days: cfg.retention_days, local_ips: join(',', keys(local_ips)) });
+	if (length(cfg_warn))
+		log('WARN', 'traffic.config', '配置值无效或越界，已改用默认值', { reason: 'CONFIG_OUT_OF_RANGE', items: join(',', cfg_warn) });
+	signal('TERM', () => { stopping = true; });
+	signal('INT', () => { stopping = true; });
+	reset_hour_stat();
+	if (check_clock(started, mounted, floor))
+		guard('maintain', () => maintain(started));
+
+	let t0 = mono(), last_arp = t0, last_ct = 0, last_cp = t0 - cfg.cp_every + 60, last_st = 0, last_mnt = t0, conns = 0;
+	interval_ms = cfg.poll_ms;
+	while (!stopping) {
+		let now = wall(), t = mono();
+		if (!recording) {
+			if (check_clock(now, mounted, floor))
+				last_cp = t;
+			else if (rl('clock:wait', 600) != null)
+				log('WARN', 'traffic.clock', mounted ? '墙钟早于已有数据，等对时后再记录' : '数据分区未挂载，暂不记录', {
+					reason: mounted ? 'CLOCK_BEHIND_DATA' : 'DATA_MOUNT_MISSING', expect: '>=' + (floor - 60), got: now,
+					impact: 'not_recording' });
+		}
+		if (recording && hour_start(now) != sess.h) {
+			guard('flush', () => flush('hour'));
+			open_session(hour_start(now));
+			guard('maintain', () => maintain(now));
+			last_cp = t;
+		}
+		if (t - last_mnt >= 30) {
+			last_mnt = t;
+			let m = mount_ok();
+			if (m != mounted) {
+				log(m ? 'INFO' : 'ERROR', 'traffic.mount', m ? '数据分区已恢复' : '数据分区丢失', {
+					expect: 'mounted', got: m ? 'mounted' : 'missing', path: cfg.require_mount,
+					impact: m ? null : 'writes_queued' });
+				mounted = m;
+				log_path = m ? cfg.data_dir + '/r3mini-traffic.log' : null;
+				if (m) {
+					fs.mkdir(cfg.data_dir, 448);
+					take_lock(cfg.data_dir + '/.lock');
+					floor = data_floor();
+				}
+			}
+		}
+		if (t - last_arp >= 60) {
+			last_arp = t;
+			arp = load_arp();
+			local_ips = load_local_ips();
+		}
+		let tp = clock(true), res = fetch_connections(hdr);
+		if (!res.ok && res.reason == 'HTTP_UNAUTHORIZED') {
+			cfg.secret = cursor().get('openclash', 'config', 'dashboard_password') || '';
+			hdr = write_auth_header();
+		}
+		note_api(res);
+		if (res.ok && guard('clash', () => { conns = ingest_clash(res.data); return true; }))
+			hs_stat.polls_ok++;
+		else
+			hs_stat.polls_failed++;
+		// 连接多时快照近 1 MB，解析一次约 0.2 秒：按实测开销把轮询间隔拉到占空比不超过 4%，最长 10 秒。
+		// 上传量集中在活得久的连接上，录制样本里间隔放到 10 秒覆盖率仍为 99.3%
+		interval_ms = elapsed_ms(tp) * 25;
+		interval_ms = interval_ms < cfg.poll_ms ? cfg.poll_ms : (interval_ms > 10000 ? 10000 : interval_ms);
+		if (t - last_ct >= cfg.ct_every) {
+			last_ct = t;
+			guard('conntrack', () => poll_conntrack(t));
+		}
+		if (recording && t - last_cp >= cfg.cp_every) {
+			last_cp = t;
+			guard('flush', () => flush('checkpoint'));
+		}
+		if (t - last_st >= 10 || !res.ok) {
+			last_st = t;
+			guard('status', () => write_status(conns, started, mounted));
+		}
+		if (opt.duration && t - t0 >= opt.duration)
+			break;
+		if (!stopping)
+			sleep(interval_ms);
+	}
+	let n = recording ? guard('flush', () => flush('stop')) : 0;
+	if (length(keys(queue)))
+		log('ERROR', 'traffic.stop', '停止时仍有会话未能落盘', { reason: 'PENDING_WRITES_LOST', segments: length(keys(queue)),
+			impact: 'hours_lost' });
+	log('INFO', 'traffic.stop', '记录器停止', { rows: n, signal: stopping, uptime_seconds: mono() - t0 });
+	return 0;
+}
+
+// ---- 重放（离线对照测试；与 run 共用全部采集函数，会话按小时切换） ----
+function cmd_replay(input, outdir) {
+	opt['data-dir'] = outdir;
+	opt['no-mount-check'] = true;
+	cfg = load_config();
+	if (!opt['socks-port'])
+		cfg.ports = { '10810': 'ph-socks' };
+	run_id = '00000000';
+	local_ips = load_local_ips();
+	recording = true;
+	let f = fs.open(input, 'r');
+	if (!f)
+		die('无法打开 ' + input + '\n');
+	let pending = null, ct_lines = null, ct_ts = 0;
+	let roll = (ts) => {
+		let h = hour_start(ts);
+		if (sess && h != sess.h)
+			write_session(sess);
+		if (!sess || h != sess.h)
+			open_session(h);
+	};
+	let flush_ct = () => {
+		if (ct_lines == null)
+			return;
+		roll(ct_ts);
+		let i = 0, lines = ct_lines;
+		ingest_conntrack(() => i < length(lines) ? lines[i++] : null, ct_ts);
+		ct_lines = null;
+	};
+	for (let line = f.read('line'); line != null && line != ''; line = f.read('line')) {
+		line = rtrim(line, '\n');
+		if (line == '')
+			continue;
+		let m = match(line, /^@@(ct)? ([0-9]+)$/);
+		if (m) {
+			flush_ct();
+			if (m[1]) {
+				ct_lines = [];
+				ct_ts = int(m[2]);
+			} else {
+				pending = int(m[2]);
+			}
+			continue;
+		}
+		if (ct_lines != null) {
+			push(ct_lines, line);
+			continue;
+		}
+		if (pending != null && substr(line, 0, 1) == '{') {
+			roll(pending);
+			ingest_clash(json(line));
+			pending = null;
+		}
+	}
+	flush_ct();
+	f.close();
+	if (sess)
+		write_session(sess);
+	return 0;
+}
+
+function cmd_maintain() {
+	cfg = load_config();
+	run_id = new_run_id();
+	maintain(opt.now ? num(opt.now, wall()) : wall());
+	return 0;
+}
+
+// ---- 查询 ----
+function read_lines(path) {
+	let f = match(path, /\.gz$/) ? fs.popen(SH_PATH + 'gzip -dc ' + path, 'r') : fs.open(path, 'r');
+	if (!f)
+		return [];
+	let s = f.read('all') || '';
+	f.close();
+	return split(s, '\n');
+}
+
+// 一天的数据 = 当天全部 gz + 目录里全部会话文件，查询时求和（x 是 day_entries() 里该日的条目）
+function day_files(date, x) {
+	let dir = cfg.data_dir + '/' + date, out = [];
+	for (let g in sort(x ? x.gz : []))
+		push(out, cfg.data_dir + '/' + g);
+	for (let e in sort(fs.lsdir(dir) || []))
+		if (match(e, PART_RE))
+			push(out, dir + '/' + e);
+	return out;
+}
+
+// 当前 OpenClash 配置里的节点服务器地址。别的设备自带代理客户端、直连同一订阅的节点时，在本机表现为
+// 直连或转发；查询时据此标成「订阅节点直连」并计入 --proxy。节点按当前配置匹配，订阅换了节点历史数据就对不上
+function load_node_servers() {
+	let s = {}, path = opt['nodes-file'] || cursor().get('openclash', 'config', 'config_path');
+	let txt = path ? fs.readfile(path) : null;
+	if (txt)
+		for (let m in (match(txt, /(^|[ {,-])server: *"?([^ ,}"]+)/g) || []))
+			s[lc(m[2])] = true;
+	return s;
+}
+
+function target_host(t) {
+	let i = rindex(t, ':');
+	return (i > 0 && match(substr(t, i + 1), /^[0-9]+$/)) ? substr(t, 0, i) : t;
+}
+
+function device_label(src, mac) {
+	let s = src;
+	if (mac && mac != '-')
+		s += ' ' + mac;
+	if (names[mac])
+		s += ' (' + names[mac] + ')';
+	else if (local_ips[src])
+		s += ' (路由器本机)';
+	return s;
+}
+
+// 「YYYY-MM-DD」→ 当天正午的时间戳；不存在的日期（如 02-30）返回 null
+function parse_day(s) {
+	let m = match(s, /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/);
+	if (!m)
+		return null;
+	let x = localtime(time());
+	x.year = int(m[1]);
+	x.mon = int(m[2]);
+	x.mday = int(m[3]);
+	x.hour = 12;
+	x.min = 0;
+	x.sec = 0;
+	let t = timelocal(x);
+	return (t != null && day_of(t) == s) ? t : null;
+}
+
+// --date 取「YYYY-MM-DD」或「YYYY-MM-DD..YYYY-MM-DD」，含两端，起不晚于止
+function parse_range(spec) {
+	let p = split('' + spec, '..');
+	let a = parse_day(p[0]), b = length(p) == 2 ? parse_day(p[1]) : (length(p) == 1 ? a : null);
+	if (a == null || b == null || b < a)
+		return null;
+	return { from: p[0], to: p[length(p) - 1], days: int((b - a + 43200) / 86400) + 1 };
+}
+
+function hour_opt(k, d) {
+	let v = opt[k];
+	if (v == null)
+		return d;
+	if (!match('' + v, /^[0-9]{1,2}$/) || int(v) > 24)
+		arg_fail(sprintf('--%s 须为 0-24 的整点\n', k));
+	return int(v);
+}
+
+// 过滤值按显示出来的取值匹配：默认不分大小写的子串；以 = 开头时整串相等（页面下钻用）
+function want(f, v) {
+	if (f == null || f === '')
+		return true;
+	return substr(f, 0, 1) == '=' ? v == substr(f, 1) : index(lc(v), lc(f)) >= 0;
+}
+
+function tally(m, k, up, down, n) {
+	let g = m[k];
+	if (!g)
+		m[k] = g = [0, 0, 0];
+	g[0] += up;
+	g[1] += down;
+	g[2] += n;
+}
+
+// ucode 带比较函数的 sort 每次比较约 15 µs（2 万组要 4.5 秒）。拼成「补零的反向指标 \t 名称」交给原生字符串排序，
+// 次序不变（指标降序、同值按名称的字节序升序），快约 10 倍。名称里没有制表符（采集时已替换成空格）
+const BIG = 9223372036854775807;
+function rank(m, metric) {
+	let tagged = [];
+	for (let k in m)
+		push(tagged, sprintf('%019d\t%s', BIG - metric(m[k]), k));
+	return map(sort(tagged), (s) => substr(s, 20));
+}
+
+// 下拉候选：按合计取前 n 项；页面当前精确选中的那一项（pin = "=值"）即使排在 n 名之后也带上
+function top_list(m, n, pin) {
+	let ks = rank(m, (g) => g[0] + g[1]), out = [];
+	if (length(ks) > n) {
+		let p = (type(pin) == 'string' && substr(pin, 0, 1) == '=') ? substr(pin, 1) : null;
+		ks = slice(ks, 0, n);
+		if (p != null && m[p] && index(ks, p) < 0)
+			push(ks, p);
+	}
+	for (let k in ks)
+		push(out, { k: k, up: m[k][0], down: m[k][1], conns: m[k][2] });
+	return out;
+}
+
+// rpcd 的 file exec 只收 256 KiB 标准输出，超出时整个调用失败：留出余量，超了先逐次减半明细行，
+// 明细减完再减半下拉候选，并标 clipped
+const JSON_CAP = 240000;
+function emit_json(out) {
+	let s = sprintf('%J', out);
+	while (length(s) > JSON_CAP) {
+		let f = out.facets;
+		if (type(out.rows) == 'array' && length(out.rows))
+			out.rows = slice(out.rows, 0, int(length(out.rows) / 2));
+		else if (type(f) == 'object' && (length(f.device) || length(f.exit))) {
+			f.device = slice(f.device, 0, int(length(f.device) / 2));
+			f.exit = slice(f.exit, 0, int(length(f.exit) / 2));
+		} else
+			break;
+		out.clipped = true;
+		s = sprintf('%J', out);
+	}
+	print(s, '\n');
+}
+
+function data_summary(entries) {
+	let ds = sort(keys(entries)), bytes = 0;
+	for (let d in ds)
+		bytes += entry_size(d, entries[d]);
+	return { first: ds[0], last: length(ds) ? ds[length(ds) - 1] : null, count: length(ds), bytes: bytes,
+		retention_days: cfg.retention_days, max_bytes: cfg.max_bytes, mount_ok: mount_ok() };
+}
+
+const DIMS = { device: true, target: true, exit: true, date: true, hour: true, kind: true };
+const SORTS = { up: 0, down: 1, conns: 2, total: 3, key: 4 };
+const KINDS = { clash: true, socks: true, forward: true };
+// 页面查询的读盘预算：LuCI 的 RPC 默认 20 秒超时（rpcd 30 秒杀进程），超出前给出能看懂的错误
+let budget_ms = null;
+
+function cmd_report() {
+	let t0 = clock(true);
+	cfg = load_config();
+	local_ips = load_local_ips();
+	let nodes = load_node_servers(), today = day_of(wall());
+	let range = parse_range(opt.date || today);
+	if (!range)
+		arg_fail('--date 需要 YYYY-MM-DD 或 YYYY-MM-DD..YYYY-MM-DD（日期须存在，起不晚于止）\n');
+	let from = hour_opt('from', 0), to = hour_opt('to', 24);
+	if (from >= to)
+		arg_fail('--from 须早于 --to\n');
+	let top = num(opt.top, opt.json ? 100 : 20);
+	let dims = split(opt.by || 'device', ','), sortkey = opt.sort || 'up', si = SORTS[sortkey];
+	for (let d in dims)
+		if (!DIMS[d])
+			arg_fail('--by 只支持 device,target,exit,date,hour,kind\n');
+	if (si == null)
+		arg_fail('--sort 只支持 up,down,total,conns,key\n');
+	if (opt.kind && !KINDS[opt.kind])
+		arg_fail('--kind 只支持 clash,socks,forward\n');
+	let entries = day_entries(), dates = filter(sort(keys(entries)), (d) => d >= range.from && d <= range.to);
+	// 第一遍只按原始列求和：同一（源, MAC, 类型, 出口, 目标）跨小时、跨日并成一条，需要时再带上日期或小时。
+	// 贴标签、节点标注、过滤这些逐条开销大的步骤只对合并后的键各做一次（每行开销约减半）
+	let by_date = index(dims, 'date') >= 0, by_hour = index(dims, 'hour') >= 0;
+	let hours = {}, raw = {}, matched = 0;
+	for (let d in dates) {
+		for (let path in day_files(d, entries[d])) {
+			if (budget_ms && elapsed_ms(t0) > budget_ms)
+				arg_fail(sprintf('查询超过 %d 秒仍未读完（读到 %s），请缩小日期范围\n', budget_ms / 1000, d));
+			for (let line in read_lines(path)) {
+				let x = split(line, '\t');
+				if (length(x) != 9)
+					continue;
+				let hc = hours[x[0]];
+				if (!hc) {
+					let t = localtime(int(x[0]));
+					hours[x[0]] = hc = [t.hour, sprintf('%04d-%02d-%02d', t.year, t.mon, t.mday)];
+				}
+				if (hc[0] < from || hc[0] >= to)
+					continue;
+				let k = x[1] + '\t' + x[2] + '\t' + x[3] + '\t' + x[4] + '\t' + x[5];
+				if (by_date)
+					k += '\t' + hc[1];
+				if (by_hour)
+					k += '\t' + hc[0];
+				let r = raw[k];
+				if (!r)
+					raw[k] = r = [0, 0, 0, x[1], x[2], x[3], x[4], x[5], hc[1], hc[0], 0];
+				r[0] += int(x[6]);
+				r[1] += int(x[7]);
+				r[2] += int(x[8]);
+				r[10]++;
+			}
+		}
+	}
+	let groups = {}, tot = [0, 0, 0], un = [0, 0], fdev = {}, fexit = {}, labels = {}, isnode = {}, seen = 0;
+	let over = (what) => arg_fail(sprintf('查询超过 %d 秒仍未完成（%s），请缩小日期范围或加过滤\n', budget_ms / 1000, what));
+	for (let rk in raw) {
+		if (budget_ms && !(++seen % 2048) && elapsed_ms(t0) > budget_ms)
+			over('汇总到第 ' + seen + ' 项');
+		let r = raw[rk], up = r[0], down = r[1], n = r[2], src = r[3], mac = r[4], kind = r[5], ex = r[6], target = r[7];
+		if (kind == 'unattributed') {
+			un[0] += up;
+			un[1] += down;
+			continue;
+		}
+		if (opt.kind && kind != opt.kind)
+			continue;
+		let node = isnode[target];
+		if (node == null)
+			isnode[target] = node = !!nodes[lc(target_host(target))];
+		let direct = (kind == 'forward' || (kind == 'clash' && NONPROXY[ex]));
+		if (opt.proxy && direct && !node)
+			continue;
+		let dk = src + ' ' + mac, label = labels[dk];
+		if (label == null)
+			labels[dk] = label = device_label(src, mac);
+		let tg = node ? target + ' [订阅节点]' : target;
+		let xl = (node && direct) ? '订阅节点直连(' + ex + ')' : (kind == 'clash' ? ex : kind + ':' + ex);
+		// 下拉框候选项：每个维度不受自己的过滤约束，但受其余过滤约束
+		let wd = want(opt.device, label), wx = want(opt.exit, xl), wt = want(opt.target, tg);
+		if (wx && wt)
+			tally(fdev, label, up, down, n);
+		if (wd && wt)
+			tally(fexit, xl, up, down, n);
+		if (!wd || !wx || !wt)
+			continue;
+		let parts = [];
+		for (let d in dims)
+			push(parts, d == 'device' ? label : d == 'target' ? tg : d == 'exit' ? xl :
+				d == 'date' ? r[8] : d == 'hour' ? sprintf('%02d:00', r[9]) : kind);
+		let k = join('  |  ', parts), g = groups[k];
+		if (!g)
+			groups[k] = g = [0, 0, 0, parts];
+		g[0] += up;
+		g[1] += down;
+		g[2] += n;
+		tot[0] += up;
+		tot[1] += down;
+		tot[2] += n;
+		matched += r[10];
+	}
+	// 排序约 0.03 毫秒一组（10 万组 2.7 秒）：按这个估算，排不完就别排
+	if (budget_ms && elapsed_ms(t0) + int(length(groups) * 3 / 100) > budget_ms)
+		over(length(groups) + ' 组待排序');
+	let ks = si == 4 ? sort(keys(groups)) : rank(groups, si == 3 ? ((g) => g[0] + g[1]) : ((g) => g[si]));
+	let span = range.from == range.to ? range.from : range.from + '..' + range.to;
+	if (opt.json) {
+		let rows = [], all = sort(keys(entries));
+		for (let i = 0; i < length(ks) && i < top; i++) {
+			let g = groups[ks[i]];
+			push(rows, { k: g[3], up: g[0], down: g[1], conns: g[2] });
+		}
+		emit_json({ version: VERSION, today: today, from: range.from, to: range.to, days: range.days, hours: [from, to],
+			by: dims, sort: sortkey, proxy: !!opt.proxy,
+			filters: { device: opt.device, exit: opt.exit, target: opt.target, kind: opt.kind },
+			dates: dates, available: { first: all[0], last: length(all) ? all[length(all) - 1] : null, count: length(all) },
+			mount_ok: mount_ok(), groups: length(ks), rows: rows,
+			total: { up: tot[0], down: tot[1], conns: tot[2], rows: matched },
+			unattributed: { up: un[0], down: un[1] },
+			facets: { device: top_list(fdev, 100, opt.device), exit: top_list(fexit, 100, opt.exit) },
+			elapsed_ms: elapsed_ms(t0) });
+		return 0;
+	}
+	if (opt.tsv) {
+		for (let k in ks)
+			printf('%s\t%d\t%d\t%d\n', k, groups[k][0], groups[k][1], groups[k][2]);
+		printf('(合计)\t%d\t%d\t%d\n(未归因)\t%d\t%d\t0\n', tot[0], tot[1], tot[2], un[0], un[1]);
+		return 0;
+	}
+	printf('%s %02d:00-%02d:00  按 %s%s  （%d 行明细）\n', span, from, to, join(',', dims), opt.proxy ? '  仅代理' : '', matched);
+	printf('%12s %12s %7s  %s\n', '上传', '下载', '连接', join(' | ', dims));
+	for (let i = 0; i < length(ks) && i < top; i++) {
+		let g = groups[ks[i]];
+		printf('%12s %12s %7d  %s\n', hs(g[0]), hs(g[1]), g[2], ks[i]);
+	}
+	if (length(ks) > top)
+		printf('%12s %12s %7s  （其余 %d 项未显示，用 --top 调整）\n', '', '', '', length(ks) - top);
+	printf('%12s %12s %7d  合计\n', hs(tot[0]), hs(tot[1]), tot[2]);
+	printf('%12s %12s %7s  未归因：OpenClash 核心计数里没能对应到具体连接的部分（轮询间隙里开关的短连接等）\n',
+		hs(un[0]), hs(un[1]), '');
+	return 0;
+}
+
+function cmd_status() {
+	cfg = load_config();
+	let raw = fs.readfile(cfg.run_dir + '/status.json'), now = wall();
+	if (!raw) {
+		if (opt.json)
+			emit_json({ state: 'NOT_RUNNING', problems: ['NOT_RUNNING'], version_cli: VERSION, today: day_of(now),
+				now: now, data: data_summary(day_entries()) });
+		else
+			print('NOT_RUNNING 未找到 ' + cfg.run_dir + '/status.json\n');
+		return 1;
+	}
+	let st = json(raw), age = now - st.now;
+	// 状态文件约每 10 秒刷新一次，轮询间隔最长 10 秒
+	let problems = st.problems || [];
+	if (age > 40)
+		unshift(problems, 'STALE');
+	if (opt.json) {
+		st.state = length(problems) ? 'STATUS_DEGRADED' : 'STATUS_OK';
+		st.problems = problems;
+		st.age = age;
+		st.version_cli = VERSION;
+		st.today = day_of(now);
+		st.data = data_summary(day_entries());
+		emit_json(st);
+		return length(problems) ? 1 : 0;
+	}
+	printf('%s 版本 %s pid %d run_id %s 已运行 %d 秒，状态更新于 %d 秒前，当前轮询间隔 %.1f 秒\n',
+		length(problems) ? 'STATUS_DEGRADED problems=' + join(',', problems) : 'STATUS_OK',
+		st.version, st.pid, st.run_id, st.now - st.started, age, st.poll_ms / 1000.0);
+	printf('控制接口 %s%s；当前连接 %d；核心累计 上传 %s / 下载 %s；跟踪中的转发/SOCKS 流 %d\n', st.api_ok ? '正常' : '失败',
+		st.api_ok ? '' : '（' + st.api_reason + '）', st.connections, hs(st.core_up_total), hs(st.core_down_total),
+		st.ct_tracked);
+	printf('本小时 %s：明细 %d 行，轮询成功 %d / 失败 %d，已归因上传 %s，未归因上传 %s，待补写 %d 段\n', st.hour || '-',
+		st.rows, st.hour_polls_ok, st.hour_polls_failed, hs(st.hour_att_up), hs(st.hour_un_up), st.pending_retry);
+	printf('数据目录 %s（分区%s），日志 %s\n', st.data_dir, st.mount_ok ? '已挂载' : '未挂载', st.log || '-');
+	return length(problems) ? 1 : 0;
+}
+
+// LuCI 页面的入口，ACL 只放行「r3mini-traffic web *」：只读、只输出 JSON，拒绝数据目录、节点文件等路径参数；
+// 记录器状态不正常时也返回 0，由页面按 state 显示
+const WEB_OPTS = {
+	report: { date: true, from: true, to: true, by: true, device: true, exit: true, target: true, kind: true,
+		proxy: true, top: true, sort: true },
+	status: {},
+};
+
+function cmd_web(sub) {
+	let allowed = WEB_OPTS[sub];
+	if (!allowed)
+		arg_fail('用法: r3mini-traffic web report|status [参数]\n');
+	for (let k in opt)
+		if (!allowed[k])
+			arg_fail(sprintf('web %s 不接受 --%s\n', sub, k));
+	opt.json = true;
+	if (sub == 'status') {
+		cmd_status();
+		return 0;
+	}
+	if (opt.top != null && (!match('' + opt.top, /^[0-9]{1,3}$/) || int(opt.top) < 1 || int(opt.top) > 500))
+		arg_fail('--top 须为 1-500\n');
+	budget_ms = 14000;
+	return cmd_report();
+}
+
+// ---- 入口 ----
+let args = ARGV, pos = [];
+for (let i = 0; i < length(args); i++) {
+	let a = args[i];
+	if (substr(a, 0, 2) == '--') {
+		let k = substr(a, 2);
+		if (FLAGS[k])
+			opt[k] = true;
+		else
+			opt[k] = args[++i];
+	} else {
+		push(pos, a);
+	}
+}
+if (opt.duration)
+	opt.duration = num(opt.duration, 0);
+if (opt['clock-skew'] != null)
+	opt['clock-skew'] = int(opt['clock-skew']);
+
+let cmd = shift(pos);
+if (cmd == 'run')
+	exit(cmd_run());
+else if (cmd == 'replay' && length(pos) == 2)
+	exit(cmd_replay(pos[0], pos[1]));
+else if (cmd == 'report')
+	exit(cmd_report());
+else if (cmd == 'status')
+	exit(cmd_status());
+else if (cmd == 'web' && length(pos) == 1)
+	exit(cmd_web(pos[0]));
+else if (cmd == 'maintain')
+	exit(cmd_maintain());
+else if (cmd == 'version')
+	print(VERSION + '\n');
+else {
+	warn('用法: r3mini-traffic run|report|status|web report|status|maintain|replay INPUT OUTDIR|version（详见脚本开头注释）\n');
+	exit(2);
+}
