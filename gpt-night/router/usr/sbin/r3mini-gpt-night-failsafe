@@ -1,0 +1,36 @@
+#!/bin/sh
+# GPT 夜间省流的路由器兜底，cron 每天 08:30 运行。
+# 电脑的白天任务（07:30）恢复 ChatGPT 规则后会删除夜间标记。标记还在、规则仍启用在夜间节点上，
+# 说明电脑没跑白天任务（关机或睡眠）：停用该规则，ChatGPT 回原分流（🤖 AI）。
+# 标记保留，电脑下次运行白天或夜间任务时再恢复切换前的节点。
+MARKER=${R3GN_MARKER:-/etc/r3mini-gpt-night.json}
+CLI=${R3GN_CLI:-/usr/sbin/r3mini-chatgpt}
+LOG=${R3GN_LOG:-/mnt/mmcblk0p6/r3mini-gpt-night.log}
+
+log() {
+	logger -t r3mini-gpt-night -- "$1"
+	[ -d "${LOG%/*}" ] && printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$1" >> "$LOG"
+	return 0
+}
+
+[ -f "$MARKER" ] || exit 0
+rule=$(jsonfilter -i "$MARKER" -e '@.rule')
+src=$(jsonfilter -i "$MARKER" -e '@.night.source')
+sel=$(jsonfilter -i "$MARKER" -e '@.night.selected')
+case "$rule" in
+	????????????) ;;
+	*) log "failsafe: 夜间标记缺少规则编号，未处理"; exit 1 ;;
+esac
+case "$rule" in *[!0-9a-f]*) log "failsafe: 夜间标记的规则编号无效，未处理"; exit 1 ;; esac
+
+T=$(mktemp /tmp/r3gn-fs.XXXXXX) || exit 1
+"$CLI" status > "$T"
+cur_src=$(jsonfilter -i "$T" -e "@.site_rules[@.id='$rule'].source")
+cur_sel=$(jsonfilter -i "$T" -e "@.site_rules[@.id='$rule'].selected")
+cur_on=$(jsonfilter -i "$T" -e "@.site_rules[@.id='$rule'].enabled")
+rm -f "$T"
+[ -n "$src" ] && [ "$cur_src" = "$src" ] && [ "$cur_sel" = "$sel" ] && [ "$cur_on" = true ] || exit 0
+
+ok=$("$CLI" set-enabled "$rule" 0 | jsonfilter -e '@.ok')
+log "failsafe: 08:30 夜间标记还在，规则仍在夜间节点 $src:$sel，已停用规则回原分流（ok=$ok）；电脑下次运行白天或夜间任务时恢复原节点"
+exit 0

@@ -1,0 +1,2 @@
+# 部署到路由器的文件必须保持 LF：Windows 检出（core.autocrlf）也不转换
+router/** text eol=lf

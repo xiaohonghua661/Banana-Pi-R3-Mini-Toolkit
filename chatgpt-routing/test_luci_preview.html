@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>网站分流 · 离线页面验收</title>
+<!--
+  合成数据 + 本地模拟接口，实际执行 router/ 里的 LuCI 页面源码，不连接路由器。只供开发时看交互，不能当验收：
+  数据是自编的小样本，也没有 argon 的蓝色页头。验收用 test_real_page.py，在设备的真实页面和真实数据上做。
+  ?mode=rules|change|add|conflict|bench|confirm|delete|steam|fault|long|empty|failure
+  ?theme=URL       换成真实主题样式（例如从路由器复制的 argon cascade.css），可加 &dark=URL
+  弹窗按 LuCI 的结构模拟：#modal_overlay > .modal，body.modal-overlay-active，Esc 点 .right 里第一个按钮。
+-->
+<style id="fallback">
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 sans-serif; color: #222; background: #f5f5f5; }
+  #maincontent { padding: 12px; background: #fff; max-width: 1200px; margin: 0 auto; }
+  .cbi-button { border: 1px solid #bbb; border-radius: 4px; padding: 6px 14px; font: inherit; cursor: pointer; color: inherit; background: #fff; }
+  .cbi-button-apply, .cbi-button-action { background: #2673b6; border-color: #2673b6; color: #fff; }
+  .cbi-button-negative, .cbi-button-remove, .cbi-button-reset { color: #b32; border-color: #b32; }
+  input, textarea, select { border: 1px solid #aaa; border-radius: 4px; padding: 6px; background: #fff; color: inherit; font: inherit; }
+  #modal_overlay { position: fixed; inset: 0; z-index: 900; display: none; overflow-y: auto; background: rgba(0, 0, 0, .6); }
+  body.modal-overlay-active { overflow: hidden; }
+  body.modal-overlay-active #modal_overlay { display: block; }
+  .modal { display: flex; flex-wrap: wrap; width: 90%; max-width: 600px; margin: 5em auto; padding: 1rem; background: #fff; border-radius: 4px; }
+  .modal > * { flex-basis: 100%; margin-bottom: .5em; }
+</style>
+<body>
+<div id="maincontent" class="main"><div id="view"></div></div>
+<script>
+(async function() {
+  const query = new URLSearchParams(location.search), mode = query.get('mode') || 'rules';
+  for (const key of ['theme', 'dark']) {
+    if (!query.get(key)) continue;
+    if (key === 'theme') document.getElementById('fallback').remove();
+    const link = document.head.appendChild(document.createElement('link'));
+    link.rel = 'stylesheet';
+    link.href = query.get(key);
+    await new Promise(resolve => { link.onload = link.onerror = resolve; });
+  }
+
+  // LuCI ui.showModal / hideModal and the overlay's Escape handler, same DOM shape.
+  const overlay = document.body.appendChild(document.createElement('div'));
+  overlay.id = 'modal_overlay';
+  overlay.tabIndex = -1;
+  const dialog = overlay.appendChild(document.createElement('div'));
+  dialog.className = 'modal';
+  dialog.setAttribute('role', 'dialog');
+  overlay.addEventListener('keydown', ev => {
+    if (ev.key !== 'Escape') return;
+    const button = dialog.querySelector('.right > button, .right > .btn, .button-row > .btn');
+    if (button) button.click();
+  });
+  const ui = {
+    showModal(title, children, ...classes) {
+      dialog.className = ['modal'].concat(classes).join(' ');
+      dialog.replaceChildren();
+      const h4 = document.createElement('h4');
+      h4.textContent = title;
+      dialog.append(h4, ...[].concat(children));
+      document.body.classList.add('modal-overlay-active');
+      overlay.scrollTop = 0;
+      overlay.focus();
+      return dialog;
+    },
+    hideModal() { document.body.classList.remove('modal-overlay-active'); overlay.blur(); }
+  };
+
+  const now = Date.now(), isoAgo = s => new Date(now - s * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const flags = { TW: '🇹🇼', JP: '🇯🇵', HK: '🇭🇰', SG: '🇸🇬', US: '🇺🇸', KR: '🇰🇷' };
+  const regions = [['TW', '台湾', 9], ['JP', '日本', 12], ['HK', '香港', 8], ['SG', '新加坡', 6], ['US', '美国', 10], ['KR', '韩国', 3]];
+  const longName = mode === 'long' ? ' 用于检查手机端换行的超长节点名称'.repeat(3) : '';
+  // Synthetic 16-hex ids (the router uses SHA-256; crypto.subtle needs a secure origin).
+  function sha16(text) {
+    const fnv = seed => {
+      let h = seed;
+      for (const ch of text) h = Math.imul(h ^ ch.codePointAt(0), 16777619) >>> 0;
+      return h.toString(16).padStart(8, '0');
+    };
+    return fnv(2166136261) + fnv(84696351);
+  }
+  const catalog = [];
+  for (const [code, name, count] of regions)
+    for (let i = 1; i <= count; i++)
+      catalog.push({ name: `${flags[code]} ${name} ${String(i).padStart(2, '0')}${i % 4 === 0 ? ' [0.3X]' : ''}${i === 1 ? longName : ''}`,
+        type: ['vmess', 'trojan', 'ss', 'hysteria2'][i % 4], code, seed: i });
+  catalog.push({ name: '剩余流量：128 GB', type: 'ss', code: '', seed: 3 }, { name: '<img src=x onerror=alert(1)> 合成文本节点', type: 'trojan', code: '', seed: 5 },
+    { name: '🇺🇸 美国 链式中转', type: 'ss', code: 'US', seed: 7, dependent: true });
+  for (const node of catalog) node.id = await sha16(node.name);
+  // Measured once already: Japan and the US; Taiwan never.
+  const verdict = node => node.dependent ? { error: 'NODE_DEPENDENCY' } : node.code === '' || node.seed % 5 === 0 ? { error: node.code === '' ? 'TLS_FAILED' : 'UNSUPPORTED_REGION' } :
+    { median_ms: 120 + ((node.seed * 37 + node.name.length * 11) % 260), country: node.code };
+  const results = {};
+  for (const node of catalog) if (['JP', 'US', 'HK', ''].includes(node.code) || node.dependent) results[node.id] = Object.assign({ tested_at: isoAgo(node.code === 'US' ? 2 * 86400 : 3 * 3600) }, verdict(node));
+  let job = null, lastFinished = isoAgo(3 * 3600), steam = { enabled: mode === 'steam', applied: mode === 'steam' };
+  if (mode === 'bench') job = null;
+
+  const byName = name => catalog.find(n => n.name.startsWith(name));
+  const chatgptNode = byName('🇯🇵 日本 03'), claudeNode = byName('🇺🇸 美国 02');
+  let rules = mode === 'empty' ? [] : [
+    { id: 'aaaaaaaaaaaa', label: mode === 'long' ? '用于检查手机端与放大后换行的长网站名称'.repeat(3) : 'ChatGPT', preset: 'chatgpt',
+      domains: ['chatgpt.com', 'openai.com', 'oaistatic.com', 'oaiusercontent.com', 'chatgpt.livekit.cloud'], source: 'mesl_xhh.yaml',
+      selected: chatgptNode.id, enabled: true, unverified: false },
+    { id: 'bbbbbbbbbbbb', label: 'Claude', preset: '', domains: ['claude.ai', 'anthropic.com'], source: 'mesl_xhh.yaml',
+      selected: claudeNode.id, enabled: true, unverified: true },
+    { id: 'cccccccccccc', label: '小红书', preset: '', domains: ['xiaohongshu.com', 'xhscdn.com', 'xhslink.com', 'xiaohongshu.net'],
+      source: 'mesl_xhh.yaml', selected: byName('🇭🇰 香港 02').id, enabled: false, unverified: false }
+  ];
+  const ruleView = r => {
+    const node = catalog.find(n => n.id === r.selected), res = results[r.selected] || {};
+    const broken = mode === 'fault' && r.id === 'bbbbbbbbbbbb';
+    return Object.assign({}, r, { selected_name: node ? node.name : r.selected_name, applied: r.enabled && !broken && mode !== 'pending',
+      error: broken ? 'NODE_MISSING' : null, verified: !r.unverified && !!res.median_ms, median_ms: r.unverified ? null : res.median_ms || null,
+      tested_at: r.unverified ? null : res.tested_at || null, country: res.country || null,
+      target: r.preset === 'chatgpt' ? 'chatgpt' : 'site:' + r.domains[0] });
+  };
+  const summary = () => {
+    const list = rules.map(ruleView), enabled = list.some(r => r.enabled);
+    return { ok: true, enabled, applied: enabled && list.filter(r => r.enabled).every(r => r.applied), pending_restart: mode === 'pending',
+      error: mode === 'fault' ? 'STATE_MISMATCH' : null, steam_direct: Object.assign({}, steam), source: 'mesl_xhh.yaml',
+      sources: ['lian_li.yaml', 'mesl_xhh.yaml'], rules: list, last_action: null, last_time: null };
+  };
+  const nodes = (source, target) => {
+    const list = source === 'lian_li.yaml' ? catalog.slice(0, 6) : catalog;
+    let done = 0;
+    if (job) {
+      done = Math.min(job.ids.length, Math.floor((Date.now() - job.started) / 700));
+      job.ids.slice(0, done).forEach(id => { results[id] = Object.assign({ tested_at: isoAgo(1) }, verdict(catalog.find(n => n.id === id))); });
+    }
+    const running = !!job && done < job.ids.length, runIds = job ? job.ids : [];
+    if (job && !running) { job = null; lastFinished = isoAgo((now - Date.now()) / 1000); }
+    return { ok: true, source, target, source_sha256: 'a'.repeat(64), nodes: list.map(n => {
+      const res = results[n.id], pending = runIds.includes(n.id) && running && !(res && res.tested_at && res.tested_at > isoAgo(30));
+      return { id: n.id, name: n.name, type: n.type, dependent: !!n.dependent, eligible: !!(res && res.median_ms) && !pending,
+        median_ms: res && !pending ? res.median_ms || null : null, samples_ms: res && res.median_ms && !pending ? [res.median_ms - 9, res.median_ms, res.median_ms + 14] : [],
+        country: res && !pending ? res.country || null : null, error: pending || !res ? 'PENDING' : res.error || null,
+        tested_at: res && !pending ? res.tested_at : null, stale: false };
+    }), benchmark: { ok: true, running, done, total: runIds.length, run_ids: runIds, finished_at: lastFinished, error: null } };
+  };
+  const out = (data, code) => ({ code: code || 0, stdout: JSON.stringify(data), stderr: '' });
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const changed = extra => Object.assign(summary(), { site_rules: summary().rules, reloaded: true, elapsed_ms: 2100 }, extra);
+  const fs = { exec: async function(cli, args) {
+    if (cli !== '/usr/sbin/r3mini-chatgpt') throw new Error('离线预览只模拟本模块');
+    await pause(args[0] === 'summary' ? 120 : args[0] === 'nodes' ? 200 : 900);
+    if (args[0] === 'summary') return out(summary());
+    if (args[0] === 'nodes') return out(nodes(args[1], args[2]));
+    if (args[0] === 'benchmark') {
+      const ids = args.slice(3);
+      job = { ids: ids.length ? ids : catalog.filter(n => !n.dependent).map(n => n.id), started: Date.now() };
+      return out(Object.assign({ ok: true }, nodes(args[1], args[2]).benchmark));
+    }
+    if (mode === 'failure' && args[0] === 'save') return out({ ok: false, error: 'DOMAIN_CONFLICT', message: '此域名与另一条网站规则重叠，请修改原规则。' }, 1);
+    if (args[0] === 'save') {
+      const p = JSON.parse(args[1]), id = p.id || 'dddddddddddd';
+      const domains = p.domains.map(d => new URL(d.includes('://') ? d : 'https://' + d).hostname.toLowerCase());
+      const next = { id, label: p.label, preset: p.preset || '', domains, source: p.source, selected: p.selected, enabled: p.enabled, unverified: !!p.unverified };
+      rules = rules.some(r => r.id === id) ? rules.map(r => r.id === id ? next : r) : rules.concat([next]);
+      return out(changed({ id }));
+    }
+    if (args[0] === 'set-enabled') rules = rules.map(r => r.id === args[1] ? Object.assign({}, r, { enabled: args[2] === '1' }) : r);
+    else if (args[0] === 'remove') rules = rules.filter(r => r.id !== args[1]);
+    else if (args[0] === 'disable') { rules = rules.map(r => Object.assign({}, r, { enabled: false })); steam = { enabled: false, applied: false }; }
+    else if (args[0] === 'steam-direct') steam = { enabled: args[1] === '1', applied: args[1] === '1' };
+    else throw new Error('离线预览不支持此操作');
+    return out(changed({ reloaded: args[0] !== 'remove' }));
+  } };
+
+  const source = await (await fetch('router/www/luci-static/resources/view/services/r3mini-chatgpt.js')).text();
+  const view = new Function('view', 'fs', 'poll', 'ui', 'document', source)({ extend: value => value }, fs,
+    { add(fn, seconds) { setInterval(fn, seconds * 1000); } }, ui, document);
+  document.getElementById('view').appendChild(view.render(await view.load()));
+  window.r3cgView = view;
+  const settle = () => new Promise(resolve => setTimeout(resolve, 450));
+  const buttonOf = (root, text) => Array.from(root.querySelectorAll('button')).find(b => b.textContent.trim() === text);
+  if (['change', 'bench'].includes(mode)) { buttonOf(view.list, '换节点').click(); await settle(); }
+  if (mode === 'bench') {
+    buttonOf(dialog, '台湾 9').click();
+    buttonOf(dialog, '测速这 9 个').click();
+    await pause(2600);
+  }
+  if (['add', 'failure', 'conflict'].includes(mode)) {
+    view.addBtn.click();
+    const box = document.getElementById('r3cg-domains');
+    box.value = mode === 'conflict' ? 'www.xiaohongshu.com' : 'https://www.bilibili.com/video/BV1\nbilivideo.com';
+    box.dispatchEvent(new Event('input'));
+    await pause(1100);
+    if (mode === 'failure') {
+      dialog.querySelector('button.r3cg-row').click();
+      buttonOf(dialog, '保存并生效').click();
+      await pause(1200);
+    }
+  }
+  if (mode === 'confirm') view.disableBtn.click();
+  if (mode === 'delete') buttonOf(view.list, '删除').click();
+  document.title = '离线预览 · ' + mode;
+  document.body.dataset.ready = '1';
+})().catch(function(error) { document.body.textContent = '预览加载失败：' + error.message; document.body.dataset.ready = 'error'; });
+</script>
+</body>
+</html>
