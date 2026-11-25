@@ -31,6 +31,11 @@ put_if_missing /etc/config/r3mini_fan 600
 put /usr/share/luci/menu.d/luci-app-r3mini-fan.json 644
 put /usr/share/rpcd/acl.d/luci-app-r3mini-fan.json 644
 put /www/luci-static/resources/view/system/r3mini-fan.js 644
+# 菜单 json 的 view path 带缓存指纹后缀（system/r3mini-fan-3848230b8f），LuCI 按该名字
+# 请求静态文件。两份内容必须一致，缺这份风扇页会报
+# "HTTP error 404 while loading class file"。
+# scripts/router/test-backup-covers-managed-files.sh 会校验两份内容相同。
+put /www/luci-static/resources/view/system/r3mini-fan-3848230b8f.js 644
 
 rm -f /tmp/luci-indexcache
 /etc/init.d/rpcd restart
@@ -45,4 +50,4 @@ if ! /etc/init.d/r3mini-fan restart || ! /etc/init.d/r3mini-fan status >/dev/nul
 fi
 
 printf 'BACKUP=%s\n' "$backup"
-printf 'INSTALLED_FILES=7\n'
+printf 'INSTALLED_FILES=8\n'
