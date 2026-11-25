@@ -15,21 +15,27 @@ var KINDS = ['wan', 'cellular', 'hotspot'];
 var NAMES = { auto: '自动', wan: '有线 WAN', cellular: '5G 蜂窝', hotspot: 'Wi-Fi 上网' };
 
 var CSS = [
-	'.r3x{max-width:1100px;font-size:14px;line-height:1.6}',
+	// 全宽，跟其他 LuCI 页面一样；容器查询按页面自身宽度切换布局（侧栏宽窄不影响）。
+	// 区块里的文字一律用 div：argon 给 .cbi-section p 加了 1rem 内边距，用 p 会凭空多出留白和缩进。
+	'.r3x{font-size:14px;line-height:1.6;container:r3x/inline-size}',
 	'.r3x *{box-sizing:border-box}',
 	'.r3x [hidden]{display:none!important}',
-	'.r3x .r3x-descr{margin:0 0 16px;opacity:.8}',
-	'.r3x .r3x-now{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:0 0 14px}',
+	// argon 的区块本身没有内边距，内容会贴着白框边缘。
+	'.r3x .r3x-body{padding:0 16px 16px}',
+	'.r3x .r3x-descr{margin:0 0 12px;opacity:.8}',
+	'.r3x .r3x-now{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:0 0 12px}',
 	'.r3x .r3x-now strong{font-size:18px}',
 	'.r3x .r3x-age{font-size:12px;opacity:.7}',
 	'.r3x .r3x-age.err{color:#c62828;opacity:1}',
-	'.r3x .r3x-exits{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px;margin-bottom:16px}',
+	'.r3x .r3x-exits{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:12px}',
 	'.r3x .r3x-exit{display:flex;flex-direction:column;gap:4px;min-width:0;padding:12px 14px;border:1px solid rgba(128,128,128,.28);border-radius:8px}',
 	'.r3x .r3x-exit.active{border-color:#2e7d32;box-shadow:inset 3px 0 0 #2e7d32}',
 	'.r3x .r3x-exit.unknown{opacity:.55}',
 	'.r3x .r3x-exit-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:600}',
 	'.r3x .r3x-exit-detail{overflow-wrap:anywhere;font-variant-numeric:tabular-nums}',
-	'.r3x .r3x-exit-reason{font-size:14px;opacity:.8;overflow-wrap:anywhere}',
+	'.r3x .r3x-exit-detail:empty{display:none}',
+	'.r3x .r3x-exit-reason{opacity:.8;overflow-wrap:anywhere}',
+	'.r3x .r3x-exit-reason:empty{display:none}',
 	'.r3x .r3x-exit .cbi-button{align-self:flex-start;margin-top:4px}',
 	'.r3x .r3x-pill{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}',
 	'.r3x .r3x-pill.active{background:rgba(46,125,50,.14);color:#2e7d32}',
@@ -38,39 +44,54 @@ var CSS = [
 	'.r3x .r3x-pill.warn{background:rgba(237,108,2,.14);color:#b45309}',
 	'.r3x .r3x-prefer{display:flex;flex-wrap:wrap;align-items:center;gap:8px}',
 	'.r3x .r3x-prefer>span{margin-right:4px;font-weight:600}',
-	'.r3x .r3x-prefer .cbi-button{flex:1 1 110px;min-height:40px;margin:0}',
+	'.r3x .r3x-prefer .cbi-button{flex:0 1 150px;min-width:104px;min-height:38px;margin:0}',
 	'.r3x .r3x-prefer .cbi-button[aria-pressed="true"]{outline:2px solid #2e7d32;outline-offset:-2px;font-weight:700}',
-	'.r3x .r3x-note{margin:8px 0 0;font-size:14px;opacity:.8}',
-	'.r3x .r3x-msg{min-height:1.6em;margin:8px 0 0;font-size:14px}',
+	'.r3x .r3x-note{margin:8px 0 0;opacity:.8}',
+	'.r3x .r3x-msg{margin:8px 0 0}',
+	'.r3x .r3x-msg:empty{display:none}',
 	'.r3x .r3x-msg.ok{color:#2e7d32}',
 	'.r3x .r3x-msg.err{color:#c62828}',
-	'.r3x .r3x-form{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;max-width:640px}',
+	// Wi-Fi 上网：窄屏一栏（频段 → 搜索 → 名称密码 → 保存），宽屏两栏（左边设置，右边附近的 Wi-Fi）。
+	'.r3x .r3x-wifi{display:grid;gap:14px;grid-template-columns:minmax(0,1fr);grid-template-areas:"top" "scan" "bottom";align-items:start}',
+	'.r3x .r3x-top{grid-area:top}',
+	'.r3x .r3x-scan{grid-area:scan}',
+	'.r3x .r3x-bottom{grid-area:bottom}',
+	'.r3x .r3x-top,.r3x .r3x-bottom{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}',
 	'.r3x .r3x-field{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}',
-	'.r3x .r3x-field select,.r3x .r3x-field input{max-width:100%;min-width:0}',
+	'.r3x .r3x-field select,.r3x .r3x-field input{width:100%;max-width:100%;min-width:0}',
 	'.r3x .r3x-field>label{font-weight:600}',
-	'.r3x .r3x-field .r3x-hint{font-size:14px;opacity:.75}',
-	'.r3x .r3x-row{display:flex;flex-wrap:wrap;gap:8px}',
-	'.r3x .r3x-row>input,.r3x .r3x-row>select{flex:1 1 220px;min-width:0;width:auto}',
-	'.r3x .r3x-row>.cbi-button{flex:none;margin:0}',
+	'.r3x .r3x-hint{opacity:.75}',
 	'.r3x .r3x-check{display:flex;align-items:center;gap:8px;font-weight:600}',
-	'.r3x .r3x-list{max-height:320px;overflow:auto;margin:0;padding:0;list-style:none;border:1px solid rgba(128,128,128,.28);border-radius:8px}',
-	'.r3x .r3x-list li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;padding:8px 12px;border-top:1px solid rgba(128,128,128,.18)}',
-	'.r3x .r3x-list li:first-child{border-top:0}',
+	'.r3x .r3x-scan{display:grid;gap:8px;align-content:start;padding:12px 14px;border:1px solid rgba(128,128,128,.28);border-radius:8px}',
+	'.r3x .r3x-scan-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}',
+	'.r3x .r3x-scan-head .cbi-button{margin:0}',
+	'.r3x .r3x-list{max-height:420px;overflow:auto;margin:0;padding:0;list-style:none;border-top:1px solid rgba(128,128,128,.18)}',
+	'.r3x .r3x-list li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;padding:8px 4px;border-bottom:1px solid rgba(128,128,128,.18)}',
+	'.r3x .r3x-list li:last-child{border-bottom:0}',
 	'.r3x .r3x-list li.picked{background:rgba(46,125,50,.1)}',
 	'.r3x .r3x-list li.no{opacity:.55}',
 	'.r3x .r3x-net{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}',
-	'.r3x .r3x-meta{font-size:14px;opacity:.8;font-variant-numeric:tabular-nums}',
+	'.r3x .r3x-meta{opacity:.8;font-variant-numeric:tabular-nums}',
 	'.r3x .r3x-list .cbi-button{margin:0;min-height:32px}',
-	'.r3x .r3x-warn{margin:0;padding:8px 12px;border-left:3px solid #ed6c02;background:rgba(237,108,2,.08);font-size:14px}',
+	'.r3x .r3x-warn{margin:0;padding:8px 12px;border-left:3px solid #ed6c02;background:rgba(237,108,2,.08)}',
 	'.r3x .r3x-actions{display:flex;flex-wrap:wrap;gap:8px}',
-	'.r3x .r3x-actions .cbi-button{min-height:40px;margin:0}',
-	'.r3x .r3x-job{margin:0;padding:8px 12px;border-radius:6px;background:rgba(128,128,128,.1);font-size:14px}',
+	'.r3x .r3x-actions .cbi-button{min-height:38px;margin:0}',
+	'.r3x .r3x-job{margin:0;padding:8px 12px;border-radius:6px;background:rgba(128,128,128,.1)}',
 	'.r3x .r3x-job.err{background:rgba(198,40,40,.1);color:#c62828}',
 	'.r3x .r3x-job.ok{background:rgba(46,125,50,.1);color:#2e7d32}',
-	'.r3x .r3x-foot{margin:12px 0 0;font-size:14px;opacity:.75}',
-	'.r3x .r3x-alert{margin:0 0 16px;padding:10px 14px;border-left:4px solid #c62828;background:rgba(198,40,40,.08)}',
-	'.r3x .r3x-alert p{margin:0}',
-	'.r3x .r3x-alert p+p{margin-top:6px}',
+	'.r3x .r3x-foot{margin:8px 0 0;opacity:.75}',
+	'.r3x .r3x-alert{display:grid;gap:6px;margin:0 0 12px}',
+	'.r3x .r3x-alert p{margin:0;padding:8px 12px;border-left:4px solid #c62828;background:rgba(198,40,40,.08)}',
+	'.r3x .r3x-alert p.paused{border-left-color:#ed6c02;background:rgba(237,108,2,.08)}',
+	'@container r3x (min-width:900px){',
+	'.r3x .r3x-wifi{grid-template-columns:minmax(340px,520px) minmax(0,1fr);grid-template-rows:auto 1fr;grid-template-areas:"top scan" "bottom scan";column-gap:28px}',
+	'}',
+	'@container r3x (max-width:700px){',
+	'.r3x .r3x-exits{grid-template-columns:minmax(0,1fr)}',
+	'.r3x .r3x-prefer{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}',
+	'.r3x .r3x-prefer>span{grid-column:1/-1}',
+	'.r3x .r3x-prefer .cbi-button{min-width:0}',
+	'}',
 	'@media (prefers-color-scheme:dark){',
 	'.r3x .r3x-pill.active,.r3x .r3x-msg.ok,.r3x .r3x-job.ok{color:#81c784}',
 	'.r3x .r3x-pill.ready{color:#90caf9}',
@@ -176,20 +197,22 @@ function exitView(st, kind) {
 	var radio = (st.radios || []).filter(function(r) { return r.name === f.radio; })[0] || {};
 	var where = '「' + f.ssid + '」· ' + bandName(radio.band);
 	if (f.up) return { tone: active ? 'active' : 'ready', pill: active ? '正在使用' : '可用', detail: f.ip, reason: where + (f.signal != null ? ' · 信号' + signalName(f.signal) : '') };
-	if (f.parked) return { tone: 'warn', pill: '等对方出现', detail: '', reason: where + ' 一直连不上，已先停下 Wi-Fi 上网，让本机 ' + bandName(radio.band) + ' Wi-Fi 恢复；搜到对方后会自动重连' };
-	return { tone: 'warn', pill: '未连上', detail: '', reason: where + ' 还没连上。没连上期间本机 ' + bandName(radio.band) + ' Wi-Fi 会暂停，约 2 分钟仍连不上就先停下 Wi-Fi 上网让它恢复' };
+	if (f.parked) return { tone: 'warn', pill: '等对方出现', detail: '', reason: where + '：对方不在，搜到后自动重连' };
+	return { tone: 'warn', pill: '连接中', detail: '', reason: where };
 }
 
-// 本机 AP 的异常：没在运行（起不来），或因 Wi-Fi 上网没连上而暂停。
+// 本机 AP 的异常：没在运行（起不来，红色），或暂停（橙色）。
 function apAlerts(st) {
-	var out = [];
+	var out = [], f = st.wifi || {};
 	(st.radios || []).forEach(function(r) {
 		if (!r.has_ap || r.disabled) return;
 		var name = '本机 ' + bandName(r.band) + ' Wi-Fi「' + r.ap_ssid + '」';
 		if (!r.ap_up)
-			out.push(name + '现在没有在运行，用它连路由器的设备连不上。可以先停用再启用 Wi-Fi 上网让它重建；仍不行，从有线 LAN 用 SSH 执行 ubus call network.wireless down \'{"device":"' + r.name + '"}\'，再把 down 换成 up 执行一次。');
+			out.push({ kind: 'down', text: name + '现在没有在运行，用它连路由器的设备连不上。可以先停用再启用 Wi-Fi 上网让它重建；仍不行，从有线 LAN 用 SSH 执行 ubus call network.wireless down \'{"device":"' + r.name + '"}\'，再把 down 换成 up 执行一次。' });
+		else if (r.ap_paused && f.enabled && !f.parked && !f.up && f.radio === r.name)
+			out.push({ kind: 'paused', text: name + '暂停中：Wi-Fi 上网正用这个频段连接「' + f.ssid + '」，连上后恢复；约 2 分钟仍连不上，会先停下 Wi-Fi 上网让它恢复。' });
 		else if (r.ap_paused)
-			out.push(name + '暂停中：Wi-Fi 上网正用这个频段且还没连上。连上后自动恢复；约 2 分钟仍连不上，会先停下 Wi-Fi 上网让它恢复。');
+			out.push({ kind: 'paused', text: name + '已停止（hostapd 状态 ' + (r.ap_state || '未知') + '），用它连路由器的设备连不上。' });
 	});
 	return out;
 }
@@ -249,24 +272,24 @@ return view.extend({
 			n.prefer[kind] = E('button', { 'class': 'cbi-button', 'aria-pressed': 'false', 'click': function() { self.prefer(kind); } }, NAMES[kind]);
 			return n.prefer[kind];
 		});
-		n.preferNote = E('p', { 'class': 'r3x-note' }, '');
-		n.preferMsg = E('p', { 'class': 'r3x-msg', 'aria-live': 'polite' }, '');
+		n.preferNote = E('div', { 'class': 'r3x-note' }, '');
+		n.preferMsg = E('div', { 'class': 'r3x-msg', 'aria-live': 'polite' }, '');
 
 		n.enabled = E('input', { 'type': 'checkbox', 'id': 'r3x-enabled', 'change': function() { self.syncForm(); } });
 		n.radio = E('select', { 'class': 'cbi-input-select', 'id': 'r3x-radio', 'change': function() { self.scan = null; self.picked = null; self.renderScan(); self.syncForm(); } });
 		n.ssid = E('input', { 'class': 'cbi-input-text', 'id': 'r3x-ssid', 'type': 'text', 'maxlength': '32', 'autocomplete': 'off', 'spellcheck': 'false', 'placeholder': '先搜索再选择，也可以直接输入名称',
 			'input': function() { self.picked = null; self.renderScan(); self.syncForm(); } });
-		n.scanBtn = E('button', { 'class': 'cbi-button cbi-button-action', 'click': function() { self.doScan(); } }, '搜索附近 Wi-Fi');
-		n.scanInfo = E('div', { 'class': 'r3x-hint' }, '搜索约 2 秒，不会断网。');
+		n.scanBtn = E('button', { 'class': 'cbi-button cbi-button-action', 'click': function() { self.doScan(); } }, '搜索');
+		n.scanInfo = E('div', { 'class': 'r3x-hint', 'id': 'r3x-scaninfo' }, '点「搜索」列出附近能连的 Wi-Fi，约 2 秒，不会断网；点「选择」填进 Wi-Fi 名称。');
 		n.list = E('ul', { 'class': 'r3x-list', 'hidden': '' });
 		n.password = E('input', { 'class': 'cbi-input-password', 'id': 'r3x-password', 'type': 'password', 'maxlength': '63', 'autocomplete': 'new-password', 'input': function() { self.syncForm(); } });
 		n.passwordHint = E('div', { 'class': 'r3x-hint' }, '');
 		n.passwordField = E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-password' }, '密码'), n.password, n.passwordHint]);
-		n.warn = E('p', { 'class': 'r3x-warn' }, '');
+		n.warn = E('div', { 'class': 'r3x-warn' }, '');
 		n.revert = E('button', { 'class': 'cbi-button cbi-button-reset', 'click': function() { self.resetForm(); } }, '还原');
 		n.save = E('button', { 'class': 'cbi-button cbi-button-apply', 'click': function() { self.save(); } }, '保存并连接');
-		n.job = E('p', { 'class': 'r3x-job', 'role': 'status', 'aria-live': 'polite', 'hidden': '' }, '');
-		n.formMsg = E('p', { 'class': 'r3x-msg', 'aria-live': 'polite' }, '');
+		n.job = E('div', { 'class': 'r3x-job', 'role': 'status', 'aria-live': 'polite', 'hidden': '' }, '');
+		n.formMsg = E('div', { 'class': 'r3x-msg', 'id': 'r3x-formmsg', 'aria-live': 'polite' }, '');
 		n.foot = E('p', { 'class': 'r3x-foot' }, '');
 		n.alert = E('div', { 'class': 'r3x-alert', 'role': 'alert', 'hidden': '' });
 
@@ -277,25 +300,35 @@ return view.extend({
 			n.alert,
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '当前出口'),
-				E('p', { 'class': 'r3x-now' }, [n.now, n.nowDetail, n.age]),
-				E('div', { 'class': 'r3x-exits' }, cards),
-				E('div', { 'class': 'r3x-prefer', 'role': 'group', 'aria-label': '优先出口' }, [E('span', {}, '优先使用')].concat(preferButtons)),
-				n.preferNote,
-				n.preferMsg
+				E('div', { 'class': 'r3x-body' }, [
+					E('div', { 'class': 'r3x-now' }, [n.now, n.nowDetail, n.age]),
+					E('div', { 'class': 'r3x-exits' }, cards),
+					E('div', { 'class': 'r3x-prefer', 'role': 'group', 'aria-label': '优先出口' }, [E('span', {}, '优先使用')].concat(preferButtons)),
+					n.preferNote,
+					n.preferMsg
+				])
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, 'Wi-Fi 上网'),
-				E('div', { 'class': 'r3x-form' }, [
-					E('label', { 'class': 'r3x-check' }, [n.enabled, '启用 Wi-Fi 上网']),
-					E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-radio' }, '频段'), n.radio,
-						E('div', { 'class': 'r3x-hint' }, '路由器会用这个频段去连对方，并让本机这个频段的 Wi-Fi 跟到对方所在信道。')]),
-					E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-ssid' }, 'Wi-Fi 名称'),
-						E('div', { 'class': 'r3x-row' }, [n.ssid, n.scanBtn]), n.scanInfo, n.list]),
-					n.passwordField,
-					n.warn,
-					E('div', { 'class': 'r3x-actions' }, [n.save, n.revert]),
-					n.job,
-					n.formMsg
+				E('div', { 'class': 'r3x-body r3x-wifi' }, [
+					E('div', { 'class': 'r3x-top' }, [
+						E('label', { 'class': 'r3x-check' }, [n.enabled, '启用 Wi-Fi 上网']),
+						E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-radio' }, '频段'), n.radio,
+							E('div', { 'class': 'r3x-hint' }, '用这个频段去连对方；本机这个频段的 Wi-Fi 会跟到对方所在信道。')])
+					]),
+					E('div', { 'class': 'r3x-scan' }, [
+						E('div', { 'class': 'r3x-scan-head' }, [E('strong', {}, '附近的 Wi-Fi'), n.scanBtn]),
+						n.scanInfo,
+						n.list
+					]),
+					E('div', { 'class': 'r3x-bottom' }, [
+						E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-ssid' }, 'Wi-Fi 名称'), n.ssid]),
+						n.passwordField,
+						n.warn,
+						E('div', { 'class': 'r3x-actions' }, [n.save, n.revert]),
+						n.job,
+						n.formMsg
+					])
 				])
 			]),
 			n.foot
@@ -394,7 +427,7 @@ return view.extend({
 		var alerts = apAlerts(st);
 		n.alert.hidden = !alerts.length;
 		while (n.alert.firstChild) n.alert.removeChild(n.alert.firstChild);
-		alerts.forEach(function(text) { n.alert.appendChild(E('p', {}, [T(text)])); });
+		alerts.forEach(function(a) { n.alert.appendChild(E('p', { 'class': a.kind }, [T(a.text)])); });
 		this.labelRadios(st);
 
 		// 表单的「已保存设置」始终跟路由器一致；用户没动过的字段才会跟着变。
@@ -538,7 +571,7 @@ return view.extend({
 		n.save.textContent = p.action === 'disable' ? '停用 Wi-Fi 上网' : '保存并连接';
 		n.save.disabled = lock || !p.action || !!p.block;
 		if (p.block && f.enabled) this.message(n.formMsg, p.block);
-		else if (!this.formMsgSticky) this.message(n.formMsg, p.action ? '' : '设置没有改动。');
+		else if (!this.formMsgSticky) this.message(n.formMsg, '');
 	},
 
 	// 从一个频段换到另一个频段时，原来那个频段也要恢复原信道、重配一次。

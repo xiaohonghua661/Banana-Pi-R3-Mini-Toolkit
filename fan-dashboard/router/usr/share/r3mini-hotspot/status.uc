@@ -9,6 +9,8 @@ import { readfile, access } from 'fs';
 const conf_dir = getenv('R3HS_CONF_DIR');
 const state_dir = getenv('R3HS_STATE_DIR') || '/tmp';
 const sysnet = getenv('R3HS_SYSNET') || '/sys/class/net';
+// 测试时用文件代替 hostapd 报告的 AP 状态：<目录>/<网卡名> 里写 ENABLED、DISABLED 等。
+const ap_state_dir = getenv('R3HS_AP_STATE_DIR');
 const uci = conf_dir ? cursor(conf_dir, conf_dir + '/.uci') : cursor();
 const bus = connect();
 const now = time();
@@ -86,8 +88,13 @@ const wifi_up = online(wwan) && link.ssid != null && link.ssid != '';
 const wifi_enabled = cfg('enabled', '0') == '1';
 // 看门狗在对方长时间不在时会把 STA 停掉（停靠），让同频段的本机 Wi-Fi 恢复。
 const wifi_parked = wifi_enabled && sta.disabled == '1';
-// STA 开着却没连上时，OpenWrt 会暂停同频段的本机 AP。
-const sta_radio = wifi_enabled && !wifi_parked && !wifi_up ? sta.device : null;
+
+// hostapd 报告的 AP 状态。STA 开着却没连上时，OpenWrt 会让 hostapd 停掉同频段的 AP（状态变成 DISABLED）。
+function ap_state(ifname) {
+	if (ap_state_dir)
+		return trim(readfile(ap_state_dir + '/' + ifname) ?? '');
+	return call('hostapd.' + ifname, 'get_status').status ?? '';
+}
 
 // 本机各频段：AP 接口与实际信道
 const wstatus = call('network.wireless', 'status');
@@ -103,9 +110,11 @@ uci.foreach('wireless', 'wifi-device', (r) => {
 	for (let i in wstatus?.[name]?.interfaces ?? [])
 		if (ap_section && i.section == ap_section['.name'] && i.ifname)
 			ap = i.ifname;
+	// 网卡不在：AP 没起来。网卡在但 hostapd 没报 ENABLED：AP 暂停或停止。
 	// 网卡不在时 iwinfo 可能给出假信道，只在网卡存在时信它。
-	const ap_up = !!(ap && access(sysnet + '/' + ap));
-	const info = ap_up ? call('iwinfo', 'info', { device: ap }) : {};
+	const ap_exists = !!(ap && access(sysnet + '/' + ap));
+	const state = ap_exists ? ap_state(ap) : '';
+	const info = ap_exists ? call('iwinfo', 'info', { device: ap }) : {};
 	push(radios, {
 		name,
 		band: r.band ?? '',
@@ -113,8 +122,9 @@ uci.foreach('wireless', 'wifi-device', (r) => {
 		ap,
 		ap_ssid: ap_section?.ssid ?? '',
 		has_ap: ap_section != null,
-		ap_up,
-		ap_paused: ap_up && sta_radio == name,
+		ap_up: ap_exists,
+		ap_state: state,
+		ap_paused: ap_exists && state != 'ENABLED',
 		disabled: r.disabled == '1'
 	});
 });

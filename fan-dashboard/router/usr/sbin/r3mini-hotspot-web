@@ -12,7 +12,8 @@
 #
 # 测试钩子（只在沙箱测试里设置）：R3HS_CONF_DIR、R3HS_STATE_DIR、R3HS_LOCK_DIR、R3HS_INITD、R3HS_PATH、
 # R3HS_STATUS_UC、R3HS_CONNECT_WAIT（等连接的秒数）、R3HS_TTYS（查 SIM 卡用的 AT 口，空则不查）、
-# R3HS_DAEMON_DIRS（要保证 network 用户能进的目录:权限）、R3HS_SYSNET（网卡目录）、R3HS_AP_WAIT（等本机 AP 的秒数）。
+# R3HS_DAEMON_DIRS（要保证 network 用户能进的目录:权限）、R3HS_SYSNET（网卡目录）、R3HS_AP_WAIT（等本机 AP 的秒数）、
+# R3HS_SETTLE（ifup wwan 后等 netifd 动手的秒数）。
 
 PATH="${R3HS_PATH:+$R3HS_PATH:}/usr/sbin:/usr/bin:/sbin:/bin"
 CONF_DIR="${R3HS_CONF_DIR:-/etc/config}"
@@ -495,6 +496,11 @@ job_save() {
 
 	job_step reconf "正在把本机 $(band_label "$band") Wi-Fi 切到信道 $channel，这个频段会断开十几秒…"
 	reconf_radios
+	# 停用和看门狗停靠都会 ifdown wwan，netifd 记成手动关闭；不 ifup，重配后 STA 根本不启动
+	# （11-25 18:44 实测：保存后一直等到看门狗 ifup 才连上）。ifup 也会再重配一次这个频段，所以放在核对 AP 之前。
+	ifup wwan >/dev/null 2>&1
+	# netifd 收到 ifup 后约 2 秒才重配射频；等它开始再核对，免得看到的还是重配前的 AP。
+	sleep "${R3HS_SETTLE:-3}"
 	check_aps_or_rollback
 	if [ "$JOB_FIREWALL" = 1 ]; then
 		"$INITD/firewall" reload >/dev/null 2>&1 || job_rollback '重载防火墙失败'

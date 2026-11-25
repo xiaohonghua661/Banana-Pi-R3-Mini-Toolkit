@@ -42,7 +42,7 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
 - **STA 没连上时，同频段的本机 AP 会暂停。** 这是 OpenWrt 的设计：wpa_supplicant 在 STA 处于断开、扫描、认证状态时，会通知 hostapd 停掉同一射频上的 AP，连上后再恢复（`/usr/share/hostap/wpa_supplicant.uc` 的 `iface_hostapd_notify`）。所以手机热点一关，本机这个频段的 Wi-Fi 也跟着停。
   - 看门狗在约 2 分钟后「停靠」，让本机 AP 恢复，见下一节。
   - 保存前的提示和确认框都写明了这一点；建议 Wi-Fi 上网用连接设备少的那个频段。
-  - 页面顶部会标出「暂停中」的本机 Wi-Fi。
+  - 页面顶部会标出「暂停中」的本机 Wi-Fi。判断依据是 hostapd 报告的状态（`ubus call hostapd.<网卡> get_status` 的 `status` 不是 `ENABLED`），不靠推断。
 - 能跟过去的信道：
   - 2.4 GHz：1–13。
   - 5 GHz：只有 36、40、44、48、149、153、157、161。本机 5 GHz 用 HE80、不用 DFS；52–144 要先做雷达检测，165 只能用 20 MHz。
@@ -212,7 +212,29 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 - 设备端文件备份：`/root/r3mini-hotspot-backup-20261125182636`。
 - 部署后两个本机 AP 都在，`status` 里 `ap_up` 都是 true，信道 12、48。
 
-下面几项没有在真机上验证，因为都会断 Wi-Fi，需要用户在场并同意：实际连接一个 Wi-Fi、2.4/5 GHz 互换、停用后恢复信道、看门狗真机停靠和重连、有 SIM 卡时恢复拨号。
+18:44 用户在页面上把 Wi-Fi 上网保存为 2.4 GHz 的手机热点「nl」：
+
+- 保存后 STA 没有启动。原因是之前停用时执行过 `ifdown wwan`，netifd 把 wwan 记成手动关闭，而保存只重配了射频。
+- 一直等到看门狗第一轮 `ifup wwan`（18:46:33），4 秒后连上（18:46:41，信号 −31 dBm），本机 2.4 GHz AP 跟到信道 6，两个本机 AP 都正常。
+- 这段时间本机 2.4 GHz AP 实际一直开着（日志 `AP-ENABLED`），页面却按推断显示「暂停中」。
+
+18:59 部署了修正：
+
+- 保存时补 `ifup wwan`；
+- AP 是否暂停改读 hostapd 的真实状态；
+- 页面去掉多余留白：全宽、区块内边距 16 px、Wi-Fi 上网区宽屏两栏、不用会被 argon 加 1rem 内边距的 `<p>`。
+
+设备端文件备份：`/root/r3mini-hotspot-backup-20261125185952`。
+
+已在真机验证：连接 2.4 GHz 手机热点、本机 AP 跟到对方信道。
+
+还没在真机验证（会断 Wi-Fi，需要用户在场并同意）：
+
+- 带 `ifup wwan` 修正后再保存一次，看是否立即连上；
+- 5 GHz 与 2.4 GHz 互换；
+- 停用后恢复信道；
+- 看门狗停靠和重连；
+- 有 SIM 卡时恢复拨号。
 
 ## 失败处置
 

@@ -228,7 +228,7 @@ def run_page(t: Page, sid: str) -> None:
         radio5 = next(r["name"] for r in t.base["radios"] if r["band"] == "5g")
         q("#r3x-radio").select_option(radio5)
         t.check("warn_mentions_outage", "断开十几秒" in q(".r3x-warn").inner_text())
-        q(".r3x-row .cbi-button-action").click()
+        q(".r3x-scan .cbi-button-action").click()
         page.wait_for_function("() => !document.querySelector('.r3x .r3x-list').hidden", timeout=20000)
         real_rows = q(".r3x-list li").count()
         t.check("real_scan_lists_networks", real_rows > 0, str(real_rows))
@@ -236,7 +236,7 @@ def run_page(t: Page, sid: str) -> None:
 
         # 假数据：搜索结果的规则
         t.fix_scan = True
-        q(".r3x-row .cbi-button-action").click()
+        q(".r3x-scan .cbi-button-action").click()
         page.wait_for_timeout(600)
         rows = q(".r3x-list li")
         t.check("scan_dedupes_and_lists", rows.count() == 5, str(rows.count()))
@@ -252,7 +252,7 @@ def run_page(t: Page, sid: str) -> None:
         q("#r3x-password").fill("")
         q(".r3x-list li:has-text('Phone5G') button").click()
         t.check("pick_fills_ssid", q("#r3x-ssid").input_value() == "Phone5G")
-        t.check("pick_needs_password", page.locator(".r3x .r3x-actions .cbi-button-apply").is_disabled() and "请输入" in q(".r3x-form > .r3x-msg").inner_text())
+        t.check("pick_needs_password", page.locator(".r3x .r3x-actions .cbi-button-apply").is_disabled() and "请输入" in q("#r3x-formmsg").inner_text())
         q("#r3x-password").fill("short")
         t.check("short_password_blocked", page.locator(".r3x .r3x-actions .cbi-button-apply").is_disabled())
         q("#r3x-password").fill("correct-horse-1")
@@ -372,9 +372,9 @@ def run_page(t: Page, sid: str) -> None:
         if not q("#r3x-enabled").is_checked():
             q("#r3x-enabled").check()
         q("#r3x-radio").select_option(st["radios"][0]["name"])
-        q(".r3x-row .cbi-button-action").click()
+        q(".r3x-scan .cbi-button-action").click()
         page.wait_for_timeout(800)
-        info = q(".r3x-field .r3x-hint").nth(1).inner_text()
+        info = q("#r3x-scaninfo").inner_text()
         t.check("scan_error_not_duplicated", info == t.scan_error, info)
         t.scan_error = None
         t.check("save_confirm_mentions_pause", "暂停" in q(".r3x-warn").inner_text() or q(".r3x-warn").is_hidden())
@@ -387,7 +387,7 @@ def run_page(t: Page, sid: str) -> None:
         t.check("wifi_text_at_least_14px", not small_wifi, str(small_wifi[:5]))
 
         # 布局
-        for w in (1440, 1024, 768, 600, 390, 320):
+        for w in (1920, 1440, 1024, 768, 600, 390, 320):
             page.set_viewport_size({"width": w, "height": 900})
             page.wait_for_timeout(400)
             m = page.evaluate("""() => {
@@ -399,6 +399,11 @@ def run_page(t: Page, sid: str) -> None:
             }""")
             t.check(f"layout_{w}_no_overflow", not m["page"] and not m["over"], json.dumps(m, ensure_ascii=False))
             t.check(f"layout_{w}_font_12", not m["small"], json.dumps(m["small"][:5], ensure_ascii=False))
+            cols = page.evaluate("""() => { const a = document.querySelector('.r3x .r3x-bottom').getBoundingClientRect(), b = document.querySelector('.r3x .r3x-scan').getBoundingClientRect();
+                return { side_by_side: b.left >= a.right, empty_msgs: [...document.querySelectorAll('.r3x .r3x-msg')].filter(e => !e.textContent && e.offsetParent !== null).length }; }""")
+            if w >= 1440:
+                t.check(f"layout_{w}_wifi_two_columns", cols["side_by_side"], json.dumps(cols))
+            t.check(f"layout_{w}_no_empty_message_rows", cols["empty_msgs"] == 0, json.dumps(cols))
             page.screenshot(path=str(t.out / f"w{w}.png"), full_page=True)
         page.emulate_media(color_scheme="dark")
         page.set_viewport_size({"width": 1280, "height": 900})

@@ -12,6 +12,9 @@ export R3HS_CONF_DIR="$T/conf" R3HS_STATE_DIR="$T/state" R3HS_LOCK_DIR="$T/lock"
 export R3HS_PATH="$T/bin" R3HS_STATUS_UC="$UC" R3HS_CONNECT_WAIT=3 R3HS_TTYS='' R3HS_SIM="$SIM"
 # 本机 AP 网卡放在 $T/sysnet；「/tmp」换成 $T/fakeroot/tmp，用来模拟它被改成 0700。
 export R3HS_SYSNET="$T/sysnet" R3HS_AP_WAIT=4 R3HS_DAEMON_DIRS="$T/fakeroot/tmp:1777 $T/fakeroot/tmp/run:755"
+# hostapd 报告的 AP 状态换成文件；ifup 后不用等 netifd。
+export R3HS_AP_STATE_DIR="$T/apstate" R3HS_SETTLE=0
+mkdir -p "$T/apstate"
 trap 'rm -rf "$T"; rm -f /tmp/r3mini-hotspot-key-r3hstest*' 0
 
 PASS=0; FAIL=0
@@ -44,6 +47,7 @@ reset_world() {
 	: > "$SIM/calls"
 	rm -f "$SIM/wwan_up" "$SIM/connect_ok" "$SIM/fail_reconf" "$SIM/scan_delay" "$SIM/ap_fail" "$SIM/ap_fail_once"
 	touch "$T/sysnet/phy0-ap0" "$T/sysnet/phy1-ap0"
+	echo ENABLED > "$T/apstate/phy0-ap0"; echo ENABLED > "$T/apstate/phy1-ap0"
 	chmod 1777 "$T/fakeroot/tmp"; chmod 755 "$T/fakeroot/tmp/run"
 	cat > "$T/conf/network" <<'EOF'
 config interface 'lan'
@@ -257,6 +261,7 @@ contains save_firewall_zone "$(u firewall.@zone[1].network)" wwan
 contains save_reconf_radio1 "$(calls)" 'wifi reconf radio1'
 contains save_firewall_reload_first_time "$(calls)" 'initd firewall reload'
 contains save_restarts_watchdog "$(calls)" 'initd r3mini-hotspot restart'
+contains save_ifup_wwan "$(calls)" 'wifi reconf radio1;ifup wwan'
 [ -e "$T/state/r3mini-hotspot-job.key" ] && bad save_deletes_job_key || ok save_deletes_job_key
 [ -e "$T/lock/r3mini-hotspot-job" ] || [ -e "$T/lock/r3mini-hotspot-write" ] && bad save_releases_locks || ok save_releases_locks
 out="$(web status)"
@@ -477,7 +482,12 @@ uci -c "$T/conf" -P "$T/conf/.uci" commit wireless
 uci -c "$T/conf" -P "$T/conf/.uci" set r3mini_hotspot.main.enabled=1
 uci -c "$T/conf" -P "$T/conf/.uci" commit r3mini_hotspot
 out="$(web status)"
+expect status_ap_running_not_paused "$(printf '%s' "$out" | jsonfilter -e '@.radios[1].ap_paused')" false
+echo DISABLED > "$T/apstate/phy1-ap0"
+out="$(web status)"
 expect status_ap_paused "$(printf '%s' "$out" | jsonfilter -e '@.radios[1].ap_paused')" true
+expect status_ap_state "$(printf '%s' "$out" | jsonfilter -e '@.radios[1].ap_state')" DISABLED
+echo ENABLED > "$T/apstate/phy1-ap0"
 (
 	R3HS_WATCHDOG_LIB=1 R3HS_WEB="$WEB"
 	. "$WD"
