@@ -1,6 +1,6 @@
 {
 	"luci-app-r3mini-hotspot": {
-		"description": "允许配置 BPI-R3 Mini 的手机热点 WAN 自动重连",
+		"description": "上网出口：查看与切换出口、搜索并连接上游 Wi-Fi、暂停或恢复蜂窝拨号",
 		"read": {
 			"file": {
 				"/usr/sbin/r3mini-hotspot-web": [ "exec" ]
@@ -11,10 +11,11 @@
 		},
 		"write": {
 			"file": {
-				"/usr/sbin/r3mini-hotspot-web": [ "exec" ]
+				"/usr/sbin/r3mini-hotspot-web": [ "exec" ],
+				"/tmp/r3mini-hotspot-key-*": [ "write", "remove" ]
 			},
 			"ubus": {
-				"file": [ "exec" ]
+				"file": [ "exec", "write", "remove" ]
 			}
 		}
 	}

@@ -1,20 +1,35 @@
+"""部署 / 回滚「网络 → 上网出口」模块（r3mini-hotspot）。
+
+    python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-242/id_ed25519_242
+    python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key <私钥> --rollback /root/r3mini-hotspot-backup-<时间>
+
+只用密钥登录，主机密钥必须已在 ~/.ssh/known_hosts 里（不认识的主机直接拒绝）。
+部署前把要覆盖的文件备份到设备 /root/r3mini-hotspot-backup-<时间>/，部署后逐个核对 SHA-256，不一致就自动回滚。
+/etc/config/r3mini_hotspot 只在设备上没有时才写入。不重启 uhttpd；ACL 有变化时重启 rpcd（已登录的 LuCI 会话需要重新登录）。
+
+输出：成功时打印 BACKUP=…、DEPLOY_SHA256_OK=7/7、PRESERVED_CONFIG_OK=1；失败时以非零退出并打印 error_kind：
+    PINNED_HOST_KEY_MISSING  ~/.ssh/known_hosts 里没有该主机
+    SSH_KEY_MISSING / SSH_KEY_LOGIN_FAILED / SSH_CONNECTION_OR_PIN_FAILED
+    UNEXPECTED_DEVICE=<board>  不是 BPI-R3 Mini
+    DEPLOY_BACKUP_MARKER_MISSING  设备端脚本没报告备份目录
+    SHA256_MISMATCH=<文件>     已自动回滚
+    ROLLBACK_BACKUP_INVALID    --rollback 给的目录不对
+"""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import re
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-import paramiko
-
-
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.0.242"
 ROOT = Path(__file__).resolve().parent
-PROJECT = ROOT.parent
 FILES = (
     "usr/sbin/r3mini-hotspot-web",
     "usr/sbin/r3mini-hotspot-watchdog",
+    "usr/share/r3mini-hotspot/status.uc",
     "etc/init.d/r3mini-hotspot",
     "etc/config/r3mini_hotspot",
     "usr/share/luci/menu.d/luci-app-r3mini-hotspot.json",
@@ -22,46 +37,42 @@ FILES = (
     "www/luci-static/resources/view/network/r3mini-hotspot.js",
 )
 PRESERVED_CONFIG = "etc/config/r3mini_hotspot"
-MANAGED_FILES = tuple(relative for relative in FILES if relative != PRESERVED_CONFIG)
+MANAGED_FILES = tuple(f for f in FILES if f != PRESERVED_CONFIG)
 
 
-def password_candidates() -> list[str]:
-    text = (PROJECT / "docs" / "私密" / "商家交付信息.md").read_text(
-        encoding="utf-8", errors="replace"
-    )
-    candidates = [""]
-    for match in re.finditer(r"`([^`\s]{1,80})`", text):
-        value = match.group(1)
-        if value not in candidates:
-            candidates.append(value)
-    if len(candidates) == 1:
-        raise SystemExit("ROUTER_PASSWORD_NOT_FOUND")
-    return candidates
+def fail(kind: str) -> None:
+    print(kind, file=sys.stderr)
+    raise SystemExit(1)
 
 
-def connect() -> paramiko.SSHClient:
-    for password in password_candidates():
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            client.connect(
-                HOST,
-                username="root",
-                password=password,
-                timeout=8,
-                banner_timeout=8,
-                auth_timeout=8,
-                look_for_keys=False,
-                allow_agent=False,
-            )
-            return client
-        except Exception:
-            client.close()
-    raise SystemExit("SSH_LOGIN_FAILED")
+def connect(host: str, key: str):
+    import paramiko
+
+    known = Path.home() / ".ssh" / "known_hosts"
+    if not known.is_file() or host not in paramiko.HostKeys(str(known)):
+        fail("PINNED_HOST_KEY_MISSING")
+    if not Path(key).is_file():
+        fail("SSH_KEY_MISSING")
+    client = paramiko.SSHClient()
+    client.load_host_keys(str(known))
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        client.connect(host, username="root", key_filename=str(key), look_for_keys=False,
+                       allow_agent=False, timeout=8, banner_timeout=8, auth_timeout=8)
+    except paramiko.AuthenticationException:
+        client.close()
+        fail("SSH_KEY_LOGIN_FAILED")
+    except Exception:
+        client.close()
+        fail("SSH_CONNECTION_OR_PIN_FAILED")
+    return client
 
 
-def run(client: paramiko.SSHClient, command: str, timeout: int = 60) -> str:
-    _, stdout, stderr = client.exec_command(command, timeout=timeout)
+def run(client, command: str, data: bytes | None = None, timeout: int = 120) -> str:
+    stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    if data is not None:
+        stdin.channel.sendall(data)
+    stdin.channel.shutdown_write()
     out = stdout.read().decode("utf-8", "replace")
     err = stderr.read().decode("utf-8", "replace")
     code = stdout.channel.recv_exit_status()
@@ -70,73 +81,77 @@ def run(client: paramiko.SSHClient, command: str, timeout: int = 60) -> str:
     return out
 
 
-def put(client: paramiko.SSHClient, local: Path, remote: PurePosixPath) -> None:
-    run(client, f"mkdir -p '{remote.parent}'")
-    stdin, stdout, stderr = client.exec_command(f"cat > '{remote}'", timeout=60)
-    stdin.channel.sendall(local.read_bytes())
-    stdin.channel.shutdown_write()
-    out = stdout.read().decode("utf-8", "replace")
-    err = stderr.read().decode("utf-8", "replace")
-    code = stdout.channel.recv_exit_status()
-    if code != 0:
-        raise RuntimeError(f"upload failed: {remote} ({code})\n{out}{err}")
+def local_bytes(relative: str) -> bytes:
+    # 仓库在 Windows 上可能按 CRLF 检出；设备上的脚本和配置一律用 LF。
+    return (ROOT / "router" / Path(relative)).read_bytes().replace(b"\r\n", b"\n")
 
 
-def deploy(client: paramiko.SSHClient) -> int:
+def deploy(client) -> None:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     stage = PurePosixPath(f"/tmp/r3mini-hotspot-src-{stamp}")
-    deploy = PurePosixPath(f"/tmp/deploy-hotspot-{stamp}.sh")
-    identity = run(client, "ubus call system board | jsonfilter -e '@.board_name'").strip()
-    if identity != "bananapi,bpi-r3-mini":
-        raise RuntimeError(f"UNEXPECTED_DEVICE={identity}")
+    board = run(client, "ubus call system board | jsonfilter -e '@.board_name'").strip()
+    if board != "bananapi,bpi-r3-mini":
+        fail(f"UNEXPECTED_DEVICE={board}")
     for relative in FILES:
-        local = ROOT / "router" / Path(relative)
-        if not local.is_file():
-            raise FileNotFoundError(local)
-        put(client, local, stage / PurePosixPath(relative))
-    put(client, ROOT / "deploy-hotspot-router.sh", deploy)
-
-    deploy_output = run(client, f"sh '{deploy}' '{stage}'", timeout=90)
-    print(deploy_output, end="")
-    backup_match = re.search(r"^BACKUP=(/root/r3mini-hotspot-backup-[0-9]+)$", deploy_output, re.M)
-    if not backup_match:
-        raise RuntimeError("DEPLOY_BACKUP_MARKER_MISSING")
-    backup = backup_match.group(1)
-    remote_hashes = run(
-        client,
-        "sha256sum " + " ".join(f"'/{relative}'" for relative in FILES),
-    )
-    expected = {
-        f"/{relative}": hashlib.sha256((ROOT / "router" / Path(relative)).read_bytes()).hexdigest()
-        for relative in MANAGED_FILES
-    }
-    found = {line.split(None, 1)[1]: line.split(None, 1)[0] for line in remote_hashes.splitlines()}
-    mismatches = [path for path, digest in expected.items() if found.get(path) != digest]
-    if mismatches:
-        run(
-            client,
-            "set -e; b='" + backup + "'; "
-            "while IFS= read -r f; do "
-            "if [ -e \"$b$f\" ]; then cp -p \"$b$f\" \"$f\"; else rm -f \"$f\"; fi; "
-            "done < \"$b/.touched\"; "
-            "rm -f /tmp/luci-indexcache; "
-            "/etc/init.d/rpcd restart; /etc/init.d/uhttpd restart; /etc/init.d/r3mini-hotspot restart",
-        )
-        raise RuntimeError("SHA256_MISMATCH=" + ",".join(mismatches))
-    config_state = run(client, "test -s /etc/config/r3mini_hotspot && echo preserved").strip()
-    if config_state != "preserved":
-        raise RuntimeError("PRESERVED_CONFIG_MISSING")
+        target = stage / PurePosixPath(relative)
+        run(client, f"mkdir -p {shlex.quote(str(target.parent))} && cat > {shlex.quote(str(target))}", local_bytes(relative))
+    script = stage / "deploy.sh"
+    run(client, f"cat > {shlex.quote(str(script))}", (ROOT / "deploy-hotspot-router.sh").read_bytes().replace(b"\r\n", b"\n"))
+    try:
+        out = run(client, f"sh {shlex.quote(str(script))} {shlex.quote(str(stage))}", timeout=120)
+    finally:
+        run(client, f"rm -rf {shlex.quote(str(stage))}")
+    print(out, end="")
+    match = re.search(r"^BACKUP=(/root/r3mini-hotspot-backup-[0-9]+)$", out, re.M)
+    if not match:
+        fail("DEPLOY_BACKUP_MARKER_MISSING")
+    backup = match.group(1)
+    remote = run(client, "sha256sum " + " ".join(shlex.quote("/" + f) for f in MANAGED_FILES))
+    found = {line.split(None, 1)[1]: line.split(None, 1)[0] for line in remote.splitlines() if line.strip()}
+    bad = [f for f in MANAGED_FILES if found.get("/" + f) != hashlib.sha256(local_bytes(f)).hexdigest()]
+    if bad:
+        rollback(client, backup)
+        fail("SHA256_MISMATCH=" + ",".join(bad))
+    if run(client, "test -s /etc/config/r3mini_hotspot && echo preserved").strip() != "preserved":
+        rollback(client, backup)
+        fail("PRESERVED_CONFIG_MISSING")
     print(f"DEPLOY_SHA256_OK={len(MANAGED_FILES)}/{len(MANAGED_FILES)}")
     print("PRESERVED_CONFIG_OK=1")
-    return 0
+
+
+def rollback(client, backup: str) -> None:
+    if not re.fullmatch(r"/root/r3mini-hotspot-backup-[0-9]+", backup):
+        fail("ROLLBACK_BACKUP_INVALID")
+    q = shlex.quote(backup)
+    run(client, f"test -s {q}/.touched || {{ echo ROLLBACK_BACKUP_INVALID >&2; exit 1; }}")
+    run(client,
+        f"b={q}; acl_changed=0; "
+        'while IFS= read -r f; do '
+        '  case "$f" in /usr/share/rpcd/acl.d/*) acl_changed=1 ;; esac; '
+        '  if [ -e "$b$f" ]; then cp -p "$b$f" "$f"; else rm -f "$f"; fi; '
+        'done < "$b/.touched"; '
+        "rmdir /usr/share/r3mini-hotspot 2>/dev/null; "
+        "rm -f /tmp/luci-indexcache*; "
+        '[ "$acl_changed" = 1 ] && /etc/init.d/rpcd restart; '
+        "/etc/init.d/r3mini-hotspot restart; true")
+    print(f"ROLLBACK_OK={backup}")
 
 
 def main() -> int:
-    client = connect()
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("host", nargs="?", default="192.168.0.242")
+    ap.add_argument("--key", required=True, help="SSH 私钥路径")
+    ap.add_argument("--rollback", metavar="BACKUP_DIR", help="用设备上的这份备份回滚")
+    args = ap.parse_args()
+    client = connect(args.host, args.key)
     try:
-        return deploy(client)
+        if args.rollback:
+            rollback(client, args.rollback)
+        else:
+            deploy(client)
     finally:
         client.close()
+    return 0
 
 
 if __name__ == "__main__":

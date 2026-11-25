@@ -1,240 +1,589 @@
 'use strict';
 'require view';
 'require fs';
-'require poll';
 'require ui';
 
+// 网络 → 上网出口：有线 WAN、5G 蜂窝、Wi-Fi 上网（手机热点或任意附近 Wi-Fi）三选一，
+// 以及 Wi-Fi 上网的频段、网络和密码设置。后端是 /usr/sbin/r3mini-hotspot-web。
+
 var HELPER = '/usr/sbin/r3mini-hotspot-web';
+var SLOW_MS = 5000;   // 平时每 5 秒读一次状态
+var FAST_MS = 1000;   // 切换出口、保存 Wi-Fi 期间每秒读一次
+var BURST_MS = 8000;  // 切换出口后保持快读的时长
+var CHANNELS_5G = [36, 40, 44, 48, 149, 153, 157, 161];
+var KINDS = ['wan', 'cellular', 'hotspot'];
+var NAMES = { auto: '自动', wan: '有线 WAN', cellular: '5G 蜂窝', hotspot: 'Wi-Fi 上网' };
 
-function parseResult(result) {
-	if (!result || result.code !== 0)
-		throw new Error((result && result.stderr || '手机热点接口无响应').trim());
-	return JSON.parse(result.stdout);
+var CSS = [
+	'.r3x{max-width:1100px;font-size:14px;line-height:1.6}',
+	'.r3x *{box-sizing:border-box}',
+	'.r3x [hidden]{display:none!important}',
+	'.r3x .r3x-descr{margin:0 0 16px;opacity:.8}',
+	'.r3x .r3x-now{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;margin:0 0 14px}',
+	'.r3x .r3x-now strong{font-size:18px}',
+	'.r3x .r3x-age{font-size:12px;opacity:.7}',
+	'.r3x .r3x-age.err{color:#c62828;opacity:1}',
+	'.r3x .r3x-exits{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px;margin-bottom:16px}',
+	'.r3x .r3x-exit{display:flex;flex-direction:column;gap:4px;min-width:0;padding:12px 14px;border:1px solid rgba(128,128,128,.28);border-radius:8px}',
+	'.r3x .r3x-exit.active{border-color:#2e7d32;box-shadow:inset 3px 0 0 #2e7d32}',
+	'.r3x .r3x-exit.unknown{opacity:.55}',
+	'.r3x .r3x-exit-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:600}',
+	'.r3x .r3x-exit-detail{overflow-wrap:anywhere;font-variant-numeric:tabular-nums}',
+	'.r3x .r3x-exit-reason{font-size:13px;opacity:.8;overflow-wrap:anywhere}',
+	'.r3x .r3x-exit .cbi-button{align-self:flex-start;margin-top:4px}',
+	'.r3x .r3x-pill{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}',
+	'.r3x .r3x-pill.active{background:rgba(46,125,50,.14);color:#2e7d32}',
+	'.r3x .r3x-pill.ready{background:rgba(21,101,192,.12);color:#1565c0}',
+	'.r3x .r3x-pill.off{background:rgba(128,128,128,.16)}',
+	'.r3x .r3x-pill.warn{background:rgba(237,108,2,.14);color:#b45309}',
+	'.r3x .r3x-prefer{display:flex;flex-wrap:wrap;align-items:center;gap:8px}',
+	'.r3x .r3x-prefer>span{margin-right:4px;font-weight:600}',
+	'.r3x .r3x-prefer .cbi-button{flex:1 1 110px;min-height:40px;margin:0}',
+	'.r3x .r3x-prefer .cbi-button[aria-pressed="true"]{outline:2px solid #2e7d32;outline-offset:-2px;font-weight:700}',
+	'.r3x .r3x-note{margin:8px 0 0;font-size:13px;opacity:.8}',
+	'.r3x .r3x-msg{min-height:1.6em;margin:8px 0 0;font-size:13px}',
+	'.r3x .r3x-msg.ok{color:#2e7d32}',
+	'.r3x .r3x-msg.err{color:#c62828}',
+	'.r3x .r3x-form{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;max-width:640px}',
+	'.r3x .r3x-field{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}',
+	'.r3x .r3x-field select,.r3x .r3x-field input{max-width:100%;min-width:0}',
+	'.r3x .r3x-field>label{font-weight:600}',
+	'.r3x .r3x-field .r3x-hint{font-size:13px;opacity:.75}',
+	'.r3x .r3x-row{display:flex;flex-wrap:wrap;gap:8px}',
+	'.r3x .r3x-row>input,.r3x .r3x-row>select{flex:1 1 220px;min-width:0;width:auto}',
+	'.r3x .r3x-row>.cbi-button{flex:none;margin:0}',
+	'.r3x .r3x-check{display:flex;align-items:center;gap:8px;font-weight:600}',
+	'.r3x .r3x-list{max-height:320px;overflow:auto;margin:0;padding:0;list-style:none;border:1px solid rgba(128,128,128,.28);border-radius:8px}',
+	'.r3x .r3x-list li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;padding:8px 12px;border-top:1px solid rgba(128,128,128,.18)}',
+	'.r3x .r3x-list li:first-child{border-top:0}',
+	'.r3x .r3x-list li.picked{background:rgba(46,125,50,.1)}',
+	'.r3x .r3x-list li.no{opacity:.55}',
+	'.r3x .r3x-net{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}',
+	'.r3x .r3x-meta{font-size:13px;opacity:.8;font-variant-numeric:tabular-nums}',
+	'.r3x .r3x-list .cbi-button{margin:0;min-height:32px}',
+	'.r3x .r3x-warn{margin:0;padding:8px 12px;border-left:3px solid #ed6c02;background:rgba(237,108,2,.08);font-size:13px}',
+	'.r3x .r3x-actions{display:flex;flex-wrap:wrap;gap:8px}',
+	'.r3x .r3x-actions .cbi-button{min-height:40px;margin:0}',
+	'.r3x .r3x-job{margin:0;padding:8px 12px;border-radius:6px;background:rgba(128,128,128,.1);font-size:13px}',
+	'.r3x .r3x-job.err{background:rgba(198,40,40,.1);color:#c62828}',
+	'.r3x .r3x-job.ok{background:rgba(46,125,50,.1);color:#2e7d32}',
+	'.r3x .r3x-foot{margin:12px 0 0;font-size:13px;opacity:.75}',
+	'@media (prefers-color-scheme:dark){',
+	'.r3x .r3x-pill.active,.r3x .r3x-msg.ok,.r3x .r3x-job.ok{color:#81c784}',
+	'.r3x .r3x-pill.ready{color:#90caf9}',
+	'.r3x .r3x-pill.warn{color:#ffb74d}',
+	'.r3x .r3x-age.err,.r3x .r3x-msg.err,.r3x .r3x-job.err{color:#ef9a9a}',
+	'.r3x .r3x-exit.active{border-color:#81c784;box-shadow:inset 3px 0 0 #81c784}',
+	'.r3x .r3x-prefer .cbi-button[aria-pressed="true"]{outline-color:#81c784}',
+	'}'
+].join('\n');
+
+function parse(res) {
+	if (!res || res.code !== 0)
+		throw new Error(((res && (res.stderr || res.stdout)) || '后端没有响应').trim());
+	return JSON.parse(res.stdout);
 }
 
-function hotspotState(status) {
-	if (!status.configured) return '未配置热点';
-	if (!status.enabled) return '热点连接已暂停';
-	return status.wwan_up ? '热点已连接' : '正在连接热点';
+function bytes(text) { return new TextEncoder().encode(text).length; }
+
+// LuCI 的 E() 会把字符串子节点当 HTML 插入；Wi-Fi 名称等外来文字一律包成文本节点。
+function T(text) { return document.createTextNode(String(text == null ? '' : text)); }
+
+function bandName(band) { return band === '2g' ? '2.4 GHz' : band === '5g' ? '5 GHz' : (band || '未知频段'); }
+
+// 与后端 find_network 的判断保持一致。
+function encOf(e) {
+	if (!e || !e.enabled) return 'none';
+	var auth = e.authentication || [], wpa = e.wpa || [];
+	if (auth.indexOf('802.1x') >= 0) return 'eap';
+	if (auth.indexOf('sae') >= 0) return auth.indexOf('psk') >= 0 ? 'sae-mixed' : 'sae';
+	if (auth.indexOf('psk') >= 0) return wpa.indexOf(1) >= 0 && wpa.indexOf(2) >= 0 ? 'psk-mixed' : wpa.indexOf(2) >= 0 ? 'psk2' : 'psk';
+	return 'wep';
 }
 
-function routeOnline(status, kind) {
-	if (kind === 'wan') return !!status.wired_wan_up;
-	if (kind === 'cellular') return !!status.cellular_up;
-	return !!status.wwan_up;
+function encName(enc) {
+	return { none: '开放', psk: 'WPA', psk2: 'WPA2', 'psk-mixed': 'WPA/WPA2', sae: 'WPA3', 'sae-mixed': 'WPA2/WPA3', eap: '企业认证', wep: 'WEP' }[enc] || enc || '未知';
 }
 
-function routeName(kind) {
-	return kind === 'wan' ? '有线 WAN' : kind === 'cellular' ? '蜂窝网络 5G' : '手机热点 Wi-Fi';
+function channelOk(band, ch) {
+	return band === '2g' ? ch >= 1 && ch <= 13 : band === '5g' ? CHANNELS_5G.indexOf(ch) >= 0 : false;
+}
+
+function signalName(dbm) {
+	var n = Number(dbm);
+	if (!Number.isFinite(n)) return '';
+	return (n >= -60 ? '强' : n >= -72 ? '中' : '弱') + ' ' + n + ' dBm';
+}
+
+// 搜索结果：同名只留信号最强的，标出本机能不能连。
+function networks(scan, band) {
+	var best = {};
+	(scan.results || []).forEach(function(r) {
+		if (!r.ssid) return;
+		if (!best[r.ssid] || Number(r.signal) > Number(best[r.ssid].signal)) best[r.ssid] = r;
+	});
+	return Object.keys(best).map(function(ssid) {
+		var r = best[ssid], enc = encOf(r.encryption), ch = Number(r.channel), why = '';
+		if (enc === 'eap') why = '企业认证，不支持';
+		else if (enc === 'wep') why = 'WEP 加密，不支持';
+		else if (!channelOk(band, ch)) why = '信道 ' + ch + '，本机跟不过去';
+		return { ssid: ssid, channel: ch, signal: Number(r.signal), enc: enc, why: why };
+	}).sort(function(a, b) { return (a.why ? 1 : 0) - (b.why ? 1 : 0) || b.signal - a.signal; });
+}
+
+function keyFileName() {
+	var v = new Uint32Array(2);
+	window.crypto.getRandomValues(v);
+	return '/tmp/r3mini-hotspot-key-' + Array.prototype.map.call(v, function(x) { return x.toString(16).padStart(8, '0'); }).join('');
+}
+
+function confirmBox(title, lines, okLabel) {
+	return new Promise(function(resolve) {
+		ui.showModal(title, lines.map(function(t) { return E('p', {}, [T(t)]); }).concat([
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'cbi-button cbi-button-neutral', 'click': function() { ui.hideModal(); resolve(false); } }, '取消'), ' ',
+				E('button', { 'class': 'cbi-button cbi-button-apply', 'click': function() { ui.hideModal(); resolve(true); } }, okLabel)
+			])
+		]));
+	});
+}
+
+function clockText(date) {
+	return [date.getHours(), date.getMinutes(), date.getSeconds()].map(function(n) { return String(n).padStart(2, '0'); }).join(':');
+}
+
+// 每个出口的状态：tone 决定标签颜色，reason 写给人看的原因。
+function exitView(st, kind) {
+	var active = st.egress && st.egress.kind === kind;
+	if (kind === 'wan') {
+		var w = st.wan || {};
+		if (!w.present) return { tone: 'off', pill: '未配置', detail: '', reason: '没有 wan 接口' };
+		if (!w.up) return { tone: 'off', pill: '不可用', detail: '', reason: '网线没接好，或上级路由没分配地址' };
+		return { tone: active ? 'active' : 'ready', pill: active ? '正在使用' : '可用', detail: w.ip + (w.device ? '（' + w.device + '）' : ''), reason: '' };
+	}
+	if (kind === 'cellular') {
+		var c = st.cellular || {};
+		if (!c.present) return { tone: 'off', pill: '未配置', detail: '', reason: '没有蜂窝网络接口' };
+		if (c.up) return { tone: active ? 'active' : 'ready', pill: active ? '正在使用' : '可用', detail: c.ip, reason: '', action: 'off' };
+		if (!c.auto) return { tone: 'off', pill: '已暂停', detail: '', reason: '已暂停自动拨号。插好 SIM 卡后点「恢复拨号」。', action: 'on' };
+		return { tone: 'warn', pill: '未连上', detail: '', reason: '正在反复拨号。没插 SIM 卡时会一直重试并刷屏系统日志，可以先暂停。', action: 'off' };
+	}
+	var f = st.wifi || {};
+	if (!f.enabled) return { tone: 'off', pill: '未启用', detail: '', reason: '在下方选择一个 Wi-Fi 并保存后可用' };
+	var radio = (st.radios || []).filter(function(r) { return r.name === f.radio; })[0] || {};
+	var where = '「' + f.ssid + '」· ' + bandName(radio.band);
+	if (f.up) return { tone: active ? 'active' : 'ready', pill: active ? '正在使用' : '可用', detail: f.ip, reason: where + (f.signal != null ? ' · 信号' + signalName(f.signal) : '') };
+	return { tone: 'warn', pill: '未连上', detail: '', reason: where + ' 还没连上，后台每 ' + ((st.reconnect || {}).interval || 20) + ' 秒重试' };
+}
+
+function online(st, kind) {
+	if (kind === 'auto') return true;
+	if (kind === 'wan') return !!(st.wan && st.wan.up);
+	if (kind === 'cellular') return !!(st.cellular && st.cellular.up);
+	return !!(st.wifi && st.wifi.up);
 }
 
 return view.extend({
-	call: function(args) {
-		return fs.exec(HELPER, args).then(parseResult);
-	},
+	run: function(args) { return fs.exec(HELPER, args).then(parse); },
 
-	load: function() {
-		return this.call(['status']);
-	},
+	load: function() { return this.run(['status']); },
 
-	render: function(status) {
+	render: function(st) {
 		var self = this;
-		this.status = status;
-		this.lastWwanUp = !!status.wwan_up;
-		this.root = E('div', { 'class': 'r3hotspot-app' });
-		this.root.innerHTML = `
-		<style>
-		#view .r3hotspot-app{display:block!important;width:100%;min-width:0;flex:1 1 100%}
-		.r3hotspot-app{--ink:#14231f;--muted:#66736e;--line:#dbe3df;--paper:#f4f6f3;--panel:#fff;--forest:#0e4938;--green:#138564;--green-soft:#e9f7f1;--blue:#2563a9;--amber:#a96b0a;--amber-soft:#fff7e7;--red:#ba4b4b;max-width:1120px;margin:0 auto;padding:18px 12px 44px;color:var(--ink);font-family:"Noto Sans SC","Source Han Sans SC","Microsoft YaHei",sans-serif;container-type:inline-size}.r3hotspot-app *{box-sizing:border-box}.r3hotspot-app button,.r3hotspot-app input{font:inherit;touch-action:manipulation}.rh-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:14px;padding:18px 20px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(135deg,#fff 58%,#edf6f2);box-shadow:0 8px 24px rgba(23,43,36,.055)}.rh-head>div:first-child{min-width:0}.rh-eyebrow{margin:0 0 5px;color:var(--green)!important;font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:10px;font-weight:700;letter-spacing:.16em}.rh-title{margin:0;color:var(--forest)!important;text-shadow:none!important;font-size:clamp(24px,2vw + 12px,34px);font-weight:750;letter-spacing:-.045em}.rh-description{max-width:650px;margin:6px 0 0;color:var(--muted)!important;font-size:12px;line-height:1.7}.rh-health{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:11px;white-space:nowrap}.rh-dot{width:7px;height:7px;border-radius:50%;background:var(--amber)}.rh-health.online .rh-dot{background:var(--green);box-shadow:0 0 0 4px rgba(19,133,100,.12)}.rh-success{display:none;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;margin-bottom:12px;padding:12px 14px;border:1px solid #a9ddca;border-radius:10px;background:linear-gradient(100deg,#edf9f4,#f9fdfb);box-shadow:0 6px 20px rgba(14,73,56,.07);animation:rh-enter .28s ease-out}.rh-success.show{display:grid}.rh-success-icon{display:grid;width:30px;height:30px;place-items:center;border-radius:8px;background:var(--green);color:#fff;font-size:17px;font-weight:800}.rh-success strong{display:block;color:var(--forest);font-size:13px}.rh-success span{display:block;margin-top:2px;color:#4f6e63;font-size:11px}.rh-success-code{padding:5px 7px;border:1px solid #bfe5d7;border-radius:6px;color:var(--green);font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:9px;font-weight:700;letter-spacing:.08em}.rh-console{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 10px 28px rgba(23,43,36,.065)}.rh-console-top{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:18px;padding:20px 22px 17px;border-bottom:1px solid var(--line);background:linear-gradient(135deg,#fff 58%,#f0f6f3)}.rh-console-label{margin:0;color:var(--green);font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:9px;font-weight:700;letter-spacing:.13em}.rh-egress{margin:5px 0 0;font-size:clamp(21px,1.6vw + 10px,29px);font-weight:760;letter-spacing:-.04em}.rh-egress-meta{margin:5px 0 0;color:var(--muted);font-size:11px}.rh-default{padding:8px 10px;border:1px solid #cddbd5;border-radius:7px;background:#fff;color:var(--forest);font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:10px;white-space:nowrap}.rh-routes{display:grid;grid-template-columns:repeat(3,1fr);gap:0}.rh-route{position:relative;min-height:78px;padding:14px 16px;border-right:1px solid var(--line);background:#fff;transition:background .18s,border-color .18s}.rh-route:last-child{border-right:0}.rh-route:before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:transparent}.rh-route.active{background:var(--green-soft)}.rh-route.active:before{background:var(--green)}.rh-route-name{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;font-weight:720}.rh-route-badge{padding:3px 5px;border:1px solid var(--line);border-radius:5px;color:#7a8983;font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:8px;font-weight:650}.rh-route.active .rh-route-badge{border-color:#b7dfd0;background:#fff;color:var(--green)}.rh-route-detail{display:block;margin-top:10px;color:#88958f;font-size:10px}.rh-route.active .rh-route-detail{color:var(--green);font-weight:750}.rh-preference{display:grid;grid-template-columns:minmax(190px,.72fr) minmax(0,1.28fr);align-items:center;gap:16px;margin-top:12px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 6px 20px rgba(23,43,36,.04)}.rh-preference-copy strong{display:block;font-size:12px}.rh-preference-copy span{display:block;margin-top:4px;color:var(--muted);font-size:9px;line-height:1.5}.rh-preference-buttons{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.rh-prefer{min-height:38px;padding:0 8px;border:1px solid #cbd7d2;border-radius:7px;background:#fff;color:#42554d;font-size:10px;font-weight:650;cursor:pointer;transition:.15s}.rh-prefer:hover:not(:disabled){border-color:#7cac9a;background:#f4faf7}.rh-prefer.selected{border-color:var(--forest);background:var(--forest);color:#fff;box-shadow:0 4px 12px rgba(14,73,56,.14)}.rh-prefer:disabled{opacity:.42;cursor:not-allowed}.rh-grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr);gap:12px;margin-top:12px}.rh-card{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 6px 20px rgba(23,43,36,.04)}.rh-card-title{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0;padding:15px 17px 12px;border-bottom:1px solid var(--line);font-size:14px}.rh-card-title small{color:var(--muted);font-size:9px;font-weight:500}.rh-metrics{display:grid;grid-template-columns:repeat(2,1fr)}.rh-metric{min-height:70px;padding:14px 17px;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}.rh-metric:nth-child(2n){border-right:0}.rh-metric:nth-last-child(-n+2){border-bottom:0}.rh-metric small{display:block;color:var(--muted);font-size:10px}.rh-metric strong{display:block;margin-top:6px;overflow:hidden;color:var(--forest);font-family:"IBM Plex Mono","SFMono-Regular",monospace;font-size:14px;text-overflow:ellipsis;white-space:nowrap}.rh-policy{padding:12px 17px 14px;border-top:1px solid var(--line);background:#fbfcfb;color:var(--muted);font-size:10px;line-height:1.65}.rh-policy b{color:var(--forest)}.rh-form{padding:0 17px 16px}.rh-switchrow{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 0;border-bottom:1px solid var(--line)}.rh-switchrow strong{display:block;font-size:12px}.rh-switchrow span{display:block;margin-top:3px;color:var(--muted);font-size:10px;line-height:1.5}.rh-switch{position:relative;width:43px;height:24px;flex:none}.rh-switch input{width:0;height:0;opacity:0}.rh-slider{position:absolute;inset:0;border-radius:99px;background:#c9d1cd;cursor:pointer;transition:.18s}.rh-slider:before{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2);transition:.18s}.rh-switch input:checked+.rh-slider{background:var(--green)}.rh-switch input:checked+.rh-slider:before{transform:translateX(19px)}.rh-field{display:grid;gap:5px;margin-top:12px}.rh-field label{color:#34443e;font-size:10px;font-weight:720}.rh-field label span{float:right;color:var(--muted);font-weight:500}.rh-field input{width:100%;height:36px;padding:0 10px;border:1px solid #cad5d0;border-radius:7px;background:#fff;color:var(--ink);font-size:12px}.rh-field input:focus-visible,.rh-btn:focus-visible,.rh-prefer:focus-visible,.rh-switch input:focus-visible+.rh-slider{outline:3px solid rgba(19,133,100,.22);outline-offset:2px;border-color:var(--green)}.rh-hint{margin:0;color:var(--muted);font-size:9px;line-height:1.5}.rh-warning{display:flex;gap:8px;margin:13px 0 0;padding:9px 10px;border:1px solid #f0dbad;border-radius:7px;background:var(--amber-soft);color:#795517;font-size:9px;line-height:1.55}.rh-warning b{color:var(--amber)}.rh-actions{display:flex;gap:8px;margin-top:13px}.rh-btn{min-height:37px;padding:0 12px;border:1px solid #c9d5d0;border-radius:7px;background:#fff;color:#40534b;font-size:11px;cursor:pointer;transition:.16s}.rh-btn:hover:not(:disabled){border-color:#8eb3a5;background:#f7fbf9}.rh-btn.primary{flex:1;border-color:var(--forest);background:var(--forest);color:#fff;font-weight:720}.rh-btn.primary:hover:not(:disabled){background:#0a3b2d}.rh-btn:disabled{opacity:.48;cursor:wait}.rh-message{min-height:16px;margin:9px 0 0;color:var(--muted);font-size:9px;line-height:1.5}.rh-message.ok{color:var(--green);font-weight:650}.rh-message.error{color:var(--red)}@keyframes rh-enter{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}@container(max-width:760px){.rh-grid{grid-template-columns:1fr}.rh-head{align-items:flex-start}.rh-routes{grid-template-columns:1fr}.rh-route{min-height:58px;border-right:0;border-bottom:1px solid var(--line)}.rh-route:last-child{border-bottom:0}.rh-preference{grid-template-columns:1fr}.rh-preference-buttons{grid-template-columns:repeat(2,1fr)}}@container(max-width:480px){.r3hotspot-app{padding:10px 0 30px}.rh-head,.rh-console-top{grid-template-columns:1fr;flex-direction:column;align-items:flex-start}.rh-success{grid-template-columns:auto 1fr}.rh-success-code{display:none}.rh-metrics{grid-template-columns:1fr}.rh-metric,.rh-metric:nth-last-child(-n+2){border-right:0;border-bottom:1px solid var(--line)}.rh-metric:last-child{border-bottom:0}.rh-actions{flex-direction:column}.rh-btn{width:100%}}
-		#view .r3hotspot-app .rh-eyebrow{color:var(--green)!important}
-		#view .r3hotspot-app .rh-title{color:var(--forest)!important;text-shadow:none!important}
-		#view .r3hotspot-app .rh-description{color:var(--muted)!important}
-		#view .r3hotspot-app .rh-head::after{content:none!important;display:none!important}
-		</style>
-		<header class="rh-head"><div><p class="rh-eyebrow">UPLINK RELAY / LIVE</p><h1 class="rh-title">网络接力控制台</h1><p class="rh-description">统一查看有线、蜂窝与手机热点出口。手机热点支持 Wi-Fi 6 与 WPA2/WPA3-Personal。</p></div><div id="rh-health" class="rh-health"><i class="rh-dot"></i><span>读取状态中</span></div></header>
-		<section id="rh-success" class="rh-success" role="status" aria-live="polite"><i class="rh-success-icon">✓</i><div><strong>手机热点连接成功</strong><span id="rh-success-meta">正在读取连接信息…</span></div><code class="rh-success-code">UPLINK ACTIVE</code></section>
-		<section class="rh-console"><div class="rh-console-top"><div><p class="rh-console-label">DEFAULT EGRESS</p><h2 id="rh-egress" class="rh-egress" aria-live="polite">正在读取…</h2><p id="rh-egress-meta" class="rh-egress-meta">--</p></div><span id="rh-default" class="rh-default">route / --</span></div><div class="rh-routes"><div class="rh-route" data-route="wan"><div class="rh-route-name">有线 WAN <span class="rh-route-badge">ETH</span></div><span class="rh-route-detail">检测中</span></div><div class="rh-route" data-route="cellular"><div class="rh-route-name">蜂窝网络 <span class="rh-route-badge">5G SIM</span></div><span class="rh-route-detail">检测中</span></div><div class="rh-route" data-route="hotspot"><div class="rh-route-name">手机热点 <span class="rh-route-badge">WIFI</span></div><span class="rh-route-detail">检测中</span></div></div></section>
-		<section class="rh-preference"><div class="rh-preference-copy"><strong>出口偏好</strong><span>仅在线出口可选；“自动”按有线 → 蜂窝 → 热点排序。</span></div><div class="rh-preference-buttons" role="group" aria-label="选择默认网络出口"><button class="rh-prefer" data-prefer="auto">自动</button><button class="rh-prefer" data-prefer="wan">有线 WAN</button><button class="rh-prefer" data-prefer="cellular">蜂窝 5G</button><button class="rh-prefer" data-prefer="hotspot">手机热点</button></div></section>
-		<main class="rh-grid"><section class="rh-card"><h2 class="rh-card-title">出口详情 <small>稳定 250ms / 切换 100ms 刷新</small></h2><div class="rh-metrics"><div class="rh-metric"><small>逻辑接口</small><strong id="rh-iface">--</strong></div><div class="rh-metric"><small>IPv4 地址</small><strong id="rh-ip">--</strong></div><div class="rh-metric"><small>物理设备</small><strong id="rh-device">--</strong></div><div class="rh-metric"><small>5GHz 信道</small><strong id="rh-channel">--</strong></div></div><div class="rh-policy"><b>自动重连：</b><span id="rh-policy">--</span></div></section><section class="rh-card"><h2 class="rh-card-title">手机热点 Wi-Fi 设置 <small id="rh-hotspot-state">--</small></h2><div class="rh-form"><div class="rh-switchrow"><div><strong>启用手机热点 WAN</strong><span>启用后保留本地 5GHz AP，并创建手机热点 STA。</span></div><label class="rh-switch"><input id="rh-enabled" type="checkbox" aria-label="启用手机热点 WAN"><i class="rh-slider"></i></label></div><div class="rh-field"><label for="rh-ssid">手机热点名称 <span>SSID</span></label><input id="rh-ssid" name="hotspot_ssid" maxlength="32" autocomplete="off" spellcheck="false" placeholder="例如：MyPhone-5G…"></div><div class="rh-field"><label for="rh-password">手机热点密码 <span>首次配置必填</span></label><input id="rh-password" name="hotspot_password" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="留空则保留已保存密码…"><p id="rh-password-hint" class="rh-hint">密码不会在页面回显。</p></div><div class="rh-warning"><b>!</b><span>必须通过 LAN 管理。保存时会短暂停止本地 5GHz AP，用 STA 扫描手机信道，再让 AP 与手机热点切到同一信道；设备可能断开约 20–40 秒。</span></div><div class="rh-actions"><button id="rh-revert" class="rh-btn">恢复当前值</button><button id="rh-apply" class="rh-btn primary">保存并应用</button></div><p id="rh-message" class="rh-message" aria-live="polite">未保存前不会改变无线连接。</p></div></section></main>`;
-
-		this.saved = { enabled: !!status.enabled, ssid: status.ssid || '' };
+		this.st = st;
+		this.failures = 0;
+		this.inflight = null;
 		this.busy = false;
-		this.statusRequest = null;
-		this.bind();
-		this.update(status, true);
-		poll.add(function() {
-			return self.refreshStatus();
-		}, 0.25);
+		this.burstUntil = 0;
+		this.scan = null;
+		this.picked = null;
+		this.lastJobId = st.job && st.job.state !== 'running' ? st.job.id : null;
+		this.saved = this.savedForm(st);
+
+		this.nodes = {};
+		var n = this.nodes;
+		n.now = E('strong', {}, '');
+		n.nowDetail = E('span', {}, '');
+		n.age = E('span', { 'class': 'r3x-age' }, '');
+		n.exits = {};
+		var cards = KINDS.map(function(kind) {
+			var card = E('div', { 'class': 'r3x-exit', 'data-kind': kind }, [
+				E('div', { 'class': 'r3x-exit-head' }, [E('span', {}, NAMES[kind]), E('span', { 'class': 'r3x-pill' }, '')]),
+				E('div', { 'class': 'r3x-exit-detail' }, ''),
+				E('div', { 'class': 'r3x-exit-reason' }, '')
+			]);
+			if (kind === 'cellular') {
+				n.cellBtn = E('button', { 'class': 'cbi-button cbi-button-action', 'click': function() { self.toggleCellular(); } }, '');
+				card.appendChild(n.cellBtn);
+			}
+			n.exits[kind] = card;
+			return card;
+		});
+		n.prefer = {};
+		var preferButtons = ['auto'].concat(KINDS).map(function(kind) {
+			n.prefer[kind] = E('button', { 'class': 'cbi-button', 'aria-pressed': 'false', 'click': function() { self.prefer(kind); } }, NAMES[kind]);
+			return n.prefer[kind];
+		});
+		n.preferNote = E('p', { 'class': 'r3x-note' }, '');
+		n.preferMsg = E('p', { 'class': 'r3x-msg', 'aria-live': 'polite' }, '');
+
+		n.enabled = E('input', { 'type': 'checkbox', 'id': 'r3x-enabled', 'change': function() { self.syncForm(); } });
+		n.radio = E('select', { 'class': 'cbi-input-select', 'id': 'r3x-radio', 'change': function() { self.scan = null; self.picked = null; self.renderScan(); self.syncForm(); } });
+		n.ssid = E('input', { 'class': 'cbi-input-text', 'id': 'r3x-ssid', 'type': 'text', 'maxlength': '32', 'autocomplete': 'off', 'spellcheck': 'false', 'placeholder': '先搜索再选择，也可以直接输入名称',
+			'input': function() { self.picked = null; self.renderScan(); self.syncForm(); } });
+		n.scanBtn = E('button', { 'class': 'cbi-button cbi-button-action', 'click': function() { self.doScan(); } }, '搜索附近 Wi-Fi');
+		n.scanInfo = E('div', { 'class': 'r3x-hint' }, '搜索约 2 秒，不会断网。');
+		n.list = E('ul', { 'class': 'r3x-list', 'hidden': '' });
+		n.password = E('input', { 'class': 'cbi-input-password', 'id': 'r3x-password', 'type': 'password', 'maxlength': '63', 'autocomplete': 'new-password', 'input': function() { self.syncForm(); } });
+		n.passwordHint = E('div', { 'class': 'r3x-hint' }, '');
+		n.passwordField = E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-password' }, '密码'), n.password, n.passwordHint]);
+		n.warn = E('p', { 'class': 'r3x-warn' }, '');
+		n.revert = E('button', { 'class': 'cbi-button cbi-button-reset', 'click': function() { self.resetForm(); } }, '还原');
+		n.save = E('button', { 'class': 'cbi-button cbi-button-apply', 'click': function() { self.save(); } }, '保存并连接');
+		n.job = E('p', { 'class': 'r3x-job', 'role': 'status', 'aria-live': 'polite', 'hidden': '' }, '');
+		n.formMsg = E('p', { 'class': 'r3x-msg', 'aria-live': 'polite' }, '');
+		n.foot = E('p', { 'class': 'r3x-foot' }, '');
+
+		this.root = E('div', { 'class': 'r3x' }, [
+			E('style', {}, CSS),
+			E('h2', { 'name': 'content' }, '上网出口'),
+			E('p', { 'class': 'r3x-descr' }, '路由器从这三条线路里选一条上网：有线 WAN、5G 蜂窝、Wi-Fi 上网（连手机热点或附近任意 Wi-Fi）。'),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, '当前出口'),
+				E('p', { 'class': 'r3x-now' }, [n.now, n.nowDetail, n.age]),
+				E('div', { 'class': 'r3x-exits' }, cards),
+				E('div', { 'class': 'r3x-prefer', 'role': 'group', 'aria-label': '优先出口' }, [E('span', {}, '优先使用')].concat(preferButtons)),
+				n.preferNote,
+				n.preferMsg
+			]),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, 'Wi-Fi 上网'),
+				E('div', { 'class': 'r3x-form' }, [
+					E('label', { 'class': 'r3x-check' }, [n.enabled, '启用 Wi-Fi 上网']),
+					E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-radio' }, '频段'), n.radio,
+						E('div', { 'class': 'r3x-hint' }, '路由器会用这个频段去连对方，并让本机这个频段的 Wi-Fi 跟到对方所在信道。')]),
+					E('div', { 'class': 'r3x-field' }, [E('label', { 'for': 'r3x-ssid' }, 'Wi-Fi 名称'),
+						E('div', { 'class': 'r3x-row' }, [n.ssid, n.scanBtn]), n.scanInfo, n.list]),
+					n.passwordField,
+					n.warn,
+					E('div', { 'class': 'r3x-actions' }, [n.save, n.revert]),
+					n.job,
+					n.formMsg
+				])
+			]),
+			n.foot
+		]);
+
+		this.fillRadios(st);
+		this.resetForm(true);
+		this.update(st);
+
+		this.onVisible = function() { if (!document.hidden) self.refresh(); };
+		document.addEventListener('visibilitychange', this.onVisible);
+		this.schedule();
 		return this.root;
 	},
 
-	bind: function() {
+	// ---------- 刷新 ----------
+
+	jobRunning: function() { return !!(this.st && this.st.job && this.st.job.state === 'running'); },
+
+	schedule: function() {
 		var self = this;
-		this.root.querySelector('#rh-enabled').addEventListener('change', function() { self.syncForm(); });
-		this.root.querySelector('#rh-ssid').addEventListener('input', function() { self.syncForm(); });
-		this.root.querySelector('#rh-password').addEventListener('input', function() { self.syncForm(); });
-		this.root.querySelector('#rh-revert').addEventListener('click', function() {
-			self.root.querySelector('#rh-enabled').checked = self.saved.enabled;
-			self.root.querySelector('#rh-ssid').value = self.saved.ssid;
-			self.root.querySelector('#rh-password').value = '';
-			self.syncForm();
-			self.message('已恢复为路由器已保存的配置。');
+		clearTimeout(this.timer);
+		var fast = this.jobRunning() || Date.now() < this.burstUntil;
+		this.timer = setTimeout(function() {
+			if (!self.root.isConnected) {
+				document.removeEventListener('visibilitychange', self.onVisible);
+				return;
+			}
+			if (document.hidden) return self.schedule();
+			self.refresh().then(function() { self.schedule(); });
+		}, fast ? FAST_MS : SLOW_MS);
+	},
+
+	refresh: function() {
+		var self = this;
+		if (this.inflight) return this.inflight;
+		this.inflight = this.run(['status']).then(function(st) {
+			self.failures = 0;
+			self.update(st);
+		}).catch(function(err) {
+			self.failures++;
+			if (self.failures >= 2) self.markStale(err);
+		}).then(function() { self.inflight = null; });
+		return this.inflight;
+	},
+
+	markStale: function(err) {
+		var n = this.nodes;
+		n.age.className = 'r3x-age err';
+		n.age.textContent = this.jobRunning()
+			? '路由器正在重配 Wi-Fi，暂时连不上，恢复后自动刷新'
+			: '读不到状态，正在重试（' + (err && err.message || '网络错误') + '）';
+		KINDS.forEach(function(kind) { n.exits[kind].classList.add('unknown'); });
+		['auto'].concat(KINDS).forEach(function(kind) { n.prefer[kind].disabled = true; });
+	},
+
+	update: function(st) {
+		var n = this.nodes, self = this;
+		var prevJob = this.st && this.st.job;
+		this.st = st;
+		var e = st.egress || {};
+		n.now.textContent = e.kind === 'none' ? '没有可用的出口' : e.kind === 'other' ? '其他线路（' + e.device + '）' : '正在通过 ' + NAMES[e.kind] + ' 上网';
+		n.nowDetail.textContent = e.ip ? e.ip + (e.gateway ? '，网关 ' + e.gateway : '') : '';
+		n.age.className = 'r3x-age';
+		n.age.textContent = '更新于 ' + clockText(new Date());
+
+		KINDS.forEach(function(kind) {
+			var v = exitView(st, kind), card = n.exits[kind];
+			card.className = 'r3x-exit' + (v.tone === 'active' ? ' active' : '');
+			var pill = card.querySelector('.r3x-pill');
+			pill.className = 'r3x-pill ' + v.tone;
+			pill.textContent = v.pill;
+			card.querySelector('.r3x-exit-detail').textContent = v.detail;
+			card.querySelector('.r3x-exit-reason').textContent = v.reason;
+			if (kind === 'cellular') {
+				n.cellBtn.hidden = !v.action;
+				n.cellBtn.textContent = v.action === 'on' ? '恢复拨号' : '暂停拨号';
+				n.cellBtn.disabled = self.busy;
+			}
 		});
-		this.root.querySelector('#rh-apply').addEventListener('click', function() { self.apply(); });
-		var preferences = this.root.querySelectorAll('[data-prefer]');
-		for (var i = 0; i < preferences.length; i++) preferences[i].addEventListener('click', function() { self.prefer(this.getAttribute('data-prefer')); });
+
+		var offline = [];
+		['auto'].concat(KINDS).forEach(function(kind) {
+			var b = n.prefer[kind];
+			b.setAttribute('aria-pressed', st.preferred === kind ? 'true' : 'false');
+			b.disabled = self.busy || !online(st, kind);
+			if (kind !== 'auto' && !online(st, kind)) offline.push(NAMES[kind]);
+		});
+		n.preferNote.textContent = (st.preferred === 'auto'
+			? '自动：有线 WAN 优先，其次 5G 蜂窝，最后 Wi-Fi 上网；在用的断了会换下一条。'
+			: '已固定优先用' + NAMES[st.preferred] + '；它断了仍会换到其他在线线路。')
+			+ (offline.length ? ' 现在不可选：' + offline.join('、') + '。' : '');
+
+		var r = st.reconnect || {};
+		n.foot.textContent = 'Wi-Fi 上网自动重连：每 ' + r.interval + ' 秒检查一次，连续 ' + r.limit + ' 次没连上就重连；重连 3 轮无效时重新搜索对方信道（最少隔 ' + r.cooldown + ' 秒）。';
+
+		this.renderJob(st.job, prevJob);
+		this.syncForm();
 	},
 
-	refreshStatus: function() {
-		var self = this;
-		if (this.statusRequest) return this.statusRequest;
-		this.statusRequest = this.call(['status']).then(function(next) {
-			self.update(next, false);
-			return next;
-		}).catch(function(error) {
-			self.message('状态读取失败：' + error.message, 'error');
-		}).finally(function() { self.statusRequest = null; });
-		return this.statusRequest;
-	},
-
-	startBurst: function() {
-		var self = this;
-		var until = Date.now() + 5000;
-		clearTimeout(this.burstTimer);
-		function tick() {
-			if (!self.root || !self.root.isConnected || Date.now() >= until) return;
-			self.refreshStatus();
-			self.burstTimer = setTimeout(tick, 100);
+	renderJob: function(job, prev) {
+		var n = this.nodes;
+		if (!job) { n.job.hidden = true; return; }
+		n.job.hidden = false;
+		n.job.className = 'r3x-job' + (job.state === 'failed' ? ' err' : job.state === 'done' ? ' ok' : '');
+		n.job.textContent = (job.state === 'running' ? '进行中：' : job.state === 'failed' ? '失败：' : '完成：') + (job.message || '');
+		// 刚结束的任务：表单换成路由器上的新设置。
+		if (job.state !== 'running' && job.id !== this.lastJobId) {
+			this.lastJobId = job.id;
+			if (prev && prev.id === job.id) {
+				this.saved = this.savedForm(this.st);
+				if (job.state === 'done') this.resetForm(true);
+			}
 		}
-		tick();
+	},
+
+	// ---------- 出口 ----------
+
+	prefer: function(kind) {
+		var self = this, n = this.nodes;
+		if (this.busy || !online(this.st, kind)) return;
+		this.setBusy(true);
+		this.message(n.preferMsg, '正在切换到' + NAMES[kind] + '…');
+		this.run(['prefer', kind]).then(function(st) {
+			self.update(st);
+			self.message(n.preferMsg, kind === 'auto' ? '已改为自动选择出口。' : '已改为优先用' + NAMES[kind] + '。', 'ok');
+		}).catch(function(err) {
+			self.message(n.preferMsg, err.message, 'err');
+		}).then(function() {
+			self.setBusy(false);
+			self.burstUntil = Date.now() + BURST_MS;
+			self.schedule();
+		});
+	},
+
+	toggleCellular: function() {
+		var self = this, n = this.nodes, on = !(this.st.cellular || {}).auto;
+		if (this.busy) return;
+		this.setBusy(true);
+		this.message(n.preferMsg, on ? '正在检查 SIM 卡并恢复拨号…' : '正在暂停蜂窝拨号…');
+		this.run(['cellular', on ? 'on' : 'off']).then(function(st) {
+			self.update(st);
+			self.message(n.preferMsg, on ? '已恢复蜂窝拨号。' : '已暂停蜂窝拨号；插好 SIM 卡后再恢复。', 'ok');
+		}).catch(function(err) {
+			self.message(n.preferMsg, err.message, 'err');
+		}).then(function() {
+			self.setBusy(false);
+			self.burstUntil = Date.now() + BURST_MS;
+			self.schedule();
+		});
+	},
+
+	// ---------- Wi-Fi 上网 ----------
+
+	savedForm: function(st) {
+		var f = st.wifi || {}, radios = st.radios || [];
+		var radio = f.radio || (radios.filter(function(r) { return r.band === '5g'; })[0] || radios[0] || {}).name || '';
+		return { enabled: !!f.enabled, radio: radio, ssid: f.ssid || '', keySet: !!f.key_set };
+	},
+
+	fillRadios: function(st) {
+		var sel = this.nodes.radio;
+		while (sel.firstChild) sel.removeChild(sel.firstChild);
+		(st.radios || []).forEach(function(r) {
+			sel.appendChild(E('option', { 'value': r.name }, [T(bandName(r.band) + (r.ap_ssid ? '（本机 Wi-Fi「' + r.ap_ssid + '」，信道 ' + r.channel + '）' : ''))]));
+		});
+	},
+
+	radioInfo: function(name) {
+		return (this.st.radios || []).filter(function(r) { return r.name === name; })[0] || {};
+	},
+
+	resetForm: function(quiet) {
+		var n = this.nodes, s = this.saved;
+		n.enabled.checked = s.enabled;
+		n.radio.value = s.radio;
+		n.ssid.value = s.ssid;
+		n.password.value = '';
+		this.scan = null;
+		this.picked = null;
+		this.renderScan();
+		this.syncForm();
+		if (!quiet) this.message(n.formMsg, '已还原为路由器上保存的设置。');
+	},
+
+	form: function() {
+		var n = this.nodes;
+		return { enabled: n.enabled.checked, radio: n.radio.value, ssid: n.ssid.value.trim(), password: n.password.value };
+	},
+
+	// 当前表单相对路由器上的设置：要做什么、能不能做、为什么不能。
+	plan: function() {
+		var f = this.form(), s = this.saved, picked = this.picked;
+		if (!f.enabled) return s.enabled ? { action: 'disable' } : { action: null };
+		var newNetwork = f.ssid !== s.ssid;
+		var changed = !s.enabled || newNetwork || f.radio !== s.radio || f.password !== '';
+		if (!changed) return { action: null };
+		if (!f.ssid) return { action: 'save', block: '请先搜索并选择 Wi-Fi，或输入名称' };
+		if (bytes(f.ssid) > 32) return { action: 'save', block: 'Wi-Fi 名称不能超过 32 字节' };
+		if (picked && picked.why) return { action: 'save', block: '这个 Wi-Fi 不能用：' + picked.why };
+		var needKey = picked ? picked.enc !== 'none' : false;
+		if (f.password && (bytes(f.password) < 8 || bytes(f.password) > 63)) return { action: 'save', block: '密码必须是 8–63 个字符' };
+		if (needKey && !f.password && (newNetwork || !s.keySet)) return { action: 'save', block: '请输入这个 Wi-Fi 的密码' };
+		return { action: 'save' };
 	},
 
 	syncForm: function() {
-		var enabled = this.root.querySelector('#rh-enabled').checked;
-		var ssid = this.root.querySelector('#rh-ssid').value.trim();
-		var password = this.root.querySelector('#rh-password').value;
-		var ssidBytes = new TextEncoder().encode(ssid).length;
-		var passwordBytes = new TextEncoder().encode(password).length;
-		var firstSetup = !this.status.key_configured;
-		this.root.querySelector('#rh-enabled').disabled = this.busy;
-		this.root.querySelector('#rh-ssid').disabled = this.busy || !enabled;
-		this.root.querySelector('#rh-password').disabled = this.busy || !enabled;
-		this.root.querySelector('#rh-revert').disabled = this.busy;
-		this.root.querySelector('#rh-password-hint').textContent = firstSetup ? '首次启用必须输入 8–63 位热点密码；页面不会回显。' : '留空会保留路由器已保存的热点密码。';
-		this.root.querySelector('#rh-apply').disabled = this.busy || enabled && (!ssid || ssidBytes > 32 || (firstSetup && passwordBytes < 8) || (password && (passwordBytes < 8 || passwordBytes > 63)));
-		this.syncPreference(this.status);
+		var n = this.nodes, f = this.form(), s = this.saved, p = this.plan(), running = this.jobRunning();
+		var lock = this.busy || running;
+		n.enabled.disabled = lock;
+		[n.radio, n.ssid, n.scanBtn, n.password].forEach(function(el) { el.disabled = lock || !f.enabled; });
+		n.revert.disabled = lock;
+
+		var open = this.picked && this.picked.enc === 'none';
+		n.passwordField.hidden = !f.enabled || open;
+		n.passwordHint.textContent = f.ssid && f.ssid === s.ssid && s.keySet ? '留空则沿用已保存的密码。' : '8–63 个字符。只写进路由器，页面不会显示。';
+
+		var radio = this.radioInfo(f.radio);
+		var target = this.picked && !this.picked.why ? '信道 ' + this.picked.channel : '对方所在信道';
+		n.warn.hidden = !p.action;
+		n.warn.textContent = p.action === 'disable'
+			? '停用后本机 ' + bandName(radio.band) + ' Wi-Fi 会恢复原信道，期间断开十几秒；用它连路由器的设备会短暂断网。'
+			: '保存后本机 ' + bandName(radio.band) + ' Wi-Fi（现在信道 ' + (radio.channel || '?') + '）会改到' + target + '，期间断开十几秒；用它连路由器的设备会短暂断网。';
+
+		n.save.textContent = p.action === 'disable' ? '停用 Wi-Fi 上网' : '保存并连接';
+		n.save.disabled = lock || !p.action || !!p.block;
+		if (p.block && f.enabled) this.message(n.formMsg, p.block);
+		else if (!this.formMsgSticky) this.message(n.formMsg, p.action ? '' : '设置没有改动。');
+	},
+
+	doScan: function() {
+		var self = this, n = this.nodes, radio = n.radio.value;
+		n.scanBtn.disabled = true;
+		n.scanInfo.textContent = '正在搜索 ' + bandName(this.radioInfo(radio).band) + ' 附近的 Wi-Fi…';
+		this.run(['scan', radio]).then(function(scan) {
+			if (n.radio.value !== radio) return;
+			self.scan = networks(scan, self.radioInfo(radio).band);
+			var usable = self.scan.filter(function(x) { return !x.why; }).length;
+			n.scanInfo.textContent = '找到 ' + self.scan.length + ' 个，' + usable + ' 个可以连。不支持隐藏名称的网络。';
+			var match = self.scan.filter(function(x) { return x.ssid === n.ssid.value.trim(); })[0];
+			self.picked = match || null;
+			self.renderScan();
+		}).catch(function(err) {
+			n.scanInfo.textContent = '搜索失败：' + err.message;
+		}).then(function() { self.syncForm(); });
+	},
+
+	renderScan: function() {
+		var self = this, n = this.nodes, list = n.list;
+		while (list.firstChild) list.removeChild(list.firstChild);
+		list.hidden = !this.scan;
+		if (!this.scan) return;
+		if (!this.scan.length) {
+			list.appendChild(E('li', {}, '附近没有搜到 Wi-Fi。'));
+			return;
+		}
+		this.scan.forEach(function(x) {
+			var picked = self.picked && self.picked.ssid === x.ssid;
+			var meta = signalName(x.signal) + ' · 信道 ' + x.channel + ' · ' + encName(x.enc) + (x.why ? ' · ' + x.why : '');
+			list.appendChild(E('li', { 'class': (picked ? 'picked' : '') + (x.why ? ' no' : '') }, [
+				E('span', { 'class': 'r3x-net', 'title': x.ssid }, [T(x.ssid)]),
+				E('span', { 'class': 'r3x-meta' }, [T(meta)]),
+				x.why ? '' : E('button', { 'class': 'cbi-button cbi-button-neutral', 'click': function() { self.pick(x); } }, picked ? '已选' : '选择')
+			]));
+		});
+	},
+
+	pick: function(x) {
+		var n = this.nodes;
+		this.picked = x;
+		n.ssid.value = x.ssid;
+		if (x.enc === 'none') n.password.value = '';
+		this.renderScan();
+		this.syncForm();
+		if (x.enc !== 'none') n.password.focus();
+	},
+
+	save: function() {
+		var self = this, n = this.nodes, f = this.form(), p = this.plan(), radio = this.radioInfo(f.radio);
+		if (!p.action || p.block || this.busy || this.jobRunning()) return;
+		var title = p.action === 'disable' ? '停用 Wi-Fi 上网' : '连接 Wi-Fi';
+		var lines = p.action === 'disable'
+			? ['本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并恢复原信道。']
+			: ['路由器会用 ' + bandName(radio.band) + ' 连接「' + f.ssid + '」。', '本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并改到对方信道；如果你正用它连着路由器，页面会短暂断开，之后自动恢复。'];
+		confirmBox(title, lines, p.action === 'disable' ? '停用' : '保存并连接').then(function(ok) {
+			if (!ok) return;
+			self.setBusy(true);
+			self.message(n.formMsg, '正在提交…');
+			var keyFile = p.action === 'save' && f.password ? keyFileName() : null;
+			var start = keyFile
+				? fs.write(keyFile, f.password, 384).then(function() { return self.run(['save', f.radio, f.ssid, keyFile]); })
+				: self.run(p.action === 'disable' ? ['disable'] : ['save', f.radio, f.ssid, '-']);
+			return start.then(function(st) {
+				n.password.value = '';
+				self.update(st);
+				self.message(n.formMsg, '');
+			}).catch(function(err) {
+				self.message(n.formMsg, err.message, 'err');
+			}).then(function() {
+				if (keyFile) fs.remove(keyFile).catch(function() {});
+				self.setBusy(false);
+				self.schedule();
+			});
+		});
 	},
 
 	setBusy: function(busy) {
 		this.busy = busy;
-		this.syncForm();
+		this.update(this.st);
 	},
 
-	syncPreference: function(status) {
-		var selected = status.preferred_egress || 'auto';
-		var nodes = this.root.querySelectorAll('[data-prefer]');
-		for (var i = 0; i < nodes.length; i++) {
-			var kind = nodes[i].getAttribute('data-prefer');
-			nodes[i].classList.toggle('selected', kind === selected);
-			nodes[i].disabled = this.busy || kind !== 'auto' && !routeOnline(status, kind);
-			nodes[i].setAttribute('aria-pressed', kind === selected ? 'true' : 'false');
-			nodes[i].title = kind === 'auto' || routeOnline(status, kind) ? '' : '该出口当前未连接';
-		}
-	},
-
-	prefer: function(kind) {
-		var self = this;
-		if (this.busy || kind !== 'auto' && !routeOnline(this.status, kind)) return;
-		this.setBusy(true);
-		this.root.querySelector('#rh-egress').textContent = kind === 'auto' ? '正在恢复自动选择…' : '正在切换到' + routeName(kind) + '…';
-		this.message(kind === 'auto' ? '正在恢复自动出口策略…' : '正在切换默认出口到' + routeName(kind) + '…');
-		this.startBurst();
-		this.call(['prefer', kind]).then(function(next) {
-			self.update(next, false);
-			self.message(kind === 'auto' ? '已恢复自动出口策略。' : '已选择' + routeName(kind) + '作为优先出口。', 'ok');
-		}).catch(function(error) {
-			self.message(error.message, 'error');
-			ui.addNotification(null, E('p', {}, error.message), 'danger');
-		}).finally(function() {
-			self.setBusy(false);
-			self.startBurst();
-		});
-	},
-
-	apply: function() {
-		var self = this;
-		var enabled = this.root.querySelector('#rh-enabled').checked;
-		var ssid = this.root.querySelector('#rh-ssid').value.trim();
-		var password = this.root.querySelector('#rh-password').value;
-		var prompt = enabled ? '5GHz 将短暂断开约 20–40 秒并重新关联手机热点。确认保存并开始自动连接吗？' : '停用同样会短暂重配 5GHz，当前设备可能断开约 20–40 秒。确认停用吗？';
-		if (!window.confirm(prompt)) return;
-		this.setBusy(true);
-		this.message(enabled ? '正在保存并重配 5GHz；页面可能短暂断开…' : '正在暂停手机热点 WAN 并短暂重配 5GHz；页面可能短暂断开…');
-		this.startBurst();
-		this.call(['apply', enabled ? '1' : '0', ssid, password]).then(function(next) {
-			self.root.querySelector('#rh-password').value = '';
-			self.update(next, true);
-			self.message(enabled && next.wwan_up && next.egress_kind === 'hotspot' ? '连接成功：手机热点已成为当前默认出口。' : enabled && next.wwan_up ? '手机热点已连接，当前在线待命。' : enabled ? '配置已保存，正在等待手机热点连接。' : '已暂停手机热点 WAN，本地 5GHz AP 会在重配后恢复可用。', 'ok');
-		}).catch(function(error) {
-			self.message(error.message, 'error');
-			ui.addNotification(null, E('p', {}, error.message), 'danger');
-		}).finally(function() { self.setBusy(false); self.startBurst(); });
-	},
-
-	update: function(status, resetForm) {
-		var state = hotspotState(status);
-		var health = this.root.querySelector('#rh-health');
-		var success = this.root.querySelector('#rh-success');
-		var kind = status.egress_kind || 'none';
-		var becameConnected = !this.lastWwanUp && !!status.wwan_up;
-		var becameDisconnected = this.lastWwanUp && !status.wwan_up;
-		var egressChanged = this.lastEgressKind && this.lastEgressKind !== kind;
-		this.status = status;
-		this.lastWwanUp = !!status.wwan_up;
-		this.lastEgressKind = kind;
-		health.classList.toggle('online', kind !== 'none');
-		health.querySelector('span').textContent = state;
-		success.classList.toggle('show', !!status.wwan_up);
-		this.root.querySelector('#rh-success-meta').textContent = status.wwan_up ? (status.wwan_ip || '--') + ' · 5GHz 信道 ' + (status.channel || '--') + ' · 默认路由 ' + (status.egress_device || '--') : '正在读取连接信息…';
-		this.root.querySelector('#rh-egress').textContent = status.egress_label || '未检测到默认出口';
-		this.root.querySelector('#rh-egress-meta').textContent = status.egress_ip ? '正在通过 ' + (status.egress_iface || '--') + ' · ' + status.egress_ip + ' 联网' : '当前没有可用的 IPv4 默认路由';
-		this.root.querySelector('#rh-default').textContent = 'route / ' + (status.egress_device || '--');
-		this.root.querySelector('#rh-iface').textContent = status.egress_iface || '--';
-		this.root.querySelector('#rh-ip').textContent = status.egress_ip || '--';
-		this.root.querySelector('#rh-device').textContent = status.egress_device || '--';
-		this.root.querySelector('#rh-channel').textContent = status.channel ? status.channel + ' 信道' + (status.target_channel && status.target_channel !== status.channel ? '（目标 ' + status.target_channel + '）' : '') : '--';
-		this.root.querySelector('#rh-hotspot-state').textContent = state;
-		this.root.querySelector('#rh-policy').textContent = '每 ' + status.check_interval + ' 秒检查；连续 ' + status.failure_limit + ' 次失败先重连，连续三轮无效才重配；冷却 ' + status.cooldown + ' 秒。';
-		for (var i = 0; i < ['wan', 'cellular', 'hotspot'].length; i++) {
-			var route = ['wan', 'cellular', 'hotspot'][i];
-			var node = this.root.querySelector('[data-route="' + route + '"]');
-			var active = kind === route;
-			node.classList.toggle('active', active);
-			node.querySelector('.rh-route-detail').textContent = active ? '当前默认出口' : routeOnline(status, route) ? '在线待命' : '未连接';
-		}
-		if (resetForm) {
-			this.saved = { enabled: !!status.enabled, ssid: status.ssid || '' };
-			this.root.querySelector('#rh-enabled').checked = this.saved.enabled;
-			this.root.querySelector('#rh-ssid').value = this.saved.ssid;
-		}
-		if (becameConnected) {
-			this.message(kind === 'hotspot' ? '连接成功：手机热点已成为当前默认出口。' : '手机热点已连接，当前处于在线待命。', 'ok');
-			ui.addNotification(null, E('p', {}, kind === 'hotspot' ? '手机热点连接成功，已成为默认出口。' : '手机热点连接成功，当前在线待命。'), 'info');
-		}
-		if (becameDisconnected) {
-			this.message(status.enabled ? '手机热点连接已断开，自动重连正在接管。' : '手机热点连接已停止。', status.enabled ? 'error' : '');
-			ui.addNotification(null, E('p', {}, status.enabled ? '手机热点连接已断开，正在自动重连。' : '手机热点连接已停止。'), status.enabled ? 'warning' : 'info');
-		}
-		if (egressChanged && !becameConnected && !becameDisconnected) {
-			ui.addNotification(null, E('p', {}, kind === 'none' ? '当前没有可用的默认网络出口。' : '默认出口已切换到' + (status.egress_label || kind) + '。'), kind === 'none' ? 'warning' : 'info');
-		}
-		this.syncForm();
-	},
-
-	message: function(text, type) {
-		var node = this.root.querySelector('#rh-message');
-		node.className = 'rh-message' + (type ? ' ' + type : '');
-		node.textContent = text;
+	message: function(node, text, tone) {
+		node.className = 'r3x-msg' + (tone ? ' ' + tone : '');
+		node.textContent = text || '';
+		if (node === this.nodes.formMsg) this.formMsgSticky = !!tone;
 	},
 
 	handleSaveApply: null,
