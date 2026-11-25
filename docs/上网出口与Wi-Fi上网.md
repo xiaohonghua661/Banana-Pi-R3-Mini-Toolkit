@@ -4,8 +4,12 @@
 
 适用范围：
 
-- **源机 `192.168.0.242`**：只部署在这台。
-- **克隆机 `.246`**：不装本模块的新版，也不要在它上面启用 Wi-Fi 上网。它没有 5G 模块，`r3mini_hotspot.main.enabled=0`。
+- **源机 `192.168.0.242`**：已部署，见「2026-11-25 部署记录」。
+- **克隆机 `.246`**：2026-11-25 22:19 经用户同意也部署了同一版，见「2026-11-25 克隆机 .246 部署记录」。
+  - 它没有 5G 模块，蜂窝卡片显示未配置。
+  - Wi-Fi 上网仍是关闭（`r3mini_hotspot.main.enabled=0`），由用户在页面上自己启用。
+  - 启用前先确认 `.242` 不在同一个 LAN：两台连同一部手机时会被拉到同一信道，互相干扰（见「硬件约束」）。
+  - 在本机连它用密钥 `~/.ssh/mingdaren_246_ed25519`，主机指纹已在 `~/.ssh/known_hosts`。
 
 LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/network/r3mini-hotspot`。2026-11-25 前这一页叫「手机热点 WAN / 网络接力控制台」。
 
@@ -281,6 +285,46 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 - 停用后恢复信道；
 - 看门狗停靠和重连；
 - 有 SIM 卡时恢复拨号。
+
+## 2026-11-25 克隆机 .246 部署记录
+
+部署前 `.246` 装的是 `5279ed3` 的旧版（「手机热点 WAN」页面），看门狗没开机自启、处于 inactive。当时现场：
+
+- `.242` 不在这个 LAN 上：`192.168.0.0/24` 里只有 `.246` 和一台固定 IP 的电脑。
+- `.246` 的 WAN `eth1` 接上级中继，DHCP 取地址。
+- 旧版「保存并应用」连手机热点失败，日志里同一秒内建了又删扫描网卡 `r3scan0`，之后没有任何关联记录。新版改用 `iwinfo scan` 借本机 AP 搜索，不再停 AP。
+
+按「部署、测试、回滚」的顺序执行，`--key` 换成 `~/.ssh/mingdaren_246_ed25519`，host 换成 `192.168.0.246`：
+
+- 整机备份：`backups/router/router-backup-20261125-221728-602460-192.168.0.246-before-chatgpt.tar.gz.dpapi`，778 条，`SCOPED_RESTORE_DRILL_OK`；`check-backup` 复核通过。
+- `test_hotspot_backend.py`：`RESULT pass=182 fail=0`。
+- `deploy_hotspot.py`：`CHANGED_FILES=8`、`ACL_CHANGED=1`、`DEPLOY_SHA256_OK=8/8`、`PRESERVED_CONFIG_OK=1`。8 个文件里 6 个是覆盖旧版，`status.uc`、`log.uc` 两个是新增。
+- 设备端文件备份：`/root/r3mini-hotspot-backup-20261125221944`，`.touched` 列了这 8 个文件。
+
+部署后：
+
+- 与整机备份的快照逐项比对：快照范围内只有本模块被覆盖的 6 个文件变了，另外新增了 `S95`/`K05r3mini-hotspot` 两个开机链接；`/etc/config/` 下全部配置未变。`status.uc`、`log.uc` 所在的 `/usr/share/r3mini-hotspot/` 不在快照范围内。
+- 看门狗 running，并已开机自启（部署前两者都没有）；`r3mini_hotspot.main.enabled=0`，`wireless.r3mini_phone_sta.disabled=1`。
+- 两个本机 AP 都在：信道 6、149。默认路由仍走 `eth1`，`ping 223.5.5.5` 通，DNS 正常，OpenClash running。
+- 路由器上的 8 个受管文件与仓库 SHA-256 一致。
+- 部署后 `main` 又合入了 `4684330`：只给 `deploy_hotspot.py` 加了读取 `R3MINI_SSH_KEY` 的功能，路由器侧文件没有变化，`.246` 上的仍是最新版。
+
+退回旧版（`5279ed3` 的「手机热点 WAN」）：
+
+```powershell
+python fan-dashboard/deploy_hotspot.py 192.168.0.246 --key ~/.ssh/mingdaren_246_ed25519 --rollback /root/r3mini-hotspot-backup-20261125221944
+```
+
+回滚会换回 6 个旧文件、删掉 `status.uc` 和 `log.uc`，最后重启看门狗；开机链接不会撤。要回到部署前「看门狗不自启、不运行」的状态，回滚成功后在设备上再执行 `/etc/init.d/r3mini-hotspot disable && /etc/init.d/r3mini-hotspot stop`。
+
+启用 Wi-Fi 上网之前：
+
+- 在 `.246` 上执行 `ping -c 2 -W 2 192.168.0.242`，再看 `ip neigh show 192.168.0.242`。两样都没有回应、也没有 `REACHABLE`/`STALE` 记录，才算 `.242` 不在这个 LAN。
+- `.242` 在同一个 LAN 时不要启用，先问用户。
+- 页面测试 `test_hotspot_page.py` 在 `.242` 上对同一版跑过（见上节「部署、测试、回滚」第 3 步）；`.246` 上没跑，因为这台电脑没装 `playwright`。它只检查页面，不是启用的前置条件。
+- Wi-Fi 上网没在 `.246` 上启用过。上一节「还没在真机验证」的各项，对 `.246` 同样都没有验证。
+
+整机备份可以用 `python chatgpt-routing/manage.py check-backup <文件>` 复核条数和抽样还原：它只在本机内存里解密，不连路由器。
 
 ## 失败处置
 
