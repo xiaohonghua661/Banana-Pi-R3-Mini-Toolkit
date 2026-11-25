@@ -36,7 +36,9 @@ LuCI 位置：「网络 → 上网出口」，地址 `/cgi-bin/luci/admin/networ
 ## 硬件约束
 
 - `radio0`（2.4 GHz）和 `radio1`（5 GHz）各自只能同时用一个信道（`#channels <= 1`）。所以 Wi-Fi 上网用哪个频段，本机该频段的 AP 就必须改到对方所在信道：
-  - 保存和停用时，该频段 AP 断开十几秒，另一个频段不受影响。
+  - 保存和停用时，该频段 AP 断开十几秒。
+  - 从一个频段换到另一个频段时，原来那个频段也会恢复原信道并重配，同样断开十几秒。页面的提示和确认框会写明两个频段。
+  - 第一次启用时，会把 `wwan` 加进防火墙 wan 区并重载一次防火墙。这一下对已有连接的影响没有实测过。
 - 能跟过去的信道：
   - 2.4 GHz：1–13。
   - 5 GHz：只有 36、40、44、48、149、153、157、161。本机 5 GHz 用 HE80、不用 DFS；52–144 要先做雷达检测，165 只能用 20 MHz。
@@ -129,7 +131,11 @@ python fan-dashboard/test_hotspot_page.py 192.168.0.242 --key docs/私密/r3mini
    - ACL 有变化时才重启 rpcd；此时已登录的 LuCI 要重新登录。不重启 uhttpd。
    - 成功时依次打印 `BACKUP=…`、`DEPLOY_SHA256_OK=7/7`、`PRESERVED_CONFIG_OK=1`。
 
-回滚：用某次部署打印的 `BACKUP=` 目录。忘了的话，在设备上执行 `ls -d /root/r3mini-hotspot-backup-*`，取那次部署之前最新的一份。
+回滚：用要撤销的那次部署自己打印的 `BACKUP=` 目录，里面存的是那次部署覆盖前的文件。
+
+- 忘了目录名：在设备上执行 `ls -d /root/r3mini-hotspot-backup-*`。目录名里的时间就是部署时间，取与要撤销的那次部署同一时刻的那份。
+- 部署时只改了一个文件，备份里也就只有那一个文件；用它回滚，也只退那一个文件。
+- 要整版退回 2026-11-25 之前的旧版，只能用 `20261125154841`。
 
 ```powershell
 python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-242/id_ed25519_242 --rollback /root/r3mini-hotspot-backup-20261125154841
@@ -138,7 +144,7 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 回滚的行为：
 
 - 按那份备份的 `.touched` 清单换回文件：部署时新增的文件会被删掉；ACL 有变化就重启 rpcd；最后重启看门狗。成功打印 `ROLLBACK_OK=<目录>`。
-- 回滚后不做 SHA-256 核对。需要时在设备上自己 `sha256sum` 比对。
+- 回滚后不做 SHA-256 核对。需要时在设备上逐个与备份比对，没有输出就表示一致：`b=/root/r3mini-hotspot-backup-<时间>; while read f; do [ -e "$b$f" ] && cmp "$b$f" "$f"; done < "$b/.touched"`。
 - 回滚不动 `/etc/config/r3mini_hotspot`。如果用新版保存过 Wi-Fi 上网再回滚旧版：旧版不认识 `original_channel_radio0/1`，停用时不会恢复信道，要手动执行 `uci set wireless.radioX.channel=<原信道>`、`uci commit wireless`、`wifi reconf radioX`。
 - `20261125154841` 那份是 2026-11-25 部署前的旧版，也就是 `5279ed3`。
 
@@ -147,7 +153,7 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 - 整机备份：`backups/router/router-backup-20261125-154829-100143-192.168.0.242-before-chatgpt.tar.gz.dpapi`，1192 条。
 - 设备端文件备份：
   - `/root/r3mini-hotspot-backup-20261125154841`：旧版 7 个文件。
-  - `/root/r3mini-hotspot-backup-20261125155322`、`…160107`：两次补装各自的备份，分别只含新版页面、后端的上一份。
+  - `/root/r3mini-hotspot-backup-20261125155322`、`…160107`、`…160950`：三次补装各自的备份，依次只含上一份页面、后端、页面。
 - 部署后：
   - 看门狗 running，`S95r3mini-hotspot` 在。
   - 默认路由仍是 `eth1` metric 5，OpenClash running。
@@ -158,7 +164,9 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
     - 执行 `r3mini-hotspot-web cellular off`：设 `network.RM500CNV.auto=0` 并 `ifdown`。
     - ModemManager 执行 `stop` 和 `disable`。没有任何接口用 modemmanager 协议，它和 quectel-cm 重复占着同一个模块。
   - 结果：日志 10 秒内没有新增一行，负载从约 1.6 降到 0.66。
-  - 插卡后：在页面点「恢复拨号」。要恢复 ModemManager，执行 `/etc/init.d/modemmanager enable && /etc/init.d/modemmanager start`。
+  - 插卡后：在页面点「恢复拨号」就够了，拨号由 quectel-cm 负责，不需要 ModemManager。
+  - 只有把蜂窝接口改成 `modemmanager` 协议时，才要恢复 ModemManager：`/etc/init.d/modemmanager enable && /etc/init.d/modemmanager start`。
+  - 不要让 ModemManager 和 quectel 协议同时管这块模块。11-25 实测 ModemManager 会占住 `ttyUSB2`，「恢复拨号」查 SIM 卡时只能改用 `ttyUSB3`，查不出结果就照常恢复。
 
 下面几项没有在真机上验证，因为都会断 Wi-Fi，需要用户在场并同意：实际连接一个 Wi-Fi、2.4/5 GHz 互换、停用后恢复信道、看门狗在真机上跟随信道、有 SIM 卡时恢复拨号。
 
@@ -200,8 +208,9 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 |---|---|
 | `PINNED_HOST_KEY_MISSING` | 先固定主机密钥，见「前提」 |
 | `SSH_KEY_MISSING`、`SSH_KEY_LOGIN_FAILED` | `--key` 路径不对，或设备不认这把密钥 |
-| `SSH_CONNECTION_OR_PIN_FAILED` | 连不上，或主机密钥与固定的不一致。后者要停下来查，可能不是同一台设备 |
-| `UNEXPECTED_DEVICE=<board>` | 不是 BPI-R3 Mini，没有写入任何东西 |
+| `HOST_KEY_MISMATCH` | 设备的主机密钥与固定的不一致。停下来，可能不是同一台设备（重刷过，或 IP 被别的设备占了）。不要删 `known_hosts` 里的记录去绕过，通过可信的物理链路核对指纹后报告用户 |
+| `SSH_CONNECTION_FAILED=<异常类>` | 连不上。先查地址对不对、设备是否在线：`Test-NetConnection 192.168.0.242 -Port 22` |
+| `UNEXPECTED_DEVICE=<board>` | 不是 BPI-R3 Mini，没有写入任何东西。以上连接类错误都发生在执行任何命令之前，设备上什么都没改 |
 | `SHA256_MISMATCH=<文件>`、`PRESERVED_CONFIG_MISSING` | 已自动回滚。看 `ROLLBACK_OK=` 确认 |
 | `DEPLOY_BACKUP_MARKER_MISSING` | 设备端脚本没报告备份目录，部署结果不明。在设备上 `ls -d /root/r3mini-hotspot-backup-*` 找最新一份，核对后决定是否回滚 |
 | `RuntimeError: remote command failed`，附带 `DEPLOY_ROLLBACK=<目录>` | 设备端脚本中途失败，已按备份还原 |
@@ -210,8 +219,25 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 
 保存后该频段的本机 Wi-Fi 一直不出现时，停止继续写入，按下面的顺序处理：
 
-1. 从有线 LAN 进页面，停用 Wi-Fi 上网。
-2. 页面打不开时，SSH 执行 `/usr/sbin/r3mini-hotspot-web disable`。它在后台恢复原信道并重配，约十几秒。
-3. 用 `/usr/sbin/r3mini-hotspot-web status | jsonfilter -e '@.job'` 确认 `state` 为 `done`。
-4. 如果 `disable` 被「已有任务」拒绝，按表中第一行先结束卡住的任务。
-5. 如果 `disable` 本身 `failed`：在「网络 → 无线」把 `r3mini_phone_sta` 设为禁用，把该频段信道改回 `original_channel_radioX` 记的值，再保存应用。
+1. 从有线 LAN（或另一个频段的 Wi-Fi）进页面，停用 Wi-Fi 上网。
+2. 页面打不开时，从电脑用 SSH 执行停用。它在后台恢复原信道并重配，约十几秒：
+
+   ```powershell
+   ssh -i docs/私密/r3mini-242/id_ed25519_242 -o IdentitiesOnly=yes root@192.168.0.242 /usr/sbin/r3mini-hotspot-web disable
+   ```
+
+3. 确认停用完成：在设备上执行 `/usr/sbin/r3mini-hotspot-web status | jsonfilter -e '@.job.state' -e '@.job.message'`。
+   - 显示 `running`：隔几秒再查。
+   - 显示 `done` / `已停用 Wi-Fi 上网`：任务完成。
+   - 任务结束 10 分钟后 `job` 就不再输出，这时改查配置：`uci get r3mini_hotspot.main.enabled` 应为 `0`。
+   - 最后确认本机 AP 真的在广播：`iw dev` 里该频段的 `phyN-ap0` 还在，并显示 `channel`。
+4. 如果 `disable` 被「已有 Wi-Fi 设置任务在执行」拒绝，按上表第一行先结束卡住的任务，再执行第 2 步。
+5. 如果 `disable` 本身 `failed`，在设备上手工停用。先关掉 `enabled`，否则看门狗会继续重连，甚至把信道又改过去。以 5 GHz 为例，2.4 GHz 把 `radio1` 换成 `radio0`：
+
+   ```sh
+   uci set r3mini_hotspot.main.enabled=0
+   uci set wireless.r3mini_phone_sta.disabled=1
+   ch="$(uci -q get r3mini_hotspot.main.original_channel_radio1)"; [ -n "$ch" ] && uci set wireless.radio1.channel="$ch"
+   uci commit r3mini_hotspot; uci commit wireless
+   ifdown wwan; wifi reconf radio1
+   ```
