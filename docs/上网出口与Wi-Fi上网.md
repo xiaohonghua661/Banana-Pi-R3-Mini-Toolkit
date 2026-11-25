@@ -147,7 +147,7 @@ python fan-dashboard/deploy_hotspot.py 192.168.0.242 --key docs/私密/r3mini-24
 - 整机备份：`backups/router/router-backup-20261125-154829-100143-192.168.0.242-before-chatgpt.tar.gz.dpapi`，1192 条。
 - 设备端文件备份：
   - `/root/r3mini-hotspot-backup-20261125154841`：旧版 7 个文件。
-  - `/root/r3mini-hotspot-backup-20261125155322`：只含新版页面的第一版。
+  - `/root/r3mini-hotspot-backup-20261125155322`、`…160107`：两次补装各自的备份，分别只含新版页面、后端的上一份。
 - 部署后：
   - 看门狗 running，`S95r3mini-hotspot` 在。
   - 默认路由仍是 `eth1` metric 5，OpenClash running。
