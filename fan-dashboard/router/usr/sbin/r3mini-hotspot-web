@@ -369,7 +369,10 @@ job_save() {
 		*) job_fail "没搜到「$ssid」；请确认它开着、在这个频段，并靠近路由器" ;;
 	esac
 	channel="${found% *}"; enc="${found#* }"
-	channel_supported "$band" "$channel" || job_fail "「$ssid」在信道 $channel，本机 Wi-Fi 不能跟过去（5 GHz 只支持 36–48、149–161）"
+	if ! channel_supported "$band" "$channel"; then
+		[ "$band" = 2g ] && job_fail "「$ssid」在信道 $channel，本机 Wi-Fi 不能跟过去（2.4 GHz 只支持 1–13）"
+		job_fail "「$ssid」在信道 $channel，本机 Wi-Fi 不能跟过去（5 GHz 只支持 36–48、149–161）"
+	fi
 	case "$enc" in
 		eap) job_fail '这个 Wi-Fi 用企业认证（802.1X），不支持' ;;
 		wep) job_fail '这个 Wi-Fi 用 WEP 或未知加密，不支持' ;;

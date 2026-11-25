@@ -7,13 +7,21 @@
 部署前把要覆盖的文件备份到设备 /root/r3mini-hotspot-backup-<时间>/，部署后逐个核对 SHA-256，不一致就自动回滚。
 /etc/config/r3mini_hotspot 只在设备上没有时才写入。不重启 uhttpd；ACL 有变化时重启 rpcd（已登录的 LuCI 会话需要重新登录）。
 
-输出：成功时打印 BACKUP=…、DEPLOY_SHA256_OK=7/7、PRESERVED_CONFIG_OK=1；失败时以非零退出并打印 error_kind：
-    PINNED_HOST_KEY_MISSING  ~/.ssh/known_hosts 里没有该主机
-    SSH_KEY_MISSING / SSH_KEY_LOGIN_FAILED / SSH_CONNECTION_OR_PIN_FAILED
-    UNEXPECTED_DEVICE=<board>  不是 BPI-R3 Mini
-    DEPLOY_BACKUP_MARKER_MISSING  设备端脚本没报告备份目录
-    SHA256_MISMATCH=<文件>     已自动回滚
-    ROLLBACK_BACKUP_INVALID    --rollback 给的目录不对
+host 默认 192.168.0.242。依赖 paramiko。
+
+输出：部署成功打印 BACKUP=…、DEPLOY_SHA256_OK=7/7、PRESERVED_CONFIG_OK=1；回滚成功打印 ROLLBACK_OK=<目录>。
+失败时以非零退出并打印 error_kind：
+    PINNED_HOST_KEY_MISSING        ~/.ssh/known_hosts 里没有该主机
+    SSH_KEY_MISSING                --key 指的文件不存在
+    SSH_KEY_LOGIN_FAILED           设备不认这把密钥
+    SSH_CONNECTION_OR_PIN_FAILED   连不上，或主机密钥与固定的不一致
+    UNEXPECTED_DEVICE=<board>      不是 BPI-R3 Mini，什么都没写
+    DEPLOY_BACKUP_MARKER_MISSING   设备端脚本没报告备份目录
+    SHA256_MISMATCH=<文件>         装上的文件与本地不一致，已自动回滚
+    PRESERVED_CONFIG_MISSING       装完后 /etc/config/r3mini_hotspot 为空，已自动回滚
+    ROLLBACK_BACKUP_INVALID        --rollback 给的目录格式不对或里面没有 .touched
+设备端脚本中途失败时，它会自己按备份还原并在 stderr 打印 DEPLOY_ROLLBACK=<目录>（还原不全时另有
+DEPLOY_ROLLBACK_FAILED=<目录>），本程序以 RuntimeError: remote command failed 退出并附上这些输出。
 """
 from __future__ import annotations
 
@@ -138,8 +146,8 @@ def rollback(client, backup: str) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("host", nargs="?", default="192.168.0.242")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("host", nargs="?", default="192.168.0.242", help="设备地址，默认 192.168.0.242")
     ap.add_argument("--key", required=True, help="SSH 私钥路径")
     ap.add_argument("--rollback", metavar="BACKUP_DIR", help="用设备上的这份备份回滚")
     args = ap.parse_args()
