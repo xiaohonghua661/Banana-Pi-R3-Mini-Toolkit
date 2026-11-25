@@ -14,7 +14,9 @@ host 默认 192.168.0.242。依赖 paramiko。
     PINNED_HOST_KEY_MISSING        ~/.ssh/known_hosts 里没有该主机
     SSH_KEY_MISSING                --key 指的文件不存在
     SSH_KEY_LOGIN_FAILED           设备不认这把密钥
-    SSH_CONNECTION_OR_PIN_FAILED   连不上，或主机密钥与固定的不一致
+    HOST_KEY_MISMATCH              设备的主机密钥与固定的不一致：停下来查，可能不是同一台设备
+    SSH_CONNECTION_FAILED=<异常类>   连不上（超时、拒绝连接等）
+    以上连接类错误都发生在执行任何命令之前，设备上什么都没写。
     UNEXPECTED_DEVICE=<board>      不是 BPI-R3 Mini，什么都没写
     DEPLOY_BACKUP_MARKER_MISSING   设备端脚本没报告备份目录
     SHA256_MISMATCH=<文件>         装上的文件与本地不一致，已自动回滚
@@ -67,12 +69,15 @@ def connect(host: str, key: str):
     try:
         client.connect(host, username="root", key_filename=str(key), look_for_keys=False,
                        allow_agent=False, timeout=8, banner_timeout=8, auth_timeout=8)
+    except paramiko.BadHostKeyException:
+        client.close()
+        fail("HOST_KEY_MISMATCH")
     except paramiko.AuthenticationException:
         client.close()
         fail("SSH_KEY_LOGIN_FAILED")
-    except Exception:
+    except Exception as error:
         client.close()
-        fail("SSH_CONNECTION_OR_PIN_FAILED")
+        fail(f"SSH_CONNECTION_FAILED={type(error).__name__}")
     return client
 
 

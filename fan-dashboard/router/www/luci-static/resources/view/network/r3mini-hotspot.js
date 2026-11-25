@@ -491,12 +491,19 @@ return view.extend({
 		n.warn.hidden = !p.action;
 		n.warn.textContent = p.action === 'disable'
 			? '停用后本机 ' + bandName(radio.band) + ' Wi-Fi 会恢复原信道，期间断开十几秒；用它连路由器的设备会短暂断网。'
-			: '保存后本机 ' + bandName(radio.band) + ' Wi-Fi（现在信道 ' + (radio.channel || '?') + '）会改到' + target + '，期间断开十几秒；用它连路由器的设备会短暂断网。';
+			: '保存后本机 ' + bandName(radio.band) + ' Wi-Fi（现在信道 ' + (radio.channel || '?') + '）会改到' + target + '，期间断开十几秒' + this.otherBandNote() + '；用它连路由器的设备会短暂断网。';
 
 		n.save.textContent = p.action === 'disable' ? '停用 Wi-Fi 上网' : '保存并连接';
 		n.save.disabled = lock || !p.action || !!p.block;
 		if (p.block && f.enabled) this.message(n.formMsg, p.block);
 		else if (!this.formMsgSticky) this.message(n.formMsg, p.action ? '' : '设置没有改动。');
+	},
+
+	// 从一个频段换到另一个频段时，原来那个频段也要恢复原信道、重配一次。
+	otherBandNote: function() {
+		var s = this.saved, f = this.form();
+		if (!s.enabled || !s.radio || s.radio === f.radio) return '';
+		return '；原来用的本机 ' + bandName(this.radioInfo(s.radio).band) + ' Wi-Fi 也会恢复原信道，同样断开十几秒';
 	},
 
 	doScan: function() {
@@ -552,7 +559,7 @@ return view.extend({
 		var title = p.action === 'disable' ? '停用 Wi-Fi 上网' : '连接 Wi-Fi';
 		var lines = p.action === 'disable'
 			? ['本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并恢复原信道。']
-			: ['路由器会用 ' + bandName(radio.band) + ' 连接「' + f.ssid + '」。', '本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并改到对方信道；如果你正用它连着路由器，页面会短暂断开，之后自动恢复。'];
+			: ['路由器会用 ' + bandName(radio.band) + ' 连接「' + f.ssid + '」。', '本机 ' + bandName(radio.band) + ' Wi-Fi 会断开十几秒并改到对方信道' + this.otherBandNote() + '。如果你正用它连着路由器，页面会短暂断开，之后自动恢复。'];
 		confirmBox(title, lines, p.action === 'disable' ? '停用' : '保存并连接').then(function(ok) {
 			if (!ok) return;
 			self.setBusy(true);

@@ -284,6 +284,11 @@ def run_page(t: Page, sid: str) -> None:
         t.check("job_done_shown", "完成：已连上「Phone5G」" in q(".r3x-job").inner_text(), q(".r3x-job").inner_text())
         t.check("form_reset_after_done", q("#r3x-ssid").input_value() == "Phone5G" and page.locator(".r3x .r3x-actions .cbi-button-apply").is_disabled())
         t.check("wifi_card_up", "可用" in q(".r3x-exit[data-kind=hotspot]").inner_text() and "信号强" in q(".r3x-exit[data-kind=hotspot]").inner_text())
+        other = [o for o in page.eval_on_selector_all(".r3x #r3x-radio option", "els => els.map(e => e.value)") if o != "radio1"]
+        if other:
+            q("#r3x-radio").select_option(other[0])
+            t.check("band_switch_warns_both_bands", "原来用的本机 5 GHz" in q(".r3x-warn").inner_text(), q(".r3x-warn").inner_text())
+            q("#r3x-radio").select_option("radio1")
         page.wait_for_timeout(6000)
         page.screenshot(path=str(t.out / "wifi-up-1440.png"), full_page=True)
 
