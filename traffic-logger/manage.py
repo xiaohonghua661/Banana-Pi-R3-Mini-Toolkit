@@ -12,6 +12,10 @@
   python traffic-logger/manage.py report    HOST [report 参数...]
   python traffic-logger/manage.py check-backup BACKUP.tar.gz.dpapi [--extract DIR]   解密核对备份；--extract 才写出明文
 
+连路由器的命令都可加 --key KEY_PATH（不加时取环境变量 R3MINI_SSH_KEY）：只用这把密钥登录 root，
+不试口令、不读 docs/私密/。不给密钥时按原样从 docs/私密/商家交付信息.md 取口令。两种方式都要求
+~/.ssh/known_hosts 里已有该主机的指纹。
+
 每台的改前基线 = backups/router/ 下该主机最新的 *-before-traffic-logger.manifest.json。
 快照比对分两部分：本模块的路径（脚本、服务、配置、开机链接、LuCI 菜单/ACL/页面、数据目录）按期望状态逐项核对，
 其余路径必须与基线逐项相等。
@@ -22,6 +26,7 @@ import fnmatch
 import hashlib
 import io
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -98,11 +103,36 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+SSH_KEY: str | None = None  # main() 从 --key / R3MINI_SSH_KEY 设置
+
+
 def connect(host: str) -> paramiko.SSHClient:
     known = pathlib.Path.home() / ".ssh" / "known_hosts"
-    if host not in paramiko.HostKeys(str(known)):
+    if not known.is_file() or host not in paramiko.HostKeys(str(known)):
         raise SystemExit(f"PINNED_HOST_KEY_MISSING host={host}")
-    private = (ROOT / "docs" / "私密" / "商家交付信息.md").read_text(encoding="utf-8")
+    if SSH_KEY is not None:
+        # 密钥模式：只用这把密钥，不试口令、不读私密文档
+        key = pathlib.Path(SSH_KEY).expanduser()
+        if not key.is_file():
+            raise SystemExit(f"SSH_KEY_MISSING key={key}")
+        try:
+            paramiko.PKey.from_path(str(key))
+        except Exception:
+            raise SystemExit(f"SSH_KEY_INVALID key={key}")
+        client = paramiko.SSHClient()
+        client.load_host_keys(str(known))
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        try:
+            client.connect(host, username="root", key_filename=str(key), look_for_keys=False,
+                           allow_agent=False, timeout=8, banner_timeout=8, auth_timeout=8)
+            return client
+        except paramiko.AuthenticationException:
+            client.close()
+            raise SystemExit(f"SSH_KEY_LOGIN_FAILED host={host}")
+        except Exception:
+            client.close()
+            raise
+    private =(ROOT / "docs" / "私密" / "商家交付信息.md").read_text(encoding="utf-8")
     for password in dict.fromkeys([""] + re.findall(r"`([^`\s]{1,80})`", private)):
         client = paramiko.SSHClient()
         client.load_host_keys(str(known))
@@ -1078,7 +1108,25 @@ def remote_cli(host: str, args: list[str]) -> None:
         client.close()
 
 
+def take_key(argv: list[str]) -> list[str]:
+    """摘掉 --key PATH / --key=PATH 设到 SSH_KEY，其余参数原样返回；没给时取环境变量 R3MINI_SSH_KEY。"""
+    global SSH_KEY
+    SSH_KEY = os.environ.get("R3MINI_SSH_KEY") or None
+    rest, it = [], iter(argv)
+    for a in it:
+        if a == "--key":
+            SSH_KEY = next(it, None)
+            if not SSH_KEY or SSH_KEY.startswith("--"):
+                raise SystemExit("ARGUMENT_INVALID --key 后面要跟私钥路径")
+        elif a.startswith("--key="):
+            SSH_KEY = a[len("--key="):]
+        else:
+            rest.append(a)
+    return rest
+
+
 def main(argv: list[str]) -> int:
+    argv = take_key(argv)
     if len(argv) < 2:
         print(__doc__)
         return 2

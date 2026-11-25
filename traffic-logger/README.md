@@ -208,8 +208,8 @@ STATUS_OK 版本 1.4.0 pid 24264 run_id 16c08e7e 已运行 114 秒，状态更�
 - Windows（备份用 DPAPI 加密，只有同一 Windows 账户能解密）；
 - Python 3，装有 `paramiko` 与 `pywin32`；页面测试还要 `playwright`（带 Chromium）；
 - 主机密钥已固定在 `~/.ssh/known_hosts`；
-- root 口令沿用项目惯例，从 `docs/私密/商家交付信息.md` 读取。
-- **在哪份检出里执行**：`docs/私密/`、`backups/router/`、`tmp/` 都被 git 忽略，新建的 worktree 里没有。连设备的命令要在存着私密文档与备份的那份检出里执行，否则连接时找不到口令文件、`rollback` 报 `NO_BASELINE_BACKUP`；`selftest` 还要录制的真实快照 `tmp/traffic-20261023/router-stream.txt`（不入库）。
+- 登录：连设备的命令都可加 `--key KEY_PATH`（或设环境变量 `R3MINI_SSH_KEY`），只用这把 root 私钥登录，不读口令文件；不给密钥时沿用项目惯例，从 `docs/私密/商家交付信息.md` 读 root 口令。
+- **在哪份检出里执行**：`docs/私密/`、`backups/router/`、`tmp/` 都被 git 忽略，新建的 worktree 里没有。连设备的命令要在存着备份（用口令登录时还有私密文档）的那份检出里执行，否则用口令时找不到口令文件、`rollback` 报 `NO_BASELINE_BACKUP`；`selftest` 还要录制的真实快照 `tmp/traffic-20261023/router-stream.txt`（不入库）。
 
 | 命令 | 主机 | 作用 | 成功时最后一行 |
 |---|---|---|---|
@@ -314,6 +314,9 @@ data_dir 含不安全字符: /tmp/../x
 |---|---|
 | `PINNED_HOST_KEY_MISSING` | 先经可信链路核对主机密钥指纹，写进 `~/.ssh/known_hosts` |
 | `SSH_LOGIN_FAILED` | 核对私密文档里的口令；设备不在线时会直接报连接超时 |
+| `SSH_KEY_MISSING` / `SSH_KEY_INVALID` | `--key` 指的文件不存在，或不是能读的私钥：核对路径；Git Bash 里以 `/` 开头的路径会被改写，加 `MSYS_NO_PATHCONV=1` 或改用 `D:/...` 写法 |
+| `SSH_KEY_LOGIN_FAILED` | 路由器不接受这把密钥：确认公钥已贴进 LuCI「系统 → 管理权 → SSH 密钥」并保存 |
+| `ARGUMENT_INVALID` | `--key` 后面没跟私钥路径 |
 | `REMOTE_COMMAND_FAILED` | 路由器上某条命令非零退出，输出里有 `cmd=` 与 `err=`：按它排查；中途断开的上传会留下 `<路径>.r3t-new`，重跑 `upgrade` 或 `uninstall` 会清掉 |
 | `CRLF_IN_FILE` | 要上传的设备端文件含 CR：检出时被转成了 CRLF，确认 `traffic-logger/.gitattributes` 生效后重新检出该文件 |
 | `NO_BASELINE_BACKUP` | 先运行 `backup`（或换到存着 `backups/router/` 的那份检出里执行） |
