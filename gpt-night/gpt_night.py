@@ -9,10 +9,13 @@
 
 改路由只经 r3mini-chatgpt 模块自己的命令（benchmark / save / set-enabled），不直接改 OpenClash 配置。
 --trial 忽略夜间时段，守护指定分钟后结束（试运行用，之后运行 day 恢复）。
+各命令都可加 --key KEY_PATH（不加时取环境变量 R3MINI_SSH_KEY）：只用这把私钥登录 root，不读 docs/私密/；
+install 时给了 --key，两个计划任务也带上它。不给时按原样从 docs/私密/商家交付信息.md 取口令。
 """
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -124,17 +127,17 @@ class Clock:
 class Router:
     """路由器上的全部动作；测试用假对象替换。"""
 
-    def __init__(self, host: str = HOST):
-        self.host, self.client = host, None
+    def __init__(self, host: str = HOST, key: str | None = None):
+        self.host, self.key, self.client = host, key, None
 
     def _run(self, command: str, data: bytes | None = None, timeout: int = 180) -> tuple[int, str]:
         if str(ROOT / "chatgpt-routing") not in sys.path:
             sys.path.insert(0, str(ROOT / "chatgpt-routing"))
-        import manage  # noqa: E402 — 网站分流部署器的 SSH 连接：固定主机密钥，口令从私密文档在内存解析
+        import manage  # noqa: E402 — 网站分流部署器的 SSH 连接：固定主机密钥；给了密钥只用密钥，否则口令从私密文档在内存解析
         for attempt in (1, 2):
             try:
                 if self.client is None:
-                    self.client = manage.connect(self.host)
+                    self.client = manage.connect(self.host, self.key)
                 rc, out, _ = manage.run(self.client, command, data=data, timeout=timeout, check=False)
                 return rc, out.decode("utf-8", "replace")
             except Exception:  # noqa: BLE001 — 路由器重启或断网：重连一次
@@ -480,8 +483,10 @@ def install(router) -> None:
         raise SystemExit(f"CRON_MISMATCH {after!r}")
     print(f"ROUTER_OK {out.split()[0][:16]} cron: {CRON_LINE}  backup: {backup}")
     pyw = pathlib.Path(sys.executable).with_name("pythonw.exe")
+    # 给了密钥就让计划任务也用它；PowerShell 单引号字符串里的 ' 要写成 ''
+    key_arg = f' --key "{router.key}"'.replace("'", "''") if getattr(router, "key", None) else ""
     for name, (at, cmd, hours) in TASKS.items():
-        ps = (f"$a = New-ScheduledTaskAction -Execute '{pyw}' -Argument '\"{HERE / 'gpt_night.py'}\" {cmd}' -WorkingDirectory '{ROOT}';"
+        ps = (f"$a = New-ScheduledTaskAction -Execute '{pyw}' -Argument '\"{HERE / 'gpt_night.py'}\" {cmd}{key_arg}' -WorkingDirectory '{ROOT}';"
               f"$t = New-ScheduledTaskTrigger -Daily -At {at};"
               f"$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
               f"-MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours {hours});"
@@ -518,9 +523,25 @@ def status(router) -> None:
     print("路由器夜间日志:\n" + log.strip())
 
 
+def split_key(argv: list[str]) -> tuple[list[str], str | None]:
+    """摘掉 --key PATH / --key=PATH，返回其余参数和展开成绝对路径的私钥；没给时取环境变量 R3MINI_SSH_KEY。"""
+    key, rest, it = os.environ.get("R3MINI_SSH_KEY") or None, [], iter(argv)
+    for a in it:
+        if a == "--key":
+            key = next(it, None)
+            if not key or key.startswith("--"):
+                raise SystemExit("ARGUMENT_INVALID --key 后面要跟私钥路径")
+        elif a.startswith("--key="):
+            key = a[len("--key="):]
+        else:
+            rest.append(a)
+    return rest, (str(pathlib.Path(key).expanduser().resolve()) if key else None)
+
+
 def main(argv: list[str]) -> int:
+    argv, key = split_key(argv)
     cmd = argv[0] if argv else ""
-    router, clock = Router(), Clock()
+    router, clock = Router(key=key), Clock()
     try:
         if cmd == "night":
             trial = int(argv[2]) if argv[1:2] == ["--trial"] and len(argv) > 2 else None

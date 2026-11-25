@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import shlex
 import sys
@@ -154,9 +155,11 @@ def rollback(client, backup: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("host", nargs="?", default="192.168.0.242", help="设备地址，默认 192.168.0.242")
-    ap.add_argument("--key", required=True, help="SSH 私钥路径")
+    ap.add_argument("--key", default=os.environ.get("R3MINI_SSH_KEY") or None, help="SSH 私钥路径（默认取环境变量 R3MINI_SSH_KEY）")
     ap.add_argument("--rollback", metavar="BACKUP_DIR", help="用设备上的这份备份回滚")
     args = ap.parse_args()
+    if not args.key:
+        ap.error("需要 --key 或环境变量 R3MINI_SSH_KEY")
     client = connect(args.host, args.key)
     try:
         if args.rollback:
