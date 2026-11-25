@@ -47,14 +47,14 @@ SSH 登录：
 
 1. 生成密钥：`ssh-keygen -t ed25519 -f ~/.ssh/r3mini_ed25519 -N ""`。
 2. 把 `~/.ssh/r3mini_ed25519.pub` 的内容贴进 LuCI「系统 → 管理权 → SSH 密钥」并保存。
-3. 先手动连一次 `ssh -i ~/.ssh/r3mini_ed25519 root@<路由器IP>`，核对并接受主机指纹。除风扇管理的部署脚本外，部署工具只连 `~/.ssh/known_hosts` 里已有指纹的设备。
+3. 先手动连一次 `ssh -i ~/.ssh/r3mini_ed25519 root@<路由器IP>`，核对并接受主机指纹。部署工具只连 `~/.ssh/known_hosts` 里已有指纹的设备。
 
 各部署工具怎么登录：
 
 | 部署工具 | 登录方式 |
 |---|---|
-| `chatgpt-routing/manage.py`、`socks5-gateway/manage.py`、`fan-dashboard/deploy_hotspot.py` | 加 `--key ~/.ssh/r3mini_ed25519` |
-| `traffic-logger/manage.py`、`gpt-night/gpt_night.py`、`fan-dashboard/deploy_fan_only.py` | 只认口令。先给路由器 root 设口令（LuCI「系统 → 管理权」），再新建 `docs/私密/商家交付信息.md`，把口令用反引号包住写进去（如 `` `你的口令` ``）。`docs/私密/` 已被 `.gitignore` 忽略，不会提交。`deploy_fan_only.py` 不核对主机指纹，运行前自己确认地址没填错 |
+| `chatgpt-routing/manage.py`、`socks5-gateway/manage.py`、`fan-dashboard/deploy_hotspot.py`、`traffic-logger/manage.py`、`fan-dashboard/deploy_fan_only.py` | 加 `--key ~/.ssh/r3mini_ed25519`，或设环境变量 `R3MINI_SSH_KEY` |
+| `gpt-night/gpt_night.py` | 只认口令。先给路由器 root 设口令（LuCI「系统 → 管理权」），再新建 `docs/私密/商家交付信息.md`，把口令用反引号包住写进去（如 `` `你的口令` ``）。`docs/私密/` 已被 `.gitignore` 忽略，不会提交 |
 | `adblock/install.sh` | 在路由器上运行。按它的文档用 `tar` 经 SSH 上传，`ssh` 要加 `-i ~/.ssh/r3mini_ed25519` 和 `-o StrictHostKeyChecking=accept-new` |
 
 ## 安装一个功能

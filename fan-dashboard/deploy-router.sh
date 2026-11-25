@@ -37,6 +37,9 @@ put /www/luci-static/resources/view/system/r3mini-fan.js 644
 # scripts/router/test-backup-covers-managed-files.sh 会校验两份内容相同。
 put /www/luci-static/resources/view/system/r3mini-fan-3848230b8f.js 644
 
+# 先报备份位置：后面重启失败时，报错输出里也带着它
+printf 'BACKUP=%s\n' "$backup"
+
 rm -f /tmp/luci-indexcache
 /etc/init.d/rpcd restart
 /etc/init.d/uhttpd restart
@@ -49,5 +52,4 @@ if ! /etc/init.d/r3mini-fan restart || ! /etc/init.d/r3mini-fan status >/dev/nul
 	exit 1
 fi
 
-printf 'BACKUP=%s\n' "$backup"
 printf 'INSTALLED_FILES=8\n'

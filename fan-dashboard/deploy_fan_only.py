@@ -1,22 +1,22 @@
 from __future__ import annotations
 
+import argparse
 import io
+import os
 import re
-import sys
 import tarfile
 from pathlib import Path
 
 import paramiko
 
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.0.242"
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "router"
 DEPLOY = ROOT / "deploy-router.sh"
 
 
 def password_candidates() -> list[str]:
-    text = (Path("docs") / "\u79c1\u5bc6" / "\u5546\u5bb6\u4ea4\u4ed8\u4fe1\u606f.md").read_text(
+    text = (Path("docs") / "私密" / "商家交付信息.md").read_text(
         encoding="utf-8", errors="replace"
     )
     candidates = [""]
@@ -27,13 +27,40 @@ def password_candidates() -> list[str]:
     return candidates
 
 
-def connect() -> paramiko.SSHClient:
+def connect(host: str, key: str | None) -> paramiko.SSHClient:
+    # 两种登录方式都只连 ~/.ssh/known_hosts 里已有指纹的主机
+    known = Path.home() / ".ssh" / "known_hosts"
+    if not known.is_file() or host not in paramiko.HostKeys(str(known)):
+        raise SystemExit(f"PINNED_HOST_KEY_MISSING host={host}")
+    if key is not None:
+        # 密钥模式：只用这把密钥，不试口令、不读私密文档
+        key = os.path.expanduser(key)
+        if not Path(key).is_file():
+            raise SystemExit(f"SSH_KEY_MISSING key={key}")
+        try:
+            paramiko.PKey.from_path(key)
+        except Exception:
+            raise SystemExit(f"SSH_KEY_INVALID key={key}")
+        client = paramiko.SSHClient()
+        client.load_host_keys(str(known))
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        try:
+            client.connect(host, username="root", key_filename=str(key), look_for_keys=False,
+                           allow_agent=False, timeout=8, banner_timeout=8, auth_timeout=8)
+            return client
+        except paramiko.AuthenticationException:
+            client.close()
+            raise SystemExit(f"SSH_KEY_LOGIN_FAILED host={host}")
+        except Exception as exc:
+            client.close()
+            raise SystemExit(f"SSH_CONNECTION_OR_PIN_FAILED host={host} {type(exc).__name__}")
     for password in password_candidates():
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_host_keys(str(known))
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         try:
             client.connect(
-                HOST,
+                host,
                 username="root",
                 password=password,
                 timeout=8,
@@ -43,11 +70,11 @@ def connect() -> paramiko.SSHClient:
                 allow_agent=False,
             )
             return client
-        except Exception:
-            try:
-                client.close()
-            except Exception:
-                pass
+        except paramiko.AuthenticationException:
+            client.close()
+        except Exception as exc:
+            client.close()
+            raise SystemExit(f"SSH_CONNECTION_OR_PIN_FAILED host={host} {type(exc).__name__}")
     raise SystemExit("SSH_LOGIN_FAILED")
 
 
@@ -77,7 +104,12 @@ def run(client: paramiko.SSHClient, command: str, timeout: int = 60, stdin_data:
 
 
 def main() -> int:
-    client = connect()
+    ap = argparse.ArgumentParser(description="把 fan-dashboard/router/ 的风扇管理部署到路由器")
+    ap.add_argument("host", nargs="?", default="192.168.0.242", help="路由器地址，默认 192.168.0.242")
+    ap.add_argument("--key", default=os.environ.get("R3MINI_SSH_KEY") or None,
+                    help="root 的 SSH 私钥（默认取环境变量 R3MINI_SSH_KEY）；给了就只用密钥登录，不读口令文件")
+    args = ap.parse_args()
+    client = connect(args.host, args.key)
     tar_data = make_tar()
     run(client, "rm -rf /tmp/r3mini-fan-src && mkdir -p /tmp/r3mini-fan-src && tar -xzf - -C /tmp/r3mini-fan-src", stdin_data=tar_data)
     out, err = run(client, "sh -s /tmp/r3mini-fan-src", timeout=90, stdin_data=DEPLOY.read_text(encoding="utf-8"))
