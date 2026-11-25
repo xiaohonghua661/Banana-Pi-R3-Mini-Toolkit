@@ -1,0 +1,305 @@
+#!/bin/sh
+
+CONFIG=r3mini_fan.main
+SENSOR=/sys/class/thermal/thermal_zone0/temp
+THERMAL_MODE=/sys/class/thermal/thermal_zone0/mode
+PWM=/sys/class/hwmon/hwmon1/pwm1
+PWM_ENABLE=/sys/class/hwmon/hwmon1/pwm1_enable
+# 树莓派 5：hwmon 序号随驱动加载顺序变化，按名字 pwmfan 找风扇接口，找到就覆盖上面的值。
+for h in /sys/class/hwmon/hwmon*; do [ "$(cat "$h/name" 2>/dev/null)" = pwmfan ] && { PWM="$h/pwm1"; PWM_ENABLE="$h/pwm1_enable"; break; }; done
+NIGHT_STATE=/var/run/r3mini-fan-night
+
+fail() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+# 与 r3mini-fanctl 的 is_num 同一条规则：只认十进制，拒前导零。本脚本对用户输入做
+# `$((value * 1000))` 算术，而 `$(( ))` 按 C 常量约定把 0 开头当八进制：
+#   apply 030 38 45 5  ->  闸门放行（[ -ge 20 ] 按十进制比作 30），写入 start_temp=24000
+#   apply 08  38 45 5  ->  `$((08 * 1000))` 直接 arithmetic syntax error
+# 前者是静默篡改，比报错更坏。2026-08-20 真机实测两种都复现过。
+# 单独一个 '0' 合法：read_num 的失败回退值就是它。
+is_uint() {
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+		0) return 0 ;;
+		0*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+read_num() {
+	local value
+	value="$(cat "$1" 2>/dev/null)"
+	is_uint "$value" && printf '%s' "$value" || printf '0'
+}
+
+cfg_celsius() {
+	local value
+	value="$(uci -q get "$CONFIG.$1")"
+	is_uint "$value" || value="$2"
+	printf '%s' "$((value / 1000))"
+}
+
+valid_hhmm() {
+	local h m
+	case "$1" in
+		[0-9][0-9]:[0-9][0-9]) ;;
+		*) return 1 ;;
+	esac
+	h="${1%%:*}"; m="${1##*:}"
+	h="${h#0}"; m="${m#0}"
+	[ "${h:-0}" -le 23 ] && [ "${m:-0}" -le 59 ]
+}
+
+cfg_hhmm() {
+	local value
+	value="$(uci -q get "$CONFIG.$1")"
+	valid_hhmm "$value" || value="$2"
+	printf '%s' "$value"
+}
+
+wait_stopped() {
+	local attempt=0
+	while /etc/init.d/r3mini-fan status >/dev/null 2>&1; do
+		attempt=$((attempt + 1))
+		[ "$attempt" -lt 10 ] || return 1
+		sleep 1
+	done
+}
+
+wait_auto() {
+	local attempt=0 mode
+	while :; do
+		mode="$(cat "$THERMAL_MODE" 2>/dev/null)"
+		if /etc/init.d/r3mini-fan status >/dev/null 2>&1 && [ "$mode" = disabled ]; then
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		[ "$attempt" -lt 10 ] || return 1
+		sleep 1
+	done
+}
+
+restore_kernel() {
+	echo enabled > "$THERMAL_MODE" 2>/dev/null || return 1
+	[ "$(cat "$THERMAL_MODE" 2>/dev/null)" = enabled ]
+}
+
+ensure_safe() {
+	/etc/init.d/r3mini-fan stop >/dev/null 2>&1
+	if ! wait_stopped; then
+		restore_kernel
+		return $?
+	fi
+	echo disabled > "$THERMAL_MODE" 2>/dev/null || { restore_kernel; return $?; }
+	# 安全兜底要的是"最大风量"：反相驱动下取最小非零值 1（duty 40ns）。写 0 会关掉 PWM，等于故障时停风扇。
+	if echo 1 > "$PWM_ENABLE" 2>/dev/null && echo 255 > "$PWM" 2>/dev/null && [ "$(cat "$THERMAL_MODE" 2>/dev/null)" = disabled ] && [ "$(read_num "$PWM")" = 255 ]; then
+		return 0
+	fi
+	restore_kernel
+}
+
+restore_auto_or_high() {
+	if /etc/init.d/r3mini-fan restart >/dev/null 2>&1 && wait_auto; then
+		return 0
+	fi
+	ensure_safe
+}
+
+rollback_config() {
+	local backup="$1"
+	cp "$backup" /etc/config/r3mini_fan || { ensure_safe; return 1; }
+	if restore_auto_or_high; then
+		rm -f "$backup"
+		return 0
+	fi
+	return 1
+}
+
+status_json() {
+	local running=false control_mode=kernel mode raw_state state pwm pwm_enable temp
+	local night_enabled night_active=false
+	/etc/init.d/r3mini-fan status >/dev/null 2>&1 && running=true
+	mode="$(cat "$THERMAL_MODE" 2>/dev/null)"
+	[ "$running" = true ] && control_mode=auto
+	[ "$running" = false ] && [ "$mode" = disabled ] && control_mode=manual
+	temp="$(read_num "$SENSOR")"
+	pwm_enable="$(read_num "$PWM_ENABLE")"
+	raw_state="$(read_num /sys/class/thermal/cooling_device0/cur_state)"
+	# PWM 单独读，不走 read_num：read_num 读失败也返回 '0'，而 0 是个有意义的真值
+	# （PWM 被 disable、风扇停转）。两者混成同一个 0，接口坏掉时页面会一口咬定"停转"，
+	# 把"我不知道"说成"我确定风扇没转"——这正是最需要人去现场看的那种情况。
+	# 读不出来时报 -1，页面据此显示"未知"。
+	pwm="$(cat "$PWM" 2>/dev/null)"
+	is_uint "$pwm" || pwm=-1
+	case "$pwm" in
+		-1) state=-1 ;; # 接口读不出来：未知，不是停转
+		# 树莓派 5 正相：0 停转，75 低速，150 中速，255 满速。
+		0) state=0 ;;
+		75) state=1 ;;
+		150) state=2 ;;
+		255) state=3 ;;
+		*) if [ "$pwm" -lt 38 ]; then state=0; elif [ "$pwm" -lt 113 ]; then state=1; elif [ "$pwm" -lt 203 ]; then state=2; else state=3; fi ;;
+	esac
+	# night.active 直接取守护进程发布的状态，不在这里重算窗口：
+	# 重算会形成第二份真相源，两边判断一旦不一致，UI 显示的和风扇实际行为就对不上。
+	night_enabled="$(uci -q get "$CONFIG.night_enabled")"
+	case "$night_enabled" in 0|1) ;; *) night_enabled=0 ;; esac
+	if [ "$running" = true ] && [ "$night_enabled" = 1 ] && [ "$(cat "$NIGHT_STATE" 2>/dev/null)" = 1 ]; then
+		night_active=true
+	fi
+	# config 只报 4 个权威值（3 个开启温度 + 回差）。停转/降档三条线是它们的推论，
+	# 这里不算、也不报——页面自己按同一条减法画曲线。多报一份就是第二真相源。
+	printf '{"temp":%s,"state":%s,"raw_state":%s,"pwm":%s,"pwm_enable":%s,"mode":"%s","running":%s,"control_mode":"%s","interval":%s,"config":{"start":%s,"mediumUp":%s,"highUp":%s,"hysteresis":%s},"night":{"enabled":%s,"start":"%s","end":"%s","active":%s,"override":%s}}\n' \
+		"$temp" "$state" "$raw_state" "$pwm" "$pwm_enable" "$mode" "$running" "$control_mode" \
+		"$(uci -q get "$CONFIG.interval" || printf '5')" \
+		"$(cfg_celsius start_temp 35000)" "$(cfg_celsius medium_up 38000)" \
+		"$(cfg_celsius high_up 40000)" "$(cfg_celsius hysteresis 3000)" \
+		"$night_enabled" "$(cfg_hhmm night_start '23:00')" "$(cfg_hhmm night_end '07:00')" \
+		"$night_active" "$(cfg_celsius night_override 55000)"
+}
+
+apply_config() {
+	[ "$#" -eq 4 ] || fail '需要 4 个参数：<低速开启> <中速开启> <高速开启> <回差>（页面可能是旧缓存，刷新一次即可）'
+	local start="$1" medium_up="$2" high_up="$3" hysteresis="$4" value backup night_override_ms
+	for value in "$start" "$medium_up" "$high_up"; do
+		is_uint "$value" || fail "温度必须是不带前导零的十进制整数（收到 '$value'；030 这类写法会被按八进制算成别的数）"
+		[ "$value" -ge 20 ] && [ "$value" -le 80 ] || fail '温度范围必须在 20–80°C'
+	done
+	is_uint "$hysteresis" || fail "回差必须是不带前导零的十进制整数（收到 '$hysteresis'）"
+	[ "$hysteresis" -ge 1 ] && [ "$hysteresis" -le 10 ] || fail '回差必须在 1–10°C'
+	# 只剩这两条。旧模型那 7 条大小关系里的其余 5 条是它们的推论，见 r3mini-fanctl
+	# 的 thresholds_ok 注释；三层闸门也因此从"7 条各抄一遍"缩成同一条链。
+	# fanctl 那边还有第三条 hysteresis<start_temp（防停转温度变负）；这里刻意不抄——
+	# 上面的取值范围已经保证 回差<=10 < 20<=低速开启，它在本层永远不可能被触发。
+	# 抄一条永远为真的校验，等于对外声称存在一种其实做不出来的错误输入。
+	[ "$start" -lt "$medium_up" ] || fail '中速开启温度必须高于低速开启温度'
+	[ "$medium_up" -lt "$high_up" ] || fail '高速开启温度必须高于中速开启温度'
+	# 夜间解除限速温度已配置时，把 high_up 抬到它之上会让夜间限速在高温段静默失效。
+	# set_night 只拦"override 必须高于 high_up"这一向，这里补上另一向，双向闭合。
+	night_override_ms="$(uci -q get "$CONFIG.night_override")"
+	case "$night_override_ms" in
+		''|*[!0-9]*) ;;
+		*) [ $((high_up * 1000)) -lt "$night_override_ms" ] || fail "高速开启温度必须低于夜间解除限速温度 $((night_override_ms / 1000))°C，请先调高夜间设置里的解除限速温度" ;;
+	esac
+
+	backup="/tmp/r3mini_fan.web.$$.bak"
+	cp /etc/config/r3mini_fan "$backup" || fail '无法创建配置备份'
+	# 顺手删掉旧模型的三个 down 键：守护进程已不读它们，留着只会让下一个人误以为
+	# 那才是真身。实测 uci -q batch 里 delete 不存在的键返回 0 且不打断后续 set。
+	if ! uci -q batch <<-EOF
+		set $CONFIG.start_temp='$((start * 1000))'
+		set $CONFIG.medium_up='$((medium_up * 1000))'
+		set $CONFIG.high_up='$((high_up * 1000))'
+		set $CONFIG.hysteresis='$((hysteresis * 1000))'
+		delete $CONFIG.stop_temp
+		delete $CONFIG.medium_down
+		delete $CONFIG.high_down
+		commit r3mini_fan
+	EOF
+	then
+		# 先清 UCI delta 再恢复文件：只 cp 文件会把未提交的 set/delete 留在 delta 里，
+		# 下一次任何人 commit r3mini_fan 都会把这次失败的改动重新写进去。
+		uci -q revert r3mini_fan
+		if cp "$backup" /etc/config/r3mini_fan; then
+			rm -f "$backup"
+			fail '写入配置失败，已恢复旧配置'
+		fi
+		ensure_safe
+		fail "写入配置失败且旧配置恢复失败，备份保留在 $backup"
+	fi
+
+	if ! /etc/init.d/r3mini-fan restart >/dev/null 2>&1; then
+		rollback_config "$backup" && fail '服务重启失败，已恢复旧配置与安全状态'
+		fail "服务重启失败且安全状态无法确认，备份保留在 $backup"
+	fi
+	if ! wait_auto; then
+		rollback_config "$backup" && fail '自动温控接管超时，已恢复旧配置与安全状态'
+		fail "自动温控接管超时且安全状态无法确认，备份保留在 $backup"
+	fi
+	rm -f "$backup"
+	status_json
+}
+
+set_mode() {
+	local pwm
+	case "$1" in
+		auto)
+			if ! /etc/init.d/r3mini-fan restart >/dev/null 2>&1 || ! wait_auto; then
+				ensure_safe && fail '自动温控接管失败，已进入内核或满速安全状态'
+				fail '自动温控接管失败，安全状态无法确认，请立即检查风扇'
+			fi
+			;;
+		# 与 r3mini-fanctl 的 set_stage 保持同一张表；反相驱动，值越小越快，0 是禁区。
+		low) pwm=75 ;;
+		medium) pwm=150 ;;
+		high) pwm=255 ;;
+		*) fail '模式仅支持 auto、low、medium、high' ;;
+	esac
+	if [ "$1" != auto ]; then
+		/etc/init.d/r3mini-fan stop >/dev/null 2>&1
+		if ! wait_stopped; then
+			restore_auto_or_high && fail '等待旧风扇进程停止超时，已恢复自动或满速安全状态'
+			fail '等待旧风扇进程停止超时，安全状态无法确认，请立即检查风扇'
+		fi
+		if ! echo disabled > "$THERMAL_MODE" || ! echo 1 > "$PWM_ENABLE" || ! echo "$pwm" > "$PWM" || [ "$(read_num "$PWM")" != "$pwm" ]; then
+			restore_auto_or_high && fail '手动档位接管失败，已恢复自动或满速安全状态'
+			fail '手动档位接管失败，安全状态无法确认，请立即检查风扇'
+		fi
+	fi
+	status_json
+}
+
+set_night() {
+	case "$#" in
+		3|4) ;;
+		*) fail '需要 3 或 4 个参数：<0|1> <开始 HH:MM> <结束 HH:MM> [解除限速温度 °C]' ;;
+	esac
+	local enabled="$1" start="$2" end="$3" override="${4:-}" backup high_up_c
+	case "$enabled" in
+		0|1) ;;
+		*) fail '夜间模式开关只能是 0 或 1' ;;
+	esac
+	valid_hhmm "$start" || fail '夜间开始时间必须是 HH:MM，例如 23:00'
+	valid_hhmm "$end" || fail '夜间结束时间必须是 HH:MM，例如 07:00'
+	[ "$start" != "$end" ] || fail '夜间开始与结束时间不能相同'
+	if [ -n "$override" ]; then
+		is_uint "$override" || fail '解除限速温度必须是整数'
+		[ "$override" -ge 45 ] && [ "$override" -le 95 ] || fail '解除限速温度必须在 45–95°C'
+		# 低于或等于高速开启温度时，限速条件永远不成立，夜间模式会静默失效
+		high_up_c="$(cfg_celsius high_up 40000)"
+		[ "$override" -gt "$high_up_c" ] ||
+			fail "解除限速温度必须高于高速开启的 ${high_up_c}°C，否则夜间限速永远不会生效"
+	fi
+
+	backup="/tmp/r3mini_fan.night.$$.bak"
+	cp /etc/config/r3mini_fan "$backup" || fail '无法创建配置备份'
+	if ! {
+		printf "set %s.night_enabled='%s'\n" "$CONFIG" "$enabled"
+		printf "set %s.night_start='%s'\n" "$CONFIG" "$start"
+		printf "set %s.night_end='%s'\n" "$CONFIG" "$end"
+		[ -z "$override" ] || printf "set %s.night_override='%s'\n" "$CONFIG" "$((override * 1000))"
+		printf 'commit r3mini_fan\n'
+	} | uci -q batch
+	then
+		if cp "$backup" /etc/config/r3mini_fan; then
+			rm -f "$backup"
+			fail '写入夜间模式配置失败，已恢复旧配置'
+		fi
+		fail "写入夜间模式配置失败且旧配置恢复失败，备份保留在 $backup"
+	fi
+	rm -f "$backup"
+	# 刻意不重启 r3mini-fan：控制器每轮重读夜间配置，最迟 interval 秒生效。
+	# 重启会走满速初始化，夜里切开关反而会先吼一嗓子。
+	status_json
+}
+
+case "$1" in
+	status) status_json ;;
+	apply) shift; apply_config "$@" ;;
+	mode) set_mode "$2" ;;
+	night) shift; set_night "$@" ;;
+	*) fail '用法: r3mini-fan-web status | apply <低速开启> <中速开启> <高速开启> <回差> | mode <auto|low|medium|high> | night <0|1> <开始 HH:MM> <结束 HH:MM> [解除限速温度 °C]' ;;
+esac
