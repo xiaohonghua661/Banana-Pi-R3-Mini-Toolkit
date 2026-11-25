@@ -1,0 +1,13 @@
+{
+	"admin/services/r3mini-adblock": {
+		"title": "广告过滤",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "services/r3mini-adblock"
+		},
+		"depends": {
+			"acl": [ "luci-app-r3mini-adblock" ]
+		}
+	}
+}

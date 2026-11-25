@@ -9,6 +9,7 @@
 - `openclash-ui-patch/`：OpenClash UI 修补、离线恢复和只读验收工具。
 - `third_party/netdata-chinese-patch/compat/`：面向 Netdata v1.38.1 的简体中文覆盖层、批量部署、备份和回滚脚本。
 - `scripts/router/`：路由器配置备份与恢复辅助脚本。
+- `adblock/`：OpenClash 广告过滤（红果短剧、抖音等）：安装器、LuCI「服务 → 广告过滤」页面、每天定时更新订阅规则和验收测试。
 - `docs/`：RST 恢复、稳定基线、DNS 分流、硬件、电源与 Netdata 部署文档。
 
 ## 快速验证
@@ -21,6 +22,8 @@ python device-dashboard/test_dashboard.py
 python third_party/netdata-chinese-patch/compat/test_overlay.py
 python third_party/netdata-chinese-patch/compat/test_deploy_upload.py
 bash -n third_party/netdata-chinese-patch/compat/deploy-openwrt.sh
+bash -n adblock/install.sh adblock/router/usr/sbin/r3mini-adblock
+node adblock/test/ui/run-ui-test.js
 ```
 
 涉及真实路由器的脚本默认先备份、再变更、最后验收。执行前阅读对应文档，确认固件、Netdata、LuCI 和设备路径与目标设备一致。

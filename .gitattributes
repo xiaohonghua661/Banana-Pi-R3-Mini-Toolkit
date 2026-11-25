@@ -9,3 +9,4 @@ docs/官方资料/** -text
 *.png binary
 *.jpg binary
 *.pdf binary
+adblock/** text eol=lf

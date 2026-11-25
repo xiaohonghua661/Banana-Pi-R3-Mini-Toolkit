@@ -1,0 +1,26 @@
+# r3mini-adblock 内置规则（classical 规则集 r3mini-adblock-rule，命中即 REJECT）
+# 一行一条：DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX；# 开头是注释
+# 红果广告视频 CDN：v3-reading-ad、v5-ex-reading-ad、v26-se-daily-reading-ad……（2026-10-13 抓包在广告时刻出现）
+DOMAIN-REGEX,^[a-z0-9-]*reading-ad[a-z0-9-]*\.qznovelvod\.com$
+# 字节广告接口：ads3-normal-hl.zijieapi.com 等（抓包：不查 DNS，直连 155.102.55.29）
+DOMAIN-REGEX,^ads[0-9]+-normal-[a-z0-9]+\.zijieapi\.com$
+# 广告图片：p3-ad-sign.byteimg.com 等（抓包：DNS 被拦后仍直连 163.181.60.204）
+DOMAIN-REGEX,^p[0-9]+-ad-sign\.byteimg\.com$
+# 抖音广告视频 CDN：v5-dj-ad.douyinvod.com、v5-daily-cm-ad.douyinvod.com
+DOMAIN-REGEX,^[a-z0-9-]+-ad\.douyinvod\.com$
+# 广告落地页（橙子建站）
+DOMAIN-SUFFIX,chengzijianzhan.com
+# 穿山甲（字节广告联盟）
+DOMAIN-SUFFIX,pangolin-sdk-toutiao.com
+DOMAIN-SUFFIX,pangolin-sdk-toutiao1.com
+DOMAIN-SUFFIX,pglstatp-toutiao.com
+DOMAIN-SUFFIX,pangle.cn
+DOMAIN-SUFFIX,pangle.io
+# 巨量引擎与字节广告投放
+DOMAIN-SUFFIX,oceanengine.com
+DOMAIN-SUFFIX,oceanengine.cn
+DOMAIN,ad.toutiao.com
+DOMAIN,adshare.toutiao.com
+DOMAIN-SUFFIX,shoppingads.cn
+# 字节 HTTPDNS：App 靠它绕过 DNS 黑名单（抓包：DNS 被拦后用内置 IP 116.162.51.206 直连）；拦掉后退回系统 DNS
+DOMAIN,dig.bdurl.net
