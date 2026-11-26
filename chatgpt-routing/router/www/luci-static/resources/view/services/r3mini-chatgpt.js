@@ -45,6 +45,7 @@ var RULE_ERRORS = { NODE_MISSING: '节点已不在订阅里，请换节点。', 
 	CONTROLLER_UNAVAILABLE: '读不到 OpenClash 控制接口，OpenClash 可能没在运行。',
 	RUNTIME_MISSING: '没找到 OpenClash 运行配置。', ROUTING_MODE_UNSUPPORTED: 'OpenClash 不是规则模式，分流无法生效。' };
 var STEAM_HINT = 'Steam 联机（Valve 服务器和中继 IP）、登录接口、下载走直连，不经过代理节点；商店和社区网页不变。';
+var UU_HINT = 'UU 远程的登录、信令、中继和文件传输走直连，不经过代理节点；点对点画面本来就按国内 IP 直连。';
 // Subscriptions list their quota and expiry as fake proxies (on .242: 「剩余流量：1017.5 GB」).
 var INFO_RE = /剩余流量|套餐到期|到期时间|过期时间|下次重置|流量重置|官网|官方网站|traffic|expire/i;
 var ORDER = { ok: 0, untested: 1, failed: 2, info: 3, blocked: 4 };
@@ -214,10 +215,13 @@ function ago(iso, now) {
 	return Math.floor(seconds / 86400) + ' 天前';
 }
 
-function steamOf(st) {
-	var steam = st && st.steam_direct;
-	return steam && typeof steam.enabled === 'boolean' && typeof steam.applied === 'boolean' ? steam : null;
+function directOf(st, key) {
+	var value = st && st[key];
+	return value && typeof value.enabled === 'boolean' && typeof value.applied === 'boolean' ? value : null;
 }
+
+function steamOf(st) { return directOf(st, 'steam_direct'); }
+function uuOf(st) { return directOf(st, 'uu_direct'); }
 
 function steamState(steam) {
 	if (!steam) return { text: '状态待确认', cls: 'bad' };
@@ -359,6 +363,8 @@ return view.extend({
 		this.dlg = null;
 		this.steamTarget = false;
 		this.steamOn = false;
+		this.uuTarget = false;
+		this.uuOn = false;
 		this.ruleButtons = [];
 		this.root = el('div', { 'class': 'r3cg' }, el('style', {}, CSS));
 		this.badge = el('span', { 'class': 'r3cg-state', 'role': 'status', 'aria-live': 'polite' });
@@ -370,16 +376,14 @@ return view.extend({
 		this.root.appendChild(el('h2', { 'name': 'content' }, '网站分流'));
 		this.root.appendChild(el('div', { 'class': 'cbi-map-descr' }, '给指定网站单独选一个出口节点；其他流量照旧走 OpenClash 原有规则。'));
 		this.root.appendChild(el('div', { 'class': 'r3cg-statusbar' }, [this.badge, this.activeInfo, this.refreshBtn]));
-		this.steamSwitch = el('button', { 'type': 'button', 'role': 'switch', 'class': 'r3cg-switch', 'id': 'r3cg-steam',
-			'aria-checked': 'false', 'aria-labelledby': 'r3cg-steam-label', 'aria-describedby': 'r3cg-steam-state r3cg-steam-hint',
-			'click': function() { return self.toggleSteam(!self.steamOn); } }, el('span', { 'aria-hidden': 'true' }));
-		this.steamState = el('span', { 'class': 'r3cg-state', 'id': 'r3cg-steam-state', 'role': 'status', 'aria-live': 'polite' });
-		this.steamCard = this.root.appendChild(el('section', { 'class': 'r3cg-steam', 'aria-label': 'Steam 直连' }, [
-			el('div', { 'class': 'r3cg-steam-main' }, [this.steamSwitch, el('span', { 'class': 'r3cg-switch-label', 'id': 'r3cg-steam-label',
-				'click': function() { return self.toggleSteam(!self.steamOn); } }, 'Steam 直连')]),
-			this.steamState,
-			el('p', { 'class': 'r3cg-hint', 'id': 'r3cg-steam-hint' }, STEAM_HINT)
-		]));
+		var steam = this.directCard('r3cg-steam', 'Steam 直连', STEAM_HINT, function() { return self.toggleSteam(!self.steamOn); });
+		this.steamSwitch = steam.sw;
+		this.steamState = steam.state;
+		this.steamCard = this.root.appendChild(steam.card);
+		var uu = this.directCard('r3cg-uu', 'UU 远程直连', UU_HINT, function() { return self.toggleUu(!self.uuOn); });
+		this.uuSwitch = uu.sw;
+		this.uuState = uu.state;
+		this.uuCard = this.root.appendChild(uu.card);
 		this.addBtn = this.button('添加网站', 'add', function() { return self.openEditor(null, false, false); });
 		this.presetBtn = this.button('ChatGPT 预设', 'neutral', function() { return self.openEditor(null, true, false); });
 		this.root.appendChild(el('div', { 'class': 'r3cg-actions' }, [this.addBtn, this.presetBtn]));
@@ -387,7 +391,7 @@ return view.extend({
 		this.list = this.root.appendChild(el('div', { 'class': 'r3cg-list', 'aria-label': '网站分流规则' }));
 		this.disableBtn = this.button('恢复原分流', 'reset', function() { return self.confirmDisable(); });
 		this.root.appendChild(el('div', { 'class': 'r3cg-footer' }, [this.disableBtn, el('p', { 'class': 'r3cg-note' },
-			'域名规则同时覆盖子域名。恢复原分流会停用全部网站规则（规则保留）并关闭 Steam 直连，OpenClash 原有分流不受影响。')]));
+			'域名规则同时覆盖子域名。恢复原分流会停用全部网站规则（规则保留）并关闭 Steam 和 UU 远程直连，OpenClash 原有分流不受影响。')]));
 		if (data.status) this.acceptStatus(data.status);
 		else this.renderRules();
 		this.sync();
@@ -395,6 +399,33 @@ return view.extend({
 		if (typeof document.addEventListener === 'function')
 			document.addEventListener('visibilitychange', function() { if (!document.hidden) self.idleRefresh(); });
 		return this.root;
+	},
+
+	// One switch card per direct block; ids keep the r3cg-steam / r3cg-uu prefixes.
+	directCard: function(id, name, hint, toggle) {
+		var sw = el('button', { 'type': 'button', 'role': 'switch', 'class': 'r3cg-switch', 'id': id,
+			'aria-checked': 'false', 'aria-labelledby': id + '-label', 'aria-describedby': id + '-state ' + id + '-hint',
+			'click': toggle }, el('span', { 'aria-hidden': 'true' }));
+		var state = el('span', { 'class': 'r3cg-state', 'id': id + '-state', 'role': 'status', 'aria-live': 'polite' });
+		var card = el('section', { 'class': 'r3cg-steam', 'aria-label': name }, [
+			el('div', { 'class': 'r3cg-steam-main' }, [sw, el('span', { 'class': 'r3cg-switch-label', 'id': id + '-label',
+				'click': toggle }, name)]),
+			state,
+			el('p', { 'class': 'r3cg-hint', 'id': id + '-hint' }, hint)
+		]);
+		return { sw: sw, state: state, card: card };
+	},
+
+	// The switch shows the effective state, so a saved-but-missing block reads as off.
+	syncDirect: function(action, sw, state, value, target, busy, unavailable) {
+		var mine = this.mutating === action;
+		setState(state, mine ? { text: target ? '正在开启…' : '正在关闭…', cls: 'warn' } :
+			unavailable ? { text: '状态待确认', cls: 'bad' } : steamState(value));
+		var on = mine ? target : !!(value && value.enabled && value.applied);
+		sw.setAttribute('aria-checked', on ? 'true' : 'false');
+		sw.className = 'r3cg-switch' + (on ? ' on' : '');
+		sw.disabled = busy || unavailable || !value;
+		return on;
 	},
 
 	button: function(text, kind, click) {
@@ -521,18 +552,13 @@ return view.extend({
 		var bad = unavailable || !!st.error || st.enabled === true && st.applied !== true && !st.pending_restart;
 		setState(this.badge, busy ? { text: '正在应用…', cls: 'warn' } : bad ? { text: '异常', cls: 'bad' } :
 			st.pending_restart ? { text: '待启动生效', cls: 'warn' } : st.enabled ? { text: '已生效', cls: 'ok' } : { text: '未启用', cls: '' });
-		var steam = steamOf(st), steamBusy = this.mutating === 'steam-direct';
-		setState(this.steamState, steamBusy ? { text: this.steamTarget ? '正在开启…' : '正在关闭…', cls: 'warn' } :
-			unavailable ? { text: '状态待确认', cls: 'bad' } : steamState(steam));
-		// The switch shows the effective state, so a saved-but-missing block reads as off.
-		this.steamOn = steamBusy ? this.steamTarget : !!(steam && steam.enabled && steam.applied);
-		this.steamSwitch.setAttribute('aria-checked', this.steamOn ? 'true' : 'false');
-		this.steamSwitch.className = 'r3cg-switch' + (this.steamOn ? ' on' : '');
-		this.steamSwitch.disabled = busy || unavailable || !steam;
+		var steam = steamOf(st), uu = uuOf(st);
+		this.steamOn = this.syncDirect('steam-direct', this.steamSwitch, this.steamState, steam, this.steamTarget, busy, unavailable);
+		this.uuOn = this.syncDirect('uu-direct', this.uuSwitch, this.uuState, uu, this.uuTarget, busy, unavailable);
 		this.addBtn.disabled = this.presetBtn.disabled = busy || unavailable;
 		this.presetBtn.hidden = this.rules.some(function(r) { return r.preset === 'chatgpt'; });
 		this.disableBtn.disabled = busy || !st || (!st.enabled && !st.applied && !st.error && !this.rules.some(function(r) { return r.enabled; }) &&
-			!(steam && (steam.enabled || steam.applied)));
+			!(steam && (steam.enabled || steam.applied)) && !(uu && (uu.enabled || uu.applied)));
 		this.disableBtn.textContent = this.mutating === 'disable' ? '正在恢复…' : '恢复原分流';
 		this.refreshBtn.disabled = busy || this.reading;
 		this.refreshBtn.textContent = this.reading && this.foreground ? '读取中…' : '立即刷新';
@@ -1077,9 +1103,12 @@ return view.extend({
 
 	confirmDisable: function() {
 		if (this.disableBtn.disabled) return false;
-		var self = this, steam = steamOf(this.status), on = this.rules.filter(function(r) { return r.enabled; }).length;
+		var self = this, st = this.status, on = this.rules.filter(function(r) { return r.enabled; }).length;
+		var direct = [[steamOf(st), 'Steam 直连'], [uuOf(st), 'UU 远程直连']].filter(function(d) {
+			return d[0] && (d[0].enabled || d[0].applied);
+		}).map(function(d) { return d[1]; });
 		var what = (on ? '停用全部 ' + on + ' 条网站规则（规则保留，随时可以重新启用）' : '清除本模块写入运行配置的分流') +
-			(steam && (steam.enabled || steam.applied) ? '，并关闭 Steam 直连' : '') + '。';
+			(direct.length ? '，并关闭 ' + direct.join('和 ') : '') + '。';
 		return this.showConfirm('恢复原分流', [el('p', {}, '将' + what), el('p', { 'class': 'r3cg-hint' }, 'OpenClash 原有的分流规则不受影响。')],
 			'恢复原分流', 'negative', function() { return self.mutate('disable'); });
 	},
@@ -1092,11 +1121,20 @@ return view.extend({
 		return this.mutate('steam-direct', '', want);
 	},
 
+	toggleUu: function(want) {
+		if (typeof want !== 'boolean' || this.mutating || this.uuSwitch.disabled) {
+			this.sync();
+			return Promise.resolve(false);
+		}
+		return this.mutate('uu-direct', '', want);
+	},
+
 	// Every change command answers with the same fields as `summary`, read back from the
 	// controller after the reload, so the page needs no second read to confirm it.
 	verified: function(action, id, arg, st) {
-		var pending = !!st.pending_restart, steam = steamOf(st), rule = this.ruleById(action === 'save' ? st.id || id : id);
+		var pending = !!st.pending_restart, steam = steamOf(st), uu = uuOf(st), rule = this.ruleById(action === 'save' ? st.id || id : id);
 		if (action === 'steam-direct') return !!steam && steam.enabled === arg && steam.applied === arg;
+		if (action === 'uu-direct') return !!uu && uu.enabled === arg && uu.applied === arg;
 		if (action === 'remove') return !rule;
 		if (action === 'save')
 			return !!rule && rule.source === arg.source && rule.selected === arg.selected && rule.enabled === arg.enabled &&
@@ -1104,28 +1142,32 @@ return view.extend({
 		if (action === 'set-enabled')
 			return !!rule && rule.enabled === arg && (pending || (arg ? rule.applied === true && !rule.error : rule.applied !== true));
 		return !this.rules.some(function(r) { return r.enabled; }) && st.enabled === false &&
-			(pending || st.applied !== true && !st.error) && (!steam || !steam.enabled && !steam.applied);
+			(pending || st.applied !== true && !st.error) && (!steam || !steam.enabled && !steam.applied) &&
+			(!uu || !uu.enabled && !uu.applied);
 	},
 
 	doneText: function(action, arg, pending) {
 		if (pending) return '已保存，等待 OpenClash 启动后生效。';
 		if (action === 'steam-direct') return arg ? 'Steam 直连已开启。' : 'Steam 直连已关闭。';
+		if (action === 'uu-direct') return arg ? 'UU 远程直连已开启。' : 'UU 远程直连已关闭。';
 		if (action === 'save') return arg.enabled ? '网站规则已保存并生效。' : '网站规则已保存（未启用）。';
 		if (action === 'remove') return '网站规则已删除。';
 		if (action === 'set-enabled') return arg ? '网站规则已启用。' : '网站规则已停用。';
-		return '已恢复原分流，全部网站规则已停用，Steam 直连已关闭。';
+		return '已恢复原分流，全部网站规则已停用，Steam 和 UU 远程直连已关闭。';
 	},
 
 	mutate: function(action, id, arg) {
-		if (this.mutating || ['save', 'set-enabled', 'remove', 'disable', 'steam-direct'].indexOf(action) < 0 ||
+		var direct = action === 'steam-direct' || action === 'uu-direct';
+		if (this.mutating || ['save', 'set-enabled', 'remove', 'disable', 'steam-direct', 'uu-direct'].indexOf(action) < 0 ||
 			(action === 'set-enabled' || action === 'remove') && !this.ruleById(id) ||
-			(action === 'set-enabled' || action === 'steam-direct') && typeof arg !== 'boolean' ||
+			(action === 'set-enabled' || direct) && typeof arg !== 'boolean' ||
 			action === 'save' && (!arg || typeof arg !== 'object'))
 			return Promise.resolve(false);
 		var self = this, d = action === 'save' && this.dlg && this.dlg.el ? this.dlg : null, started = this.now();
 		var args = action === 'save' ? ['save', JSON.stringify(arg)] : action === 'set-enabled' ? ['set-enabled', id, arg ? '1' : '0'] :
-			action === 'remove' ? ['remove', id] : action === 'steam-direct' ? ['steam-direct', arg ? '1' : '0'] : ['disable'];
+			action === 'remove' ? ['remove', id] : direct ? [action, arg ? '1' : '0'] : ['disable'];
 		if (action === 'steam-direct') this.steamTarget = arg;
+		if (action === 'uu-direct') this.uuTarget = arg;
 		this.mutating = action;
 		this.busyId = id || '';
 		++this.readSerial;
@@ -1153,7 +1195,7 @@ return view.extend({
 				return false;
 			}
 			if (d && self.dlg === d) self.closeDialog(true);
-			var pending = !!st.pending_restart && action !== 'steam-direct';
+			var pending = !!st.pending_restart && !direct;
 			self.notice = self.doneText(action, arg, pending) + '用时 ' + ((self.now() - started) / 1000).toFixed(1) + ' 秒' +
 				(st.reloaded === false ? '，运行配置无变化，未重载' : '') + '。';
 			self.noticeTone = pending ? 'warn' : 'ok';

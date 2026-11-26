@@ -620,7 +620,7 @@ async function run() {
 		h.queue(reply(changed({ rules: [rule({ enabled: false, applied: false }), other], steam_direct: STEAM_OFF })));
 		await modalButtons(h)[1].click();
 		assert.deepEqual(h.calls, [['disable']]);
-		assert.match(h.view.message.textContent, /全部网站规则已停用，Steam 直连已关闭/);
+		assert.match(h.view.message.textContent, /全部网站规则已停用，Steam 和 UU 远程直连已关闭/);
 		assert.equal(h.view.rules.length, 2);
 	});
 
@@ -743,6 +743,40 @@ async function run() {
 		assert.equal(harness(null).view.steamSwitch.disabled, true);
 	});
 
+	await test('UU远程直连卡片紧跟Steam，开关调用uu-direct 1/0且不动Steam', async () => {
+		const h = harness(summary({ steam_direct: STEAM_ON, uu_direct: STEAM_OFF })), kids = h.view.root.children;
+		assert.equal(kids.indexOf(h.view.uuCard), kids.indexOf(h.view.steamCard) + 1);
+		assert.match(h.view.uuCard.textContent, /^UU 远程直连/);
+		assert.equal(h.view.uuSwitch.attributes['aria-describedby'], 'r3cg-uu-state r3cg-uu-hint');
+		assert.equal(h.view.uuState.textContent, '未生效');
+		assert.equal(h.view.steamState.textContent, '已生效');
+		const pending = deferred();
+		h.queue(pending.promise);
+		const result = h.view.uuSwitch.click();
+		assert.deepEqual(h.calls[0], ['uu-direct', '1']);
+		assert.equal(h.view.uuState.textContent, '正在开启…');
+		assert.equal(h.view.steamState.textContent, '已生效');
+		assert.equal(h.view.steamSwitch.disabled, true);
+		pending.resolve(reply(changed({ steam_direct: STEAM_ON, uu_direct: STEAM_ON })));
+		await result;
+		assert.match(h.view.message.textContent, /^UU 远程直连已开启。用时/);
+		assert.equal(h.view.uuSwitch.attributes['aria-checked'], 'true');
+		h.queue(reply(changed({ steam_direct: STEAM_ON, uu_direct: { enabled: true, applied: false } })));
+		await h.view.uuSwitch.click();
+		assert.deepEqual(h.calls[1], ['uu-direct', '0']);
+		assert.equal(h.view.noticeTone, 'bad');
+		h.view.disableBtn.click();
+		assert.match(h.ui.modal.children[0].textContent, /清除本模块写入运行配置的分流，并关闭 Steam 直连和 UU 远程直连。/);
+		const only = harness(summary({ uu_direct: STEAM_ON }));
+		assert.equal(only.view.steamSwitch.disabled, true);
+		assert.equal(only.view.disableBtn.disabled, false);
+		only.view.disableBtn.click();
+		assert.match(only.ui.modal.children[0].textContent, /分流，并关闭 UU 远程直连。/);
+		only.queue(reply(changed({ uu_direct: STEAM_ON })));
+		await modalButtons(only)[1].click();
+		assert.equal(only.view.noticeTone, 'bad', '返回仍开着则不虚报');
+	});
+
 	await test('只开Steam时也可恢复原分流，返回不符不虚报', async () => {
 		const h = harness(summary({ steam_direct: STEAM_ON }));
 		assert.equal(h.view.disableBtn.disabled, false);
@@ -837,9 +871,9 @@ async function run() {
 		const acl = JSON.parse(fs.readFileSync(path.join(ROOT, 'router/usr/share/rpcd/acl.d/luci-app-r3mini-chatgpt.json'), 'utf8'))['luci-app-r3mini-chatgpt'];
 		assert.deepEqual(Object.keys(acl.read.file).sort(), ['benchmark-status *', 'nodes *', 'status', 'status *', 'summary']
 			.map(s => '/usr/sbin/r3mini-chatgpt ' + s).sort());
-		// Steam: only the two exact commands the page sends, no wildcard.
+		// Steam and UU: only the exact commands the page sends, no wildcard.
 		assert.deepEqual(Object.keys(acl.write.file).sort(), ['apply *', 'benchmark *', 'disable', 'remove *', 'save *', 'set-enabled *',
-			'steam-direct 0', 'steam-direct 1'].map(s => '/usr/sbin/r3mini-chatgpt ' + s).sort());
+			'steam-direct 0', 'steam-direct 1', 'uu-direct 0', 'uu-direct 1'].map(s => '/usr/sbin/r3mini-chatgpt ' + s).sort());
 		assert.deepEqual(acl.read.ubus, { file: ['exec'] });
 		assert.deepEqual(acl.write.ubus, { file: ['exec'] });
 		assert.ok(!JSON.stringify(acl).includes('hook'));

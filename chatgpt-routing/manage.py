@@ -30,6 +30,8 @@ ACL = "/usr/share/rpcd/acl.d/luci-app-r3mini-chatgpt.json"
 VIEW = "/www/luci-static/resources/view/services/r3mini-chatgpt.js"
 STATE = "/etc/r3mini-chatgpt"
 SETTINGS = STATE + "/settings.json"
+# Direct switches the status reports; each must match its saved setting and the runtime.
+DIRECT_SWITCHES = ("steam_direct", "uu_direct")
 HOOK = "/etc/openclash/custom/openclash_custom_overwrite.sh"
 OWNED = (CLI, BACKEND, BENCHMARK, MENU, ACL, VIEW)
 BEGIN = b"# BEGIN R3MINI-CHATGPT"
@@ -648,6 +650,8 @@ for p in /tmp/luci-indexcache.*.json; do [ ! -f "$p" ] || { printf '@@INDEX\\n';
                                  (CLI + " set-enabled " + "a" * 12 + " 0", True),
                                  (CLI + " steam-direct 0", True), (CLI + " steam-direct 1", True),
                                  (CLI + " steam-direct 2", False),
+                                 (CLI + " uu-direct 0", True), (CLI + " uu-direct 1", True),
+                                 (CLI + " uu-direct 2", False),
                                  (CLI + " disable", True), (CLI + " hook x.yaml", False), ("/bin/true", False)):
             access = ubus("access", {"ubus_rpc_session": session, "scope": "file", "object": command, "function": "exec"})
             if bool(access.get("access")) != allowed:
@@ -693,18 +697,22 @@ def verify(client, host, args, manifest=None):
     status = json.loads(text(client, CLI + " status", timeout=60))
     if not isinstance(status, dict) or not status.get("ok") or status.get("enabled") != settings["enabled"]:
         fail("STATUS_SCHEMA_INVALID")
-    steam = status.get("steam_direct")
-    if not isinstance(steam, dict) or steam.get("enabled") is not settings.get("steam_direct", False) or \
-            not isinstance(steam.get("applied"), bool):
-        fail("STATUS_SCHEMA_INVALID")
-    if status.get("error") or bool(status.get("applied")) != settings["enabled"] or steam["applied"] != steam["enabled"]:
+    switches = {}
+    for key in DIRECT_SWITCHES:
+        switch = status.get(key)
+        if not isinstance(switch, dict) or switch.get("enabled") is not settings.get(key, False) or \
+                not isinstance(switch.get("applied"), bool):
+            fail("STATUS_SCHEMA_INVALID")
+        switches[key] = switch
+    if status.get("error") or bool(status.get("applied")) != settings["enabled"] or \
+            any(s["applied"] != s["enabled"] for s in switches.values()):
         fail("LIVE_ROUTING_STATE_MISMATCH")
     if health(client, runtime) != manifest["health"]:
         fail("ORIGINAL_SERVICES_OR_CORE_CHANGED")
     luci_checks(client)
     print("PROTECTED_FILES_AND_CORE_OK", flush=True)
     print("VERIFY_OK files=" + str(len(OWNED)) + " enabled=" + str(settings["enabled"]).lower() +
-          " steam_direct=" + str(steam["enabled"]).lower(), flush=True)
+          "".join(" " + k + "=" + str(s["enabled"]).lower() for k, s in switches.items()), flush=True)
 
 
 def install(client, host, args):

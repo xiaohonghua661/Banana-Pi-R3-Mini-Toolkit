@@ -36,10 +36,21 @@ module R3MiniChatGPT
   STEAM_RULES = (%w[DOMAIN-SUFFIX,steamserver.net,DIRECT DOMAIN-SUFFIX,steamcontent.com,DIRECT
                     DOMAIN,api.steampowered.com,DIRECT] +
                  STEAM_PREFIXES.map { |prefix| "IP-CIDR,#{prefix},DIRECT,no-resolve" }).freeze
+  # NetEase UU Remote: account/API (uu.163.com), relay and signalling (nrd.nie.163.com),
+  # public-address probe (whoami-ipv4.nie.netease.com) and file transfer (fp.ps.netease.com),
+  # read from the 192.168.1.245 AdGuard Home query log during a live session, 2026-11-27.
+  # Peer-to-peer traffic goes to raw CN addresses, which GEOIP,CN already sends direct.
+  UU_RULES = %w[DOMAIN-SUFFIX,uu.163.com,DIRECT DOMAIN-SUFFIX,uuyc.163.com,DIRECT
+                DOMAIN-SUFFIX,nrd.nie.163.com,DIRECT DOMAIN-SUFFIX,nie.netease.com,DIRECT
+                DOMAIN-SUFFIX,fp.ps.netease.com,DIRECT DOMAIN,uuyc.webapp.163.com,DIRECT].freeze
   LIVE_TYPES = {'DOMAIN' => 'Domain', 'DOMAIN-SUFFIX' => 'DomainSuffix', 'DOMAIN-KEYWORD' => 'DomainKeyword',
                 'IP-CIDR' => 'IPCIDR'}.freeze
   # The controller's /rules payload omits the no-resolve flag.
   STEAM_LIVE = STEAM_RULES.map { |rule| kind, payload, target = rule.split(','); [LIVE_TYPES[kind], payload, target] }.freeze
+  UU_LIVE = UU_RULES.map { |rule| kind, payload, target = rule.split(','); [LIVE_TYPES[kind], payload, target] }.freeze
+  # Direct blocks sit at the very top of rules:, in this order, ahead of every site rule.
+  DIRECT_BLOCKS = [['steam_direct', STEAM_RULES, STEAM_LIVE], ['uu_direct', UU_RULES, UU_LIVE]].freeze
+  DIRECT_COMMANDS = {'steam-direct' => 'steam_direct', 'uu-direct' => 'uu_direct'}.freeze
   PRESET_ID = Digest::SHA256.hexdigest('r3mini-chatgpt-preset')[0, 12]
   # Transaction backups live in RAM: they only matter until the reload is verified,
   # and a copy per save used to fill the flash overlay (85 copies, 37 MB, 2026-11-23).
@@ -194,7 +205,7 @@ module R3MiniChatGPT
 
     def settings
       result = {'version' => 2, 'rules' => [], 'enabled' => false, 'source' => 'lian_li.yaml', 'selected' => nil,
-                'last_action' => nil, 'last_time' => nil, 'steam_direct' => false}
+                'last_action' => nil, 'last_time' => nil, 'steam_direct' => false, 'uu_direct' => false}
       return result unless File.exist?(@settings_path)
       loaded = parse(read(@settings_path, 'SETTINGS_INVALID', 512 * 1024), 'SETTINGS_INVALID')
       fail!('SETTINGS_INVALID') unless loaded.is_a?(Hash)
@@ -218,7 +229,7 @@ module R3MiniChatGPT
       result['version'] = 2
       result['enabled'] = result['rules'].any? { |r| r['enabled'] }
       fail!('SETTINGS_INVALID') unless result['rule_errors'].nil? || result['rule_errors'].is_a?(Hash)
-      fail!('SETTINGS_INVALID') unless [true, false].include?(result['steam_direct'])
+      DIRECT_BLOCKS.each { |key, _, _| fail!('SETTINGS_INVALID') unless [true, false].include?(result[key]) }
       result
     end
 
@@ -657,21 +668,37 @@ module R3MiniChatGPT
       fail!('ROUTING_MODE_UNSUPPORTED') unless mode.nil? || mode.is_a?(String) && mode.downcase == 'rule'
     end
 
-    # The Steam block belongs to this module only while it is intact at the very
-    # top; look-alike rules anywhere else are the user's own and stay untouched.
-    def steam_block?(rules)
-      rules.is_a?(Array) && rules.first(STEAM_RULES.length) == STEAM_RULES
+    # A direct block belongs to this module only while it is intact at the very top
+    # (after any earlier block); look-alike rules anywhere else are the user's own.
+    # Returns the keys of the blocks found and the rules after them.
+    def direct_blocks(rules)
+      rest = rules.is_a?(Array) ? rules : []
+      found = []
+      DIRECT_BLOCKS.each do |key, block, _|
+        next unless rest.first(block.length) == block
+        found << key
+        rest = rest.drop(block.length)
+      end
+      [found, rest]
     end
 
-    def without_steam(rules)
-      steam_block?(rules) ? rules.drop(STEAM_RULES.length) : rules
+    def without_direct(rules)
+      direct_blocks(rules)[1]
+    end
+
+    def direct_rules(s)
+      DIRECT_BLOCKS.flat_map { |key, block, _| s[key] ? block : [] }
+    end
+
+    def any_direct?(s)
+      DIRECT_BLOCKS.any? { |key, _, _| s[key] }
     end
 
     def transform(config, s, closed = {})
       result = config.dup
       result['proxies'] = (config['proxies'] || []).reject { |n| owned_node?(n['name']) }
       result['proxy-groups'] = (config['proxy-groups'] || []).reject { |g| owned_group?(g['name']) }
-      result['rules'] = without_steam(config['rules'] || []).reject { |r| owned_rule?(r) }
+      result['rules'] = without_direct(config['rules'] || []).reject { |r| owned_rule?(r) }
       prefix = []
       (s['rules'] || []).select { |r| r['enabled'] }.each do |rule|
         routing_mode!(config)
@@ -716,9 +743,9 @@ module R3MiniChatGPT
         end
         prefix += generated_rules(rule)
       end
-      routing_mode!(config) if s['steam_direct']
-      # Steam goes first so a broader site rule (e.g. steampowered.com) cannot take its hosts.
-      result['rules'] = (s['steam_direct'] ? STEAM_RULES : []) + prefix + result['rules']
+      routing_mode!(config) if any_direct?(s)
+      # Direct blocks go first so a broader site rule (e.g. steampowered.com) cannot take their hosts.
+      result['rules'] = direct_rules(s) + prefix + result['rules']
       result
     end
 
@@ -797,8 +824,25 @@ module R3MiniChatGPT
       rule.is_a?(Hash) ? [rule['type'], rule['payload'], rule['proxy']] : nil
     end
 
-    def steam_live?(snapshot)
-      snapshot['rules'].first(STEAM_LIVE.length).map { |r| live_rule_tuple(r) } == STEAM_LIVE
+    # Keys of the direct blocks loaded at the top of the live rules, and their total length.
+    def live_direct(snapshot)
+      found = []
+      offset = 0
+      DIRECT_BLOCKS.each do |key, _, live|
+        next unless snapshot['rules'].drop(offset).first(live.length).map { |r| live_rule_tuple(r) } == live
+        found << key
+        offset += live.length
+      end
+      [found, offset]
+    end
+
+    def direct_consistent?(snapshot, rules)
+      live_direct(snapshot)[0] == direct_blocks(rules)[0]
+    end
+
+    def direct_view(s, snapshot)
+      live = snapshot ? live_direct(snapshot)[0] : []
+      DIRECT_BLOCKS.map { |key, _, _| [key, {'enabled' => s[key], 'applied' => live.include?(key)}] }.to_h
     end
 
     def live_rule_matches?(snapshot, rule)
@@ -816,8 +860,8 @@ module R3MiniChatGPT
       active = (s['rules'] || []).select { |r| r['enabled'] }
       return false unless active.all? { |r| live_rule_matches?(snapshot, r) }
       expected = active.flat_map { |r| expected_live_rules(r) }
-      # Site rules come right after a loaded Steam block.
-      offset = steam_live?(snapshot) ? STEAM_LIVE.length : 0
+      # Site rules come right after the loaded direct blocks.
+      offset = live_direct(snapshot)[1]
       actual = snapshot['rules'].drop(offset).first(expected.length).map { |r| live_rule_tuple(r) }
       proxies = snapshot['proxies']
       owned_nodes = proxies.keys.select { |n| owned_node?(n) }
@@ -904,11 +948,10 @@ module R3MiniChatGPT
         nil
       end
       {'ok' => true, 'enabled' => s['enabled'], 'applied' => applied == true, 'error' => error,
-       'pending_restart' => pending_restart,
-       'steam_direct' => {'enabled' => s['steam_direct'], 'applied' => snapshot ? steam_live?(snapshot) : false},
-       'source' => s['source'], 'sources' => sources, 'active_source' => sources.include?(active) ? active : nil,
+       'pending_restart' => pending_restart}.merge(direct_view(s, snapshot)).merge(
+      {'source' => s['source'], 'sources' => sources, 'active_source' => sources.include?(active) ? active : nil,
        'rules' => rules,
-       'last_action' => s['last_action'], 'last_time' => s['last_time']}
+       'last_action' => s['last_action'], 'last_time' => s['last_time']})
     end
 
     # Node picker data for one subscription, measured against one target.
@@ -953,7 +996,8 @@ module R3MiniChatGPT
       {'ok' => true, 'enabled' => base['enabled'], 'applied' => base['applied'], 'source' => s['source'],
        'selected' => selected_site && selected_site['selected'],
        'selected_name' => selected_site && selected_site['selected_name'],
-       'site_rules' => rules, 'steam_direct' => base['steam_direct'], 'sources' => base['sources'],
+       'site_rules' => rules, 'steam_direct' => base['steam_direct'], 'uu_direct' => base['uu_direct'],
+       'sources' => base['sources'],
        'nodes' => view ? view['nodes'] : [],
        'benchmark' => view ? bench_report(candidate, 'chatgpt') : {'ok' => false, 'error' => source_error, 'nodes' => [],
                                                                    'results' => [], 'best' => nil, 'running' => false},
@@ -1131,7 +1175,7 @@ module R3MiniChatGPT
         timed('reload_ms') { reload(old_config, file) }
         snapshot = timed('verify_ms') { live_snapshot(new_config) }
         fail!('VERIFY_FAILED') unless snapshot_matches?(snapshot, desired) &&
-          steam_live?(snapshot) == steam_block?(new_config['rules'])
+          direct_consistent?(snapshot, new_config['rules'])
         finish_settings(desired, s, {}, action, false)
         result = response(snapshot, affected_id, true)
         fail!('VERIFY_FAILED') if desired['enabled'] && !result['applied']
@@ -1208,7 +1252,7 @@ module R3MiniChatGPT
         elsif action == 'disable'
           # Restoring the original routing removes every module-owned rule.
           desired['rules'].each { |r| r['enabled'] = false }
-          desired['steam_direct'] = false
+          DIRECT_BLOCKS.each { |key, _, _| desired[key] = false }
         end
         desired['enabled'] = desired['rules'].any? { |r| r['enabled'] }
         desired['version'] = 2
@@ -1245,7 +1289,7 @@ module R3MiniChatGPT
           return write_validated(file, new_config, s, desired, {}, action, true, affected_id)
         end
         if new_config == old_config && snapshot_matches?(live, desired) &&
-           steam_live?(live) == steam_block?(old_config['rules'])
+           direct_consistent?(live, old_config['rules'])
           # Labels, an identical save or a disabled rule's removal: settings only, no reload.
           finish_settings(desired, s, {}, action, false)
           return response(live, affected_id, false)
@@ -1254,9 +1298,10 @@ module R3MiniChatGPT
       end
     end
 
-    # Touches only the Steam block, so a site rule waiting for a new benchmark
+    # Touches only the direct blocks, so a site rule waiting for a new benchmark
     # cannot block this switch; the hook still rebuilds everything at start.
-    def steam_direct(value)
+    def direct_switch(command, value)
+      key = DIRECT_COMMANDS.fetch(command)
       fail!('ARGUMENT_INVALID') unless ['0', '1'].include?(value)
       enabled = value == '1'
       with_lock do
@@ -1264,14 +1309,14 @@ module R3MiniChatGPT
         file = runtime_path
         old_config = timed('parse_ms') { runtime(file) }
         routing_mode!(old_config) if enabled
-        new_config = old_config.merge('rules' => (enabled ? STEAM_RULES : []) + without_steam(old_config['rules'] || []))
+        # A successful reload from disk leaves no change waiting for a restart.
+        desired = s.merge(key => enabled, 'pending_restart' => false, 'last_action' => command,
+                          'last_time' => utc_now)
+        new_config = old_config.merge('rules' => direct_rules(desired) + without_direct(old_config['rules'] || []))
         # Read-only first: an offline controller fails here before anything is written.
         current = timed('live_ms') { live_snapshot(old_config) }
-        # A successful reload from disk leaves no change waiting for a restart.
-        desired = s.merge('steam_direct' => enabled, 'pending_restart' => false, 'last_action' => 'steam-direct',
-                          'last_time' => utc_now)
-        if new_config == old_config && steam_live?(current) == steam_block?(old_config['rules'])
-          atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n") unless s['steam_direct'] == enabled
+        if new_config == old_config && direct_consistent?(current, old_config['rules'])
+          atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n") unless s[key] == enabled
           return response(current, nil, false)
         end
         saved = backup(file)
@@ -1287,7 +1332,7 @@ module R3MiniChatGPT
           reloaded = true
           timed('reload_ms') { reload(old_config, file) }
           snapshot = timed('verify_ms') { live_snapshot(new_config) }
-          fail!('VERIFY_FAILED') unless steam_live?(snapshot) == steam_block?(new_config['rules'])
+          fail!('VERIFY_FAILED') unless direct_consistent?(snapshot, new_config['rules'])
           atomic_write(@settings_path, R3MiniChatGPT.json(desired) + "\n")
           response(snapshot, nil, true)
         rescue StandardError => error
@@ -1341,9 +1386,9 @@ module R3MiniChatGPT
       when 'disable'
         fail!('ARGUMENT_INVALID') unless argv.length == 1
         mutate('disable')
-      when 'steam-direct'
+      when 'steam-direct', 'uu-direct'
         fail!('ARGUMENT_INVALID') unless argv.length == 2
-        steam_direct(argv[1])
+        direct_switch(command, argv[1])
       when 'hook'
         fail!('ARGUMENT_INVALID') unless argv.length == 2
         mutate('hook', nil, nil, argv[1])

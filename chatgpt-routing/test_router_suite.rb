@@ -258,6 +258,7 @@ class AssertionFailed < StandardError; end
 
 class Case
   STEAM_BLOCK = R3MiniChatGPT::STEAM_RULES
+  UU_BLOCK = R3MiniChatGPT::UU_RULES
   STEAM_ON = {'enabled' => true, 'applied' => true}.freeze
   STEAM_OFF = {'enabled' => false, 'applied' => false}.freeze
   PRESET_ID = R3MiniChatGPT::PRESET_ID
@@ -1134,8 +1135,9 @@ class Case
   def test_status_reports_steam_direct_and_keeps_existing_fields
     result = cmd('status')
     eq(STEAM_OFF, result['steam_direct'])
+    eq(STEAM_OFF, result['uu_direct'])
     eq(%w[applied backup_count benchmark enabled error last_action last_time nodes ok pending_restart runtime_group
-          selected selected_name site_rules source source_error sources steam_direct], result.keys.sort)
+          selected selected_name site_rules source source_error sources steam_direct uu_direct], result.keys.sort)
     check(!File.exist?(@settings))
     File.write(@settings, jdump({'rules' => [], 'steam_direct' => 'yes'}))
     eq('SETTINGS_INVALID', cmd('status', ok: false)['error'])
@@ -1168,6 +1170,69 @@ class Case
     eq(false, stored['steam_direct'])
     eq('steam-direct', stored['last_action'])
     eq(0o600, File.stat(@runtime).mode & 0o777)
+  end
+
+  def test_uu_direct_stacks_under_steam_and_each_switch_keeps_the_other
+    eq('SETTINGS_INVALID', begin
+      File.write(@settings, jdump({'rules' => [], 'uu_direct' => 1}))
+      cmd('summary', ok: false)['error']
+    ensure
+      File.unlink(@settings)
+    end)
+    on = cmd('uu-direct', '1')
+    eq(STEAM_ON, on['uu_direct'])
+    eq(STEAM_OFF, on['steam_direct'])
+    check(!on['enabled'] && !on['applied'] && !on['error'])
+    eq(@initial.merge('rules' => UU_BLOCK + @initial['rules']), runtime_config)
+    eq({'type' => 'DomainSuffix', 'payload' => 'uu.163.com', 'proxy' => 'DIRECT'}, controller['rules'][0])
+    eq({'type' => 'Domain', 'payload' => 'uuyc.webapp.163.com', 'proxy' => 'DIRECT'}, controller['rules'][UU_BLOCK.length - 1])
+    eq('claude.ai', controller['rules'][UU_BLOCK.length]['payload'])
+    eq(STEAM_ON, cmd('steam-direct', '1')['uu_direct'])
+    eq(STEAM_BLOCK + UU_BLOCK + @initial['rules'], rules_of)
+    both = cmd('summary')
+    eq([STEAM_ON, STEAM_ON], [both['steam_direct'], both['uu_direct']])
+    before = [controller['reloads'], tmp_backups]
+    eq(STEAM_ON, cmd('uu-direct', '1')['uu_direct'])
+    eq(before, [controller['reloads'], tmp_backups])
+    off = cmd('uu-direct', '0')
+    eq([STEAM_ON, STEAM_OFF], [off['steam_direct'], off['uu_direct']])
+    eq(STEAM_BLOCK + @initial['rules'], rules_of)
+    cmd('uu-direct', '1')
+    eq(STEAM_BLOCK + UU_BLOCK + @initial['rules'], rules_of)
+    off = cmd('steam-direct', '0')
+    eq([STEAM_OFF, STEAM_ON], [off['steam_direct'], off['uu_direct']])
+    eq(UU_BLOCK + @initial['rules'], rules_of)
+    eq(STEAM_OFF, cmd('uu-direct', '0')['uu_direct'])
+    eq(@initial, runtime_config)
+    stored = settings_json
+    eq([false, false, 'uu-direct'], [stored['steam_direct'], stored['uu_direct'], stored['last_action']])
+    [['uu-direct'], ['uu-direct', '2'], ['uu-direct', 'on'], ['uu-direct', '1', '1']].each do |args|
+      eq('ARGUMENT_INVALID', cmd(*args, ok: false)['error'], args.inspect)
+    end
+  end
+
+  def test_hook_and_disable_handle_uu_block_with_site_rules
+    hookfile = tmp_hook
+    site = save_site('site', ['example.com'])
+    site_rule = 'DOMAIN-SUFFIX,example.com,R3Site-' + site['id']
+    eq(STEAM_ON, cmd('uu-direct', '1')['uu_direct'])
+    expected = UU_BLOCK + [site_rule] + @initial['rules']
+    eq(expected, rules_of)
+    File.write(hookfile, YAML.dump(@initial))
+    check(cmd('hook', '/tmp/MESL_yue.yaml')['changed'])
+    eq(expected, rules_of(hookfile))
+    check(!cmd('hook', '/tmp/MESL_yue.yaml')['changed'])
+    second = save_site('second', ['second.example.net'], index: 1)
+    check(second['applied'])
+    eq(STEAM_ON, second['uu_direct'])
+    # A user's own copy lower down is never treated as the module's block.
+    config = runtime_config
+    File.write(@runtime, YAML.dump(config.merge('rules' => config['rules'] + UU_BLOCK)))
+    seed_live
+    result = cmd('disable')
+    eq([STEAM_OFF, STEAM_OFF], [result['steam_direct'], result['uu_direct']])
+    eq(@initial['rules'] + UU_BLOCK, rules_of)
+    eq(false, settings_json['uu_direct'])
   end
 
   def test_hook_adds_steam_block_only_when_enabled_and_ahead_of_site_rules
@@ -1294,7 +1359,7 @@ class Case
     apply
     out, = run([RUBY, BACKEND, 'summary'])
     summary = jload(out)
-    eq(%w[active_source applied enabled error last_action last_time ok pending_restart rules source sources steam_direct], summary.keys.sort)
+    eq(%w[active_source applied enabled error last_action last_time ok pending_restart rules source sources steam_direct uu_direct], summary.keys.sort)
     check(out.bytesize < 2048, "summary is #{out.bytesize} bytes")
     rule = summary['rules'][0]
     eq(true, rule['applied'])
