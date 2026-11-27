@@ -1,0 +1,290 @@
+#!/bin/sh
+# r3mini-mesl-relay: MESL 订阅专用，按节点名把入口换成节点商的中转入口（取自一份带中转入口的旧订阅副本）。
+# 运行 "r3mini-mesl-relay help" 看用法。Ruby 程序从 "#!ruby" 那一行开始。
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+exec /usr/bin/ruby -x "$0" "$@"
+#!ruby
+# frozen_string_literal: true
+
+require 'yaml'
+
+VERSION    = '1'
+STATE_DIR  = ENV.fetch('R3MR_STATE', '/etc/r3mini-mesl-relay')
+MAP_FILE   = File.join(STATE_DIR, 'map.yaml')
+OFF_FILE   = File.join(STATE_DIR, 'disabled')
+MESL_GROUP = 'MESL'
+BYPASS_GID = 65_534
+CHECK_PORTS = 2
+
+USAGE = <<~TEXT
+  r3mini-mesl-relay v#{VERSION}：MESL 订阅专用的中转入口
+
+  为什么有它：同一个 MESL 订阅，较早的副本里节点入口是节点商的中转主机（每个节点一个端口、一个 SNI），
+  后来订阅只给直连入口。2026-11 实测从长沙家宽走中转，美国家宽约 410 ms，直连约 790 ms。
+  订阅已经不给中转入口了，所以把旧副本里每个节点的中转入口（server、port、sni）存成对照表，
+  OpenClash 每次生成运行配置时按节点名换上去；密码等其他字段照用当前订阅的（旧副本的密码多半已过期）。
+
+  只动 MESL 类：运行配置里有名为 #{MESL_GROUP} 的代理组才处理，其他订阅原样不动。
+
+  命令（都要 root）：
+    build-map <旧副本> [当前订阅]
+                          对照两份订阅建表 #{MAP_FILE}：同名、同类型、入口（server:port）不同的节点，记下旧副本的
+                          server、port、sni。当前订阅默认取 uci openclash.config.config_path 指的订阅原文件。
+                          表里没有密码
+    hook <运行配置>       覆写脚本 R3MINI-MESL-RELAY 段调用：按节点名换入口。换之前先检查每个中转主机：
+                          用运行配置里节点商的 https DoH 解析，再以 gid #{BYPASS_GID} 直连测 #{CHECK_PORTS} 个端口，
+                          不通的主机上的节点保持原入口。只在有改动时整份原子替换。最后一行 MESL_RELAY ...
+    status [运行配置]      只读：开关、对照表、运行配置里多少节点走中转
+    off / on              关 / 开（建或删 #{OFF_FILE}）；下次生成运行配置时生效
+    help                  本说明
+
+  结果行：
+    MESL_RELAY applied=<换了的节点数> mapped=<表里有的> nodes=<全部节点> hosts=<主机:解析结果:ok|down,...>
+    MESL_RELAY skip reason=<not_mesl|disabled|no_map|no_doh|all_hosts_down|unchanged>
+TEXT
+
+def die(msg, code = 1)
+  warn "MESL_RELAY error #{msg}"
+  exit code
+end
+
+def capture(argv, limit = 8)
+  r, w = IO.pipe
+  pid = Process.spawn(*argv, in: File::NULL, out: w, err: File::NULL)
+  w.close
+  out = +''.b
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + limit
+  loop do
+    left = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    break if left <= 0 || !IO.select([r], nil, nil, left)
+
+    chunk = r.read_nonblock(65_536, exception: false)
+    break if chunk.nil?
+
+    out << chunk if chunk.is_a?(String)
+  end
+  begin
+    Process.kill('KILL', pid)
+  rescue SystemCallError
+    nil
+  end
+  Process.wait(pid)
+  out
+rescue SystemCallError
+  ''
+ensure
+  r&.close unless r&.closed?
+end
+
+# 以 gid 65534 跑（绕过 OpenClash 的本机代理），本进程身份不变，写出的文件属主不受影响
+def bypass(argv, limit = 8)
+  capture(['ruby', '-e', "Process.groups=[#{BYPASS_GID}]; Process::Sys.setgid(#{BYPASS_GID}); exec(*ARGV)", *argv], limit)
+end
+
+def load_yaml(path)
+  YAML.load_file(path, aliases: true)
+end
+
+def mesl?(cfg)
+  cfg.is_a?(Hash) && Array(cfg['proxy-groups']).any? { |g| g.is_a?(Hash) && g['name'] == MESL_GROUP }
+end
+
+def load_map
+  m = File.file?(MAP_FILE) ? load_yaml(MAP_FILE) : nil
+  m.is_a?(Hash) ? m : nil
+rescue StandardError
+  nil
+end
+
+# 节点商的 https DoH（主机名形式，订阅 dns 段自带的那种，例如 https://dns.provider.example:8443/api-query）
+def doh_list(cfg)
+  dns = cfg['dns'].is_a?(Hash) ? cfg['dns'] : {}
+  (Array(dns['proxy-server-nameserver']) + Array(dns['nameserver'])).filter_map do |s|
+    m = s.to_s.strip.match(%r{\Ahttps://([A-Za-z][A-Za-z0-9.-]*)(?::(\d+))?(/[A-Za-z0-9._~/-]*)?\z})
+    m ? [m[0], m[1], (m[2] || '443')] : nil
+  end.uniq
+end
+
+def wire_query(name)
+  q = [rand(65_535), 0x0100, 1, 0, 0, 0].pack('n6')
+  name.split('.').each { |l| q << [l.size].pack('C') << l }
+  q << "\x00".b << [1, 1].pack('n2')
+  [q].pack('m0').tr('+/', '-_').delete('=')
+end
+
+def wire_parse(buf)
+  return [] if buf.nil? || buf.bytesize < 12
+
+  qd, an = buf.unpack('x4n2')
+  pos = 12
+  skip = lambda do
+    loop do
+      len = buf.getbyte(pos)
+      break if len.nil?
+      if len.zero? then pos += 1; break
+      elsif len >= 0xC0 then pos += 2; break
+      else pos += len + 1
+      end
+    end
+  end
+  qd.times { skip.call; pos += 4 }
+  ips = []
+  an.times do
+    skip.call
+    type, _c, _t, len = buf[pos, 10].to_s.unpack('nnNn')
+    break if type.nil?
+
+    pos += 10
+    ips << buf[pos, 4].unpack('C4').join('.') if type == 1 && len == 4
+    pos += len
+  end
+  ips
+rescue StandardError
+  []
+end
+
+def plain_a(name, server = '223.5.5.5')
+  bypass(['nslookup', name, server], 5).scan(/^Address(?: \d+)?:\s*(\d+\.\d+\.\d+\.\d+)\s*$/).flatten.last
+end
+
+def doh_a(name, dohs)
+  dohs.each do |url, host, port|
+    ip = plain_a(host) or next
+    got = wire_parse(bypass(['curl', '-s', '-m', '5', '--resolve', "#{host}:#{port}:#{ip}",
+                             '-H', 'accept: application/dns-message', "#{url}?dns=#{wire_query(name)}"], 8).b)
+    return got.first unless got.empty?
+  end
+  nil
+end
+
+def tcp_ok?(ip, port)
+  t = bypass(['curl', '-s', '-o', '/dev/null', '--connect-timeout', '3', '-m', '4', '-k',
+              '-w', '%{time_connect}', "https://#{ip}:#{port}/"], 6).to_s.strip.to_f
+  t.positive?
+end
+
+def write_atomic(path, text)
+  mode = File.stat(path).mode & 0o7777
+  tmp = "#{path}.mesl-relay-new"
+  created = false
+  File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, mode) do |f|
+    created = true
+    f.write(text)
+    f.flush
+    f.fsync
+  end
+  File.chmod(mode, tmp)
+  File.rename(tmp, path)
+ensure
+  File.unlink(tmp) if created && File.exist?(tmp)
+end
+
+def subscription_path
+  raw = capture(%w[uci -q get openclash.config.config_path], 5).strip
+  raw.empty? ? nil : raw
+end
+
+def cmd_build_map(src, cur)
+  cur ||= subscription_path
+  die('build-map 要给旧副本') unless src && File.file?(src)
+  die("找不到当前订阅 #{cur.inspect}") unless cur && File.file?(cur)
+  now = Array(load_yaml(cur)['proxies']).select { |p| p.is_a?(Hash) }.to_h { |p| [p['name'].to_s, p] }
+  map = {}
+  Array(load_yaml(src)['proxies']).each do |p|
+    next unless p.is_a?(Hash) && (c = now[p['name'].to_s]) && c['type'] == p['type']
+    next if [p['server'].to_s, p['port'].to_i] == [c['server'].to_s, c['port'].to_i]
+
+    map[p['name'].to_s] = { 'type' => p['type'].to_s, 'server' => p['server'].to_s,
+                            'port' => p['port'].to_i, 'sni' => p['sni'].to_s }
+  end
+  die("#{src} 和 #{cur} 的同名节点入口都一样，没有可换的") if map.empty?
+  Dir.mkdir(STATE_DIR, 0o700) unless File.directory?(STATE_DIR)
+  File.write(MAP_FILE, YAML.dump(map))
+  File.chmod(0o600, MAP_FILE)
+  hosts = map.values.map { |v| v['server'] }.tally
+  puts "MAP_OK nodes=#{map.size} hosts=#{hosts.map { |h, n| "#{h}x#{n}" }.join(',')} file=#{MAP_FILE}"
+end
+
+def cmd_hook(path)
+  die('hook 要给运行配置') unless path && File.file?(path)
+  return puts('MESL_RELAY skip reason=disabled') if File.exist?(OFF_FILE)
+
+  cfg = load_yaml(path)
+  return puts('MESL_RELAY skip reason=not_mesl') unless mesl?(cfg)
+
+  map = load_map
+  return puts('MESL_RELAY skip reason=no_map') unless map
+
+  nodes = Array(cfg['proxies']).select { |p| p.is_a?(Hash) }
+  matched = nodes.select { |p| (m = map[p['name'].to_s]) && m['type'] == p['type'].to_s }
+  return puts("MESL_RELAY skip reason=no_match nodes=#{nodes.size}") if matched.empty?
+
+  dohs = doh_list(cfg)
+  return puts('MESL_RELAY skip reason=no_doh') if dohs.empty?
+
+  # 每个中转主机：节点商 DoH 解析，再测两个对照表里的端口
+  ok_hosts = {}
+  report = []
+  matched.map { |p| map[p['name'].to_s]['server'] }.uniq.each do |host|
+    ip = doh_a(host, dohs)
+    ports = matched.map { |p| map[p['name'].to_s] }.select { |m| m['server'] == host }.map { |m| m['port'] }.uniq.first(CHECK_PORTS)
+    up = ip && ports.all? { |pt| tcp_ok?(ip, pt) || tcp_ok?(ip, pt) }
+    ok_hosts[host] = true if up
+    report << "#{host}:#{ip || '-'}:#{up ? 'ok' : 'down'}"
+  end
+  return puts("MESL_RELAY skip reason=all_hosts_down hosts=#{report.join(',')}") if ok_hosts.empty?
+
+  applied = 0
+  matched.each do |p|
+    m = map[p['name'].to_s]
+    next unless ok_hosts[m['server']]
+
+    before = [p['server'], p['port'], p['sni']]
+    p['server'] = m['server']
+    p['port'] = m['port']
+    p['sni'] = m['sni'] unless m['sni'].empty?
+    applied += 1 if before != [p['server'], p['port'], p['sni']]
+  end
+  line = "applied=#{applied} mapped=#{matched.size} nodes=#{nodes.size} hosts=#{report.join(',')}"
+  return puts("MESL_RELAY skip reason=unchanged #{line}") if applied.zero?
+
+  write_atomic(path, YAML.dump(cfg))
+  puts "MESL_RELAY #{line}"
+end
+
+def cmd_status(path)
+  path ||= begin
+    raw = capture(%w[uci -q get openclash.config.config_path], 5).strip
+    raw.empty? ? nil : File.join('/etc/openclash', File.basename(raw))
+  end
+  map = load_map
+  puts "version=#{VERSION}"
+  puts "switch=#{File.exist?(OFF_FILE) ? 'off' : 'on'}"
+  puts "map=#{map ? "#{map.size} nodes #{map.values.map { |v| v['server'] }.tally.map { |h, n| "#{h}x#{n}" }.join(',')}" : 'missing'}"
+  return puts('config=-') unless path && File.file?(path)
+
+  cfg = load_yaml(path)
+  nodes = Array(cfg['proxies']).select { |p| p.is_a?(Hash) }
+  servers = map ? map.values.map { |v| v['server'] }.uniq : []
+  relay = nodes.count { |p| servers.include?(p['server'].to_s) }
+  puts "config=#{path} mesl=#{mesl?(cfg) ? 'yes' : 'no'} relay_nodes=#{relay}/#{nodes.size}"
+end
+
+die('要 root', 2) unless Process.uid.zero?
+case ARGV[0]
+when 'build-map' then cmd_build_map(ARGV[1], ARGV[2])
+when 'hook' then cmd_hook(ARGV[1])
+when 'status' then cmd_status(ARGV[1])
+when 'off'
+  Dir.mkdir(STATE_DIR, 0o700) unless File.directory?(STATE_DIR)
+  File.write(OFF_FILE, "#{Time.now}\n")
+  puts 'MESL_RELAY_OFF 下次生成运行配置时生效'
+when 'on'
+  File.unlink(OFF_FILE) if File.exist?(OFF_FILE)
+  puts 'MESL_RELAY_ON 下次生成运行配置时生效'
+when 'help', nil then puts USAGE
+else
+  warn USAGE
+  exit 2
+end

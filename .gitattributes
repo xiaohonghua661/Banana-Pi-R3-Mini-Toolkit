@@ -10,3 +10,4 @@ docs/官方资料/** -text
 *.jpg binary
 *.pdf binary
 adblock/** text eol=lf
+mesl-relay/** text eol=lf
