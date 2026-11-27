@@ -331,13 +331,14 @@ finally:
             m.main(["verify", "192.0.2.1"])
             connect.assert_called_once_with("192.0.2.1", None)
 
-    def verify_fixture(self, settings, steam):
+    def verify_fixture(self, settings, steam, uu=None):
         local = {path: {"kind": "F", "mode": mode, "value": m.digest(data)} for path, data, mode in m.local_files()}
         manifest = {"runtime": "/etc/openclash/fixture.yaml", "snapshot": {"/etc/config/network": {"kind": "F", "mode": "644", "value": "a" * 64}},
                     "health": {"services": {"openclash": 1}, "core_pid": ["1"]}}
         status = {"ok": True, "enabled": settings["enabled"], "applied": settings["enabled"], "error": None}
         if steam is not None:
             status["steam_direct"] = steam
+        status["uu_direct"] = uu or {"enabled": settings.get("uu_direct", False), "applied": settings.get("uu_direct", False)}
         hook = m.hook_with_block(b"#!/bin/sh\nexit 0\n")
 
         def text(client, command, **kwargs):
@@ -361,7 +362,26 @@ finally:
                 fake["health"].return_value = manifest["health"]
                 if expected.startswith("steam_direct="):
                     m.verify(None, "192.0.2.1", None, manifest)
-                    self.assertIn("VERIFY_OK files=6 enabled=false " + expected, output.getvalue())
+                    self.assertIn("VERIFY_OK files=6 enabled=false " + expected + " uu_direct=false", output.getvalue())
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "^" + expected + "$"):
+                        m.verify(None, "192.0.2.1", None, manifest)
+
+    def test_verify_checks_saved_uu_switch_against_runtime(self):
+        cases = (({"enabled": False, "uu_direct": True}, {"enabled": True, "applied": True}, "uu_direct=true"),
+                 ({"enabled": False, "uu_direct": True}, {"enabled": True, "applied": False}, "LIVE_ROUTING_STATE_MISMATCH"),
+                 ({"enabled": False}, {"enabled": True, "applied": True}, "STATUS_SCHEMA_INVALID"))
+        for settings, uu, expected in cases:
+            manifest, patches, snap, hook, text = self.verify_fixture(settings, {"enabled": False, "applied": False}, uu)
+            output = io.StringIO()
+            with patches as fake, contextlib.redirect_stdout(output):
+                fake["snapshot"].return_value = snap
+                fake["run"].return_value = (0, hook, b"")
+                fake["text"].side_effect = text
+                fake["health"].return_value = manifest["health"]
+                if expected.startswith("uu_direct="):
+                    m.verify(None, "192.0.2.1", None, manifest)
+                    self.assertIn("VERIFY_OK files=6 enabled=false steam_direct=false " + expected, output.getvalue())
                 else:
                     with self.assertRaisesRegex(RuntimeError, "^" + expected + "$"):
                         m.verify(None, "192.0.2.1", None, manifest)
@@ -392,6 +412,8 @@ finally:
             m.luci_checks(None)
         self.assertEqual({k: v for k, v in asked.items() if "steam-direct" in k},
                          {m.CLI + " steam-direct 0": True, m.CLI + " steam-direct 1": True, m.CLI + " steam-direct 2": False})
+        self.assertEqual({k: v for k, v in asked.items() if "uu-direct" in k},
+                         {m.CLI + " uu-direct 0": True, m.CLI + " uu-direct 1": True, m.CLI + " uu-direct 2": False})
         self.assertFalse(asked[m.CLI + " hook x.yaml"])
 
 

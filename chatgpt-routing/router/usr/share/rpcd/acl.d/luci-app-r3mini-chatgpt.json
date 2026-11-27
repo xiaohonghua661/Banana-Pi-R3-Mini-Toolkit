@@ -22,6 +22,8 @@
 				"/usr/sbin/r3mini-chatgpt set-enabled *": [ "exec" ],
 				"/usr/sbin/r3mini-chatgpt steam-direct 0": [ "exec" ],
 				"/usr/sbin/r3mini-chatgpt steam-direct 1": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt uu-direct 0": [ "exec" ],
+				"/usr/sbin/r3mini-chatgpt uu-direct 1": [ "exec" ],
 				"/usr/sbin/r3mini-chatgpt disable": [ "exec" ]
 			},
 			"ubus": {
