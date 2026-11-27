@@ -130,10 +130,10 @@ def text(client, command, **kwargs):
 
 def lan_address(client, host):
     """The address identity() compares with host: network.lan.ipaddr for a static lan. A DHCP lan
-    leaves that unset, so there it is host when br-lan currently holds host as an IPv4, else ''."""
+    leaves that unset, so there it is host when br-lan currently holds host as an IPv4, else None."""
     if text(client, "uci -q get network.lan.proto", check=False) == "dhcp":
         found = re.findall(r"\binet ([0-9.]+)/", text(client, "ip -4 -o addr show dev br-lan", check=False))
-        return host if host in found else ""
+        return host if host in found else None
     return text(client, "uci -q get network.lan.ipaddr", check=False)
 
 

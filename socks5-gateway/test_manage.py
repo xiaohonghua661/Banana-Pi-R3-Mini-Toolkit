@@ -58,6 +58,10 @@ class IdentityTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as caught:
                     m.identity(None, HOST)
                 self.assertEqual(caught.exception.code, "ROUTER_IDENTITY_MISMATCH")
+        with self.subTest("dhcp, empty host and no address"), mock.patch.object(m, "run", side_effect=fake_device(PI5, "dhcp", None, [])):
+            with self.assertRaises(SystemExit) as caught:
+                m.identity(None, "")
+            self.assertEqual(caught.exception.code, "ROUTER_IDENTITY_MISMATCH")
 
     def test_every_command_checks_identity_before_anything_else(self):
         args = mock.Mock(backup=m.STATE + "/install-backup-20261127T012730")

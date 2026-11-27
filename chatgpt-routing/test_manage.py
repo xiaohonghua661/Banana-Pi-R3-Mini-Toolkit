@@ -471,6 +471,9 @@ finally:
             with self.subTest(name), mock.patch.object(m, "run", side_effect=fake_device(board, proto, ipaddr, br_lan)):
                 with self.assertRaisesRegex(RuntimeError, "^ROUTER_IDENTITY_MISMATCH$"):
                     m.identity(device_client(), host)
+        with self.subTest("dhcp, empty host and no address"), mock.patch.object(m, "run", side_effect=fake_device(PI5, "dhcp", None, [])):
+            with self.assertRaisesRegex(RuntimeError, "^ROUTER_IDENTITY_MISMATCH$"):
+                m.identity(device_client(), "")
 
     def test_backup_identity_of_dhcp_pi_matches_on_reconnect(self):
         host = "192.0.2.1"
