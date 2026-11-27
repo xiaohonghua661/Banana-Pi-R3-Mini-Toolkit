@@ -40,6 +40,34 @@ def fixture():
     return archive, manifest
 
 
+R3MINI, PI5 = "bananapi,bpi-r3-mini", "raspberrypi,5-model-b"
+
+
+def fake_device(board, proto, ipaddr, br_lan, mac="88:a2:9e:00:00:01"):
+    """run() stand-in for the identity commands. Unset uci options and a missing br-lan exit 1 like
+    on the device; br-lan lines copy the Pi's real `ip -4 -o addr show dev br-lan` output."""
+    lines = "".join(f"4: br-lan    inet {a}/24 brd 192.0.2.255 scope global br-lan\\       "
+                    "valid_lft forever preferred_lft forever\n" for a in br_lan or ())
+    outputs = {"ubus call system board": (0, json.dumps({"board_name": board})),
+               "uci -q get network.lan.proto": (0, proto) if proto else (1, ""),
+               "uci -q get network.lan.ipaddr": (0, ipaddr) if ipaddr else (1, ""),
+               "ip -4 -o addr show dev br-lan": (0, lines) if br_lan is not None else (1, ""),
+               "cat /sys/class/net/eth0/address": (0, mac)}
+
+    def run(client, command, *, data=None, timeout=45, check=True):
+        code, out = outputs[command]
+        if check and code:
+            m.fail("REMOTE_COMMAND_FAILED")
+        return code, (out + "\n").encode(), b""
+    return run
+
+
+def device_client():
+    client = mock.MagicMock()
+    client.get_transport.return_value.get_remote_server_key.return_value.asbytes.return_value = b"host-key"
+    return client
+
+
 class DeploymentTests(unittest.TestCase):
     def test_fixture_restore_and_hash_tamper(self):
         archive, manifest = fixture()
@@ -415,6 +443,50 @@ finally:
         self.assertEqual({k: v for k, v in asked.items() if "uu-direct" in k},
                          {m.CLI + " uu-direct 0": True, m.CLI + " uu-direct 1": True, m.CLI + " uu-direct 2": False})
         self.assertFalse(asked[m.CLI + " hook x.yaml"])
+
+    def test_identity_accepts_static_r3mini_and_dhcp_or_static_pi(self):
+        host = "192.0.2.1"
+        for board, proto, ipaddr, br_lan in ((R3MINI, "static", host, [host]),
+                                             (PI5, "dhcp", None, ["192.0.2.9", host]),
+                                             (PI5, "static", host, [host])):
+            with self.subTest(board=board, proto=proto), \
+                    mock.patch.object(m, "run", side_effect=fake_device(board, proto, ipaddr, br_lan)):
+                # Same keys as before, so R3 Mini backup manifests made by the old check still match.
+                self.assertEqual(m.identity(device_client(), host),
+                                 {"board": board, "mac": "88:a2:9e:00:00:01", "lan": host,
+                                  "host_key_sha256": m.digest(b"host-key")})
+
+    def test_identity_rejects_wrong_board_or_address(self):
+        host = "192.0.2.1"
+        cases = (("unknown board", "bananapi,bpi-r3mini", "static", host, [host]),
+                 ("dhcp, host not on br-lan", PI5, "dhcp", None, ["192.0.2.9"]),
+                 ("dhcp, host is only a prefix", PI5, "dhcp", None, ["192.0.2.10"]),
+                 ("dhcp, no br-lan", PI5, "dhcp", None, None),
+                 ("dhcp ignores a stale lan.ipaddr", PI5, "dhcp", host, ["192.0.2.9"]),
+                 ("static, lan.ipaddr unset", R3MINI, "static", None, [host]),
+                 ("static, other lan.ipaddr", R3MINI, "static", "192.0.2.9", [host]),
+                 ("static ignores br-lan", PI5, "static", "192.0.2.9", [host]),
+                 ("proto unset is checked like static", R3MINI, None, "192.0.2.9", [host]))
+        for name, board, proto, ipaddr, br_lan in cases:
+            with self.subTest(name), mock.patch.object(m, "run", side_effect=fake_device(board, proto, ipaddr, br_lan)):
+                with self.assertRaisesRegex(RuntimeError, "^ROUTER_IDENTITY_MISMATCH$"):
+                    m.identity(device_client(), host)
+        with self.subTest("dhcp, empty host and no address"), mock.patch.object(m, "run", side_effect=fake_device(PI5, "dhcp", None, [])):
+            with self.assertRaisesRegex(RuntimeError, "^ROUTER_IDENTITY_MISMATCH$"):
+                m.identity(device_client(), "")
+
+    def test_backup_identity_of_dhcp_pi_matches_on_reconnect(self):
+        host = "192.0.2.1"
+        with mock.patch.object(m, "run", side_effect=fake_device(PI5, "dhcp", None, [host])):
+            saved = json.loads(json.dumps(m.identity(device_client(), host)))
+        manifest = {"host": host, "identity": saved, "runtime": "/etc/openclash/fixture.yaml"}
+        with mock.patch.object(m, "load_backup", return_value=(manifest, b"")), \
+                mock.patch.object(m, "runtime_path", return_value=manifest["runtime"]):
+            with mock.patch.object(m, "run", side_effect=fake_device(PI5, "dhcp", None, [host])):
+                self.assertEqual(m.require_backup(device_client(), host, "fixture")[0], manifest)
+            with mock.patch.object(m, "run", side_effect=fake_device(PI5, "dhcp", None, [host], mac="88:a2:9e:00:00:02")):
+                with self.assertRaisesRegex(RuntimeError, "^BACKUP_IDENTITY_MISMATCH$"):
+                    m.require_backup(device_client(), host, "fixture")
 
 
 if __name__ == "__main__":

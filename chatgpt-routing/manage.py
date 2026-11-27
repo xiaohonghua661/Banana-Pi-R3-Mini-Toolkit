@@ -22,6 +22,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 BACKUPS = ROOT / "backups" / "router"
 TZ = timezone(timedelta(hours=8))
+# BPI-R3 Mini routers and the Raspberry Pi 5 side gateway.
+BOARDS = ("bananapi,bpi-r3-mini", "raspberrypi,5-model-b")
 CLI = "/usr/sbin/r3mini-chatgpt"
 BACKEND = "/usr/libexec/r3mini-chatgpt.rb"
 BENCHMARK = "/usr/libexec/r3mini-site-bench.rb"
@@ -126,11 +128,20 @@ def text(client, command, **kwargs):
     return run(client, command, **kwargs)[1].decode("utf-8", "strict").strip()
 
 
+def lan_address(client, host):
+    """The address identity() compares with host: network.lan.ipaddr for a static lan. A DHCP lan
+    leaves that unset, so there it is host when br-lan currently holds host as an IPv4, else None."""
+    if text(client, "uci -q get network.lan.proto", check=False) == "dhcp":
+        found = re.findall(r"\binet ([0-9.]+)/", text(client, "ip -4 -o addr show dev br-lan", check=False))
+        return host if host in found else None
+    return text(client, "uci -q get network.lan.ipaddr", check=False)
+
+
 def identity(client, host):
     board = json.loads(text(client, "ubus call system board"))
-    address = text(client, "uci -q get network.lan.ipaddr")
+    address = lan_address(client, host)
     mac = text(client, "cat /sys/class/net/eth0/address").lower()
-    if board.get("board_name") != "bananapi,bpi-r3-mini" or address != host:
+    if board.get("board_name") not in BOARDS or address != host:
         fail("ROUTER_IDENTITY_MISMATCH")
     if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
         fail("ROUTER_IDENTITY_INVALID")

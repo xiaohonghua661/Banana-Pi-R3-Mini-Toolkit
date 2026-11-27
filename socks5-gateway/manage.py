@@ -23,6 +23,8 @@ from datetime import datetime, timezone, timedelta
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
+# BPI-R3 Mini 和树莓派 5 旁路由。
+BOARDS = ("bananapi,bpi-r3-mini", "raspberrypi,5-model-b")
 CLI = "/usr/sbin/r3mini-socks5"
 BACKEND = "/usr/libexec/r3mini-socks5.rb"
 SERVICE = "/etc/init.d/r3mini-socks5"
@@ -121,10 +123,18 @@ def text(client, command: str, **kwargs) -> str:
     return run(client, command, **kwargs)[1].decode("utf-8", "replace").strip()
 
 
+def lan_address(client, host: str) -> str | None:
+    """identity() 拿来和 host 比的地址：静态 lan 返回 network.lan.ipaddr。lan 走 DHCP 时那一项是空的，
+    这时 br-lan 当前的 IPv4 里有 host 就返回 host，没有就返回 None。"""
+    if text(client, "uci -q get network.lan.proto", check=False) == "dhcp":
+        found = re.findall(r"\binet ([0-9.]+)/", text(client, "ip -4 -o addr show dev br-lan", check=False))
+        return host if host in found else None
+    return text(client, "uci -q get network.lan.ipaddr", check=False)
+
+
 def identity(client, host: str) -> None:
     board = json.loads(text(client, "ubus call system board"))
-    address = text(client, "uci -q get network.lan.ipaddr")
-    if board.get("board_name") != "bananapi,bpi-r3-mini" or address != host:
+    if board.get("board_name") not in BOARDS or lan_address(client, host) != host:
         fail("ROUTER_IDENTITY_MISMATCH")
 
 

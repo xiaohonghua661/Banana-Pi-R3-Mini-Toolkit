@@ -1,6 +1,6 @@
 # socks5-gateway
 
-在 Banana Pi R3 Mini（ImmortalWrt + OpenClash）上开一个带账号密码的 SOCKS5 出口。SOCKS5 由本模块自己的 Mihomo 进程提供（用 OpenClash 的同一个二进制），出口可选 OpenClash 任意一个订阅里的节点，和路由器其他设备用的 OpenClash 配置互不影响。
+在 Banana Pi R3 Mini 或树莓派 5 旁路由（ImmortalWrt + OpenClash）上开一个带账号密码的 SOCKS5 出口。SOCKS5 由本模块自己的 Mihomo 进程提供（用 OpenClash 的同一个二进制），出口可选 OpenClash 任意一个订阅里的节点，和路由器其他设备用的 OpenClash 配置互不影响。
 
 ## 能力
 
@@ -21,6 +21,7 @@
 | `router/usr/share/rpcd/acl.d/luci-app-r3mini-socks5.json` | LuCI 权限 |
 | `router/www/luci-static/resources/view/services/r3mini-socks5.js` | LuCI 页面（部署时改名带内容指纹） |
 | `manage.py` | 部署、核对、回滚 |
+| `test_manage.py` | 部署器的离线测试（身份检查），不连设备 |
 | `test_integration.sh` | 设备上的后端集成测试（真实订阅副本、临时 OpenClash、平移端口，不碰正式实例） |
 | `ui_sandbox.sh` | 设备上的页面测试沙箱（真实订阅、真实 DNS 设置） |
 | `ui_check.py` | 在真实 LuCI 里打开页面、走主要操作、截图（可把视图换成本地文件、把后端换成沙箱） |
@@ -33,7 +34,7 @@ MSYS_NO_PATHCONV=1 python socks5-gateway/manage.py verify 192.168.0.242 --key do
 MSYS_NO_PATHCONV=1 python socks5-gateway/manage.py rollback 192.168.0.242 --key docs/私密/r3mini-242/id_ed25519_242 --backup /etc/r3mini-socks5/install-backup-<时间>
 ```
 
-测试必须在实机环境做：后端集成测试和页面检查的命令见 `../docs/SOCKS5 出口与指定节点.md`「部署、测试、回滚」。
+`python socks5-gateway/test_manage.py` 是部署器的离线测试。其余测试必须在实机环境做：后端集成测试和页面检查的命令见 `../docs/SOCKS5 出口与指定节点.md`「部署、测试、回滚」。
 
 ## 安全边界
 
